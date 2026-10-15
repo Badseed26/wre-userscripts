@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ambrose <-> AroFlo jump
 // @namespace    wre
-// @version      3.8
+// @version      3.9
 // @description  "Open in AroFlo" on Ambrose PO and Tradies Web pages, "Open in Ambrose" on AroFlo tasks, and AroFlo labour hours, job profit and an invoiced-vs-PO-value log on the Ambrose PO list and PO pages
 // @match        https://office.aroflo.com/*
 // @match        https://tradiesadmin.ambroseconstruct.com.au/*
@@ -63,7 +63,9 @@
     return b;
   }
 
-  const open = url => GM_openInTab(url, { active: true, insert: true });
+  // PC: jumps open a new tab. iPhone: same tab, so you don't end up with a pile of Safari tabs.
+  const PHONE = matchMedia('(pointer:coarse)').matches && Math.min(screen.width, screen.height) < 820;
+  const open = url => PHONE ? location.assign(url) : GM_openInTab(url, { active: true, insert: true });
 
   // ======================= Ambrose side: Open in AroFlo =======================
   function gm(opts) {
@@ -783,7 +785,6 @@
   // adopted stylesheet (no node added to the page, so Blazor never sees it) and only on wide screens.
   // On a phone: zoom the page out a bit (lay it out 520px wide via the existing viewport tag, an attribute change
   // only) and narrow the list so the chips get their own strip down the right.
-  const PHONE = matchMedia('(pointer:coarse)').matches && Math.min(screen.width, screen.height) < 820;
   const PHONE_W = 520, PHONE_STRIP = 150;
   let shiftSheet = null, vpOrig = null;
   function shiftLayout(on) {
