@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ambrose <-> AroFlo jump
 // @namespace    wre
-// @version      3.6
+// @version      3.7
 // @description  "Open in AroFlo" on Ambrose PO and Tradies Web pages, "Open in Ambrose" on AroFlo tasks, and AroFlo labour hours, job profit and an invoiced-vs-PO-value log on the Ambrose PO list and PO pages
 // @match        https://office.aroflo.com/*
 // @match        https://tradiesadmin.ambroseconstruct.com.au/*
@@ -227,6 +227,115 @@
   const STREET_RE = /\b\d+[A-Za-z]?\/?\d*\s+([A-Z][A-Za-z']+(?:\s[A-Z][A-Za-z']+)*)\s+(?:Street|St|Road|Rd|Drive|Dr|Avenue|Ave|Court|Ct|Place|Pl|Crescent|Cres|Terrace|Tce|Close|Cl|Parade|Pde|Way|Lane|Ln|Circuit|Cct|Boulevard|Blvd|Highway|Hwy|Grove|Gr|Esplanade)\b/;
   const isLive = st => !/invoic|archiv|cancel/i.test(st);
 
+  // task rows off AroFlo's task list page (the index and the description search both come back as this page)
+  function taskRows(html) {
+    const d = new DOMParser().parseFromString(html, 'text/html');
+    return [...d.querySelectorAll('tr.rowPreview[data-preview-id]')].map(tr => {
+      const c = [...tr.querySelectorAll('td')].map(x => clean(x.textContent)).filter(Boolean);
+      const links = [...tr.querySelectorAll('a')].map(a => a.getAttribute('href') || '');
+      const a = links.find(h => /workrequest/.test(h) && !/printview/.test(h));
+      const inv = links.find(h => /invoicing\/index\.cfm/.test(h) && /viewexist=1/.test(h)); // only there once a task has an invoice
+      return { id: tr.getAttribute('data-preview-id'), jn: c[1], name: c[4] || '', status: c[c.length - 1] || '', href: a || '', inv: inv || '' };
+    }).filter(t => t.id && /^\d+$/.test(t.jn || ''));
+  }
+
+  // ---------- phone mode ----------
+  // On the iPhone, Safari won't hand AroFlo's newer sign-in (the /cf-api one) to Tampermonkey, so every cf-api
+  // call comes back 401 even while you're logged in. The older AroFlo pages still work there, so when cf-api
+  // says no we read the same things off those instead:
+  //   full PO check: AroFlo's own task search on the description (one search per PO)
+  //   labour hours and materials: the task page's costing table (same figures cf-api gives, checked on 3 jobs)
+  //   invoices: the task's invoice page, which only exists once the task has an invoice
+  // The invoice log needs the cf-api invoice feed, so it stays on the PC. Phone mode also skips the background
+  // warm-up and only reads rows near the screen, since each task page is a big download on mobile data.
+  let classic = null, classicT = 0, classicProbe = null;
+  function isClassic() {
+    if (classic !== null && !(classic && Date.now() - classicT > 5 * 60000)) return Promise.resolve(classic);
+    if (!classicProbe) classicProbe = gm({ method: 'GET', url: AF + '/cf-api/businessunits/', headers: { accept: 'application/json' } })
+      .then(r => { let j = null; try { j = JSON.parse(r.responseText); } catch (e) {} classic = !(j && j.items && j.items.length); classicT = Date.now(); return classic; })
+      .catch(() => { if (classic === null) classic = false; return classic; }) // AroFlo unreachable: leave it to the normal errors
+      .finally(() => { classicProbe = null; });
+    return classicProbe;
+  }
+  const signedOut = html => /name=["']?password|loginForm/i.test(html) && !/rowPreview|afDataTable/.test(html);
+  const descCache = {}; // full PO -> { t, rows }
+  async function descSearch(po) {
+    const c = descCache[po];
+    if (c && Date.now() - c.t < HRS_FRESH) return c.rows;
+    const body = new URLSearchParams({ gsfilter: '', tid: 'IMS.STK.CUR', client_id: '0', searchString: po, SearchParam: 'Desc', search: 'Search', search_btn: 'Search', searchallBU_home: 'on', selpage: '1', startrow: '1', maxrows: '50', changeview: '-3' }).toString();
+    const r = await gm({ method: 'POST', url: AF + '/ims/Site/Service/managetasks/index.cfm', data: body, headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+    if (signedOut(r.responseText)) throw new Error('AroFlo is signed out. Open AroFlo, sign in, then try again');
+    const rows = taskRows(r.responseText);
+    descCache[po] = { t: Date.now(), rows };
+    return rows;
+  }
+  const money = v => +String(v).replace(/[^0-9.\-]/g, '') || 0;
+  async function fetchLabourClassic(id) {
+    const t = idx && idx.tasks.find(x => x.id === id);
+    if (!t || !t.href) throw new Error('no AroFlo link for that task');
+    const r = await gm({ method: 'GET', url: AF + t.href });
+    if (signedOut(r.responseText)) throw new Error('AroFlo is signed out. Open AroFlo, sign in, then try again');
+    const d = new DOMParser().parseFromString(r.responseText, 'text/html');
+    let hrs = 0, mat = 0, exp = 0, got = false;
+    // open jobs: the Progress box ("Labour 4.00 hrs", "Material $110.00", "Expense $0.00"). cf-api's cost figure is
+    // materials plus expenses, so the same here.
+    const lines = d.body.innerText.split(/\n+/).map(clean).filter(Boolean);
+    const pi = lines.indexOf('Progress');
+    if (pi >= 0) {
+      const box = lines.slice(pi + 1, pi + 8);
+      const lab = box.find(l => /^Labour\s+[\d.]+\s*hrs?$/i.test(l)), m = box.find(l => /^Material\s+\$/i.test(l)), e = box.find(l => /^Expense\s+\$/i.test(l));
+      if (lab) { got = true; hrs = +lab.match(/[\d.]+/)[0]; mat = (m ? money(m.replace(/^Material/i, '')) : 0) + (e ? money(e.replace(/^Expense/i, '')) : 0); }
+    }
+    // finished jobs: the costing table, one row per timesheet line and material
+    if (!got) {
+      const th = [...d.querySelectorAll('th,td')].find(x => /^Total Ex\(Cost\)$/.test(clean(x.textContent)));
+      if (!th) throw new Error('couldn\'t read the costs on JN ' + t.jn);
+      const heads = [...th.parentElement.children].map(x => clean(x.textContent));
+      const iCost = heads.indexOf('Total Ex(Cost)');
+      let sec = '';
+      for (const tr of th.closest('table').querySelectorAll('tr')) {
+        const cells = [...tr.children].map(x => clean(x.textContent));
+        if (cells.length <= 2) { const h = cells.join(''); if (/^(Labour|Material|Expense|Totals)/.test(h)) sec = h.split(' ')[0]; continue; }
+        if (cells.length !== heads.length) continue; // subtotal and total rows
+        if (sec === 'Labour') { const hm = cells.join(' ').match(/\b([\d.]+)\s*Hrs?\s*@/i); if (hm) hrs += +hm[1]; }
+        else if (sec === 'Material' || sec === 'Expense') mat += money(cells[iCost]);
+      }
+    }
+    // open jobs link their invoice list as "Invoices (2)"; finished ones only have the invoice link on the task list
+    const il = [...d.querySelectorAll('a')].find(a => /^Invoices \(\d+\)$/.test(clean(a.textContent)));
+    const invList = il && +clean(il.textContent).replace(/\D/g, '') > 0 ? il.getAttribute('href') : '';
+    hrs = Math.round(hrs * 100) / 100;
+    hrsCache[id] = { t: Date.now(), v: hrs, mat: Math.round(mat * 100) / 100, invN: invList || t.inv ? 1 : 0, exp, pos: (hrsCache[id] && hrsCache[id].pos) || [], classic: true, invList };
+    saveHrs();
+    return hrs;
+  }
+  // a task's invoices, as [{ n, st, ex }]. Open jobs: the "Invoices (2)" list (a table: Inv. No, Description,
+  // Inv. Date, Status, Total Ex.). Finished jobs: the invoice page off the task list, which shows each invoice as
+  // "Status <st> Invoice <n> Date <d> Total Ex. $ <amount>" and then the task totals.
+  async function invoicesClassic(t, h) {
+    const url = (h && h.invList) || t.inv;
+    if (!url) return [];
+    const r = await gm({ method: 'GET', url: AF + url });
+    if (signedOut(r.responseText)) throw new Error('AroFlo is signed out. Open AroFlo, sign in, then try again');
+    const d = new DOMParser().parseFromString(r.responseText, 'text/html');
+    const th = [...d.querySelectorAll('th,td')].find(x => clean(x.textContent) === 'Inv. No');
+    if (th) {
+      const heads = [...th.parentElement.children].map(x => clean(x.textContent));
+      const iSt = heads.indexOf('Status'), iEx = heads.indexOf('Total Ex.');
+      return [...th.closest('table').rows].map(row => [...row.cells].map(c => clean(c.textContent)))
+        .filter(c => /^\d+$/.test(c[0]) && c.length === heads.length).map(c => ({ n: c[0], st: c[iSt], ex: money(c[iEx]) }));
+    }
+    const lines = d.body.innerText.split(/\n+/).map(clean).filter(Boolean);
+    const out = []; let cur = null;
+    for (let i = 0; i < lines.length - 1; i++) {
+      const l = lines[i], nx = lines[i + 1];
+      if (l === 'Status') cur = { st: nx };
+      else if (cur && l === 'Invoice' && /^\d+$/.test(nx)) cur.n = nx;
+      else if (cur && cur.n && l === 'Total Ex.' && cur.ex == null) { cur.ex = money(nx); out.push(cur); cur = null; }
+    }
+    return out;
+  }
+
   // --- the task index ---
   let idx = gmGet('wreIdx', null); // { t, tasks: [{id, jn, name, status, href}] }
   let idxLoading = null, idxGen = 0;
@@ -234,12 +343,7 @@
     const body = new URLSearchParams({ gsfilter: '', tid: 'IMS.STK.CUR', client_id: '0', searchString: 'Ambrose', SearchParam: 'Client', search: 'Search', search_btn: 'Search', searchallBU_home: 'on', selpage: '1', startrow: '1', maxrows: '2000', changeview: '-3' }).toString();
     const r = await gm({ method: 'POST', url: AF + '/ims/Site/Service/managetasks/index.cfm', data: body, headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
     if (/name=["']?password|loginForm/i.test(r.responseText) && !/rowPreview/.test(r.responseText)) throw new Error('AroFlo is signed out. Open AroFlo, sign in, then try again');
-    const d = new DOMParser().parseFromString(r.responseText, 'text/html');
-    const tasks = [...d.querySelectorAll('tr.rowPreview[data-preview-id]')].map(tr => {
-      const c = [...tr.querySelectorAll('td')].map(x => clean(x.textContent)).filter(Boolean);
-      const a = [...tr.querySelectorAll('a')].find(a => /workrequest/.test(a.getAttribute('href') || '') && !/printview/.test(a.getAttribute('href')));
-      return { id: tr.getAttribute('data-preview-id'), jn: c[1], name: c[4] || '', status: c[c.length - 1] || '', href: a ? a.getAttribute('href') : '' };
-    }).filter(t => t.id && /^\d+$/.test(t.jn || ''));
+    const tasks = taskRows(r.responseText);
     if (!tasks.length) throw new Error('AroFlo sent back an empty task list');
     idx = { t: Date.now(), tasks };
     gmSet('wreIdx', idx);
@@ -248,6 +352,7 @@
     return idx;
   }
   function ensureIndex() {
+    if (idx && classic && idx.tasks.length && !('inv' in idx.tasks[0])) idx.t = 0; // pre-3.7 index, no invoice links
     if (idx && Date.now() - idx.t < IDX_FRESH) return Promise.resolve(idx);
     if (!idxLoading) idxLoading = fetchIndex().finally(() => { idxLoading = null; });
     return idx && Date.now() - idx.t < IDX_MAX ? Promise.resolve(idx) : idxLoading; // stale index is fine to start with
@@ -279,7 +384,11 @@
     let near = idx.tasks.filter(t => t.name.startsWith(base)), how = 'po';
     if (!near.length && street) { const re = new RegExp('\\b' + street.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'i'); near = idx.tasks.filter(t => re.test(t.name)).slice(0, 8); how = 'street'; }
     const hits = [];
-    for (const t of near) if ((await taskPos(t)).includes(po)) hits.push(t);
+    if (await isClassic()) { // phone: let AroFlo search the descriptions for the full PO
+      const rows = await enqueue(() => descSearch(po), true);
+      rows.forEach(r => hits.push(idx.tasks.find(t => t.id === r.id) || r));
+      if (hits.length) how = 'po';
+    } else for (const t of near) if ((await taskPos(t)).includes(po)) hits.push(t);
     let tasks = hits, note = '', noteFull = '';
     const live = hits.filter(t => isLive(t.status));
     if (live.length) tasks = live;
@@ -296,6 +405,7 @@
   let hrsDirty = 0;
   const saveHrs = () => { clearTimeout(hrsDirty); hrsDirty = setTimeout(() => gmSet('wreHrs', hrsCache), 800); };
   async function fetchLabour(id) {
+    if (await isClassic()) return fetchLabourClassic(id);
     const r = await gm({ method: 'GET', url: AF + '/cf-api/tasks/' + id, headers: { accept: 'application/json' } });
     let j; try { j = JSON.parse(r.responseText); } catch (e) { throw new Error('AroFlo task lookup failed (' + r.status + ')'); }
     const v = j && j.counts && j.counts.labour;
@@ -328,13 +438,16 @@
     let h = hrsCache[t.id];
     if (!h || Date.now() - h.t > HRS_FRESH) { await fetchLabour(t.id); h = hrsCache[t.id]; }
     let inv = 0, invN = 0;
-    if (h.invN > 0) {
+    if (h.classic) { // phone: invoices off the older AroFlo pages (links are only good for this session, so keep them fresh)
+      if (Date.now() - h.t > 60000) { await fetchLabourClassic(t.id); h = hrsCache[t.id]; }
+      (await invoicesClassic(t, h)).forEach(i => { if (!/void|cancel|delet/i.test(i.st || '')) { inv += i.ex; invN++; } });
+    } else if (h.invN > 0) {
       const u = AF + '/cf-api/internal/invoices?' + new URLSearchParams({ businessUnitId: await businessUnit(), taskId: t.id, zoneName: 'TASK', allStatus: '1', userBuAccessType: 'thisbu' });
       const r = await gm({ method: 'GET', url: u, headers: { accept: 'application/json' } });
       const j = JSON.parse(r.responseText);
       (j.items || []).forEach(i => { if (!/void|cancel|delet/i.test(i.status || '')) { inv += +(i.totalAmountEx || 0); invN++; } });
     }
-    const r = { t: Date.now(), cost: Math.round((h.v * COST_RATE + h.mat) * 100) / 100, inv, invN, exp: h.exp || 0, hrs: h.v, mat: h.mat };
+    const r = { t: Date.now(), cost: Math.round((h.v * COST_RATE + h.mat) * 100) / 100, inv, invN, exp: h.exp || 0, hrs: h.v, mat: h.mat, phone: !!h.classic };
     profCache[t.id] = r;
     saveProf();
     return r;
@@ -343,7 +456,7 @@
   function profitText(pr) {
     if (!pr) return null;
     const how = 'cost ' + fmt$(pr.cost) + ' ex (' + pr.hrs + ' hrs at $' + COST_RATE + ' plus ' + fmt$(pr.mat) + ' materials)' + (pr.exp ? '. ' + pr.exp + ' expense' + (pr.exp > 1 ? 's' : '') + ' on the task not counted' : '');
-    if (!pr.invN) return { kind: 'none', text: fmt$(pr.cost) + ' cost', title: 'Nothing invoiced on this task yet. ' + how };
+    if (!pr.invN) return { kind: 'none', text: fmt$(pr.cost) + ' cost', title: (pr.phone ? 'No invoice AroFlo shows the phone (part invoices on open jobs only show on the PC). ' : 'Nothing invoiced on this task yet. ') + how };
     const p = pr.inv - pr.cost, pct = pr.inv ? Math.round(p / pr.inv * 100) : 0;
     return { kind: p >= 0 ? 'good' : 'bad', text: (p >= 0 ? '+' : '') + fmt$(p) + ' (' + pct + '%)', title: 'Invoiced ' + fmt$(pr.inv) + ' ex across ' + pr.invN + ' invoice' + (pr.invN > 1 ? 's' : '') + ', ' + how + '. Whole task, not just this PO.' };
   }
@@ -404,7 +517,7 @@
   // after the rows on screen are done, quietly warm every live Ambrose task so the next pages are instant
   let warmed = 0;
   function warmAll() {
-    if (!idx || Date.now() - warmed < PROF_FRESH) return;
+    if (!idx || classic !== false || Date.now() - warmed < PROF_FRESH) return;
     warmed = Date.now();
     idx.tasks.filter(t => isLive(t.status) && !(profCache[t.id] && Date.now() - profCache[t.id].t < PROF_FRESH))
       .forEach(t => enqueue(() => fetchProfit(t), false).catch(() => {}));
@@ -455,6 +568,7 @@
   }
   let feedBusy = null;
   function refreshFeed(onStatus) {
+    if (classic) return Promise.reject(new Error('the invoice log only works on the PC'));
     if (feedBusy) return feedBusy;
     if (log.full && Date.now() - log.feedT < FEED_FRESH) return ensureIndex().then(() => {}, () => {});
     feedBusy = (async () => {
@@ -629,6 +743,7 @@
   const INV_COL = { none: '#777', open: '#e8731a', over: '#b3261e', done: '#2e7d32' };
   function paintInvoice(b, po) {
     const c3 = b._c3; if (!c3 || !po) return;
+    if (classic !== false) { c3.style.display = 'none'; c3._k = ''; return; } // phone (or not known yet): no log
     if (!log.full || !idx) { if (c3._k !== 'b') { c3._k = 'b'; c3.style.display = ''; c3.style.background = INV_COL.none; c3.textContent = 'log building...'; c3.title = 'First run: reading every Ambrose invoice out of AroFlo. About 20 seconds, once.'; } return; }
     const x = poPosition(po), k = x.kind + '|' + x.text + '|' + logVer + '|' + idxGen;
     if (c3._k === k) return;
@@ -658,8 +773,8 @@
       if (r.pr) { c2.style.display = ''; c2.style.background = COL[r.pr.kind] || COL.none; c2.textContent = r.pr.text; c2.title = r.pr.title; }
       else c2.style.display = 'none';
     };
-    b._gen = idxGen;
-    labourFor(base, street, b._update);
+    b._gen = -1; // started by paintLabour once we know the mode (and, on the phone, once it's near the screen)
+    b._street = street;
     return b;
   }
 
@@ -682,9 +797,11 @@
       return;
     }
     shiftLayout(true);
+    if (classic === null) isClassic();
     if (layer.isConnected && log.full && Date.now() - log.feedT > FEED_FRESH && !feedBusy) refreshFeed().then(() => badges.forEach((b, r) => paintInvoice(b, (rowText(r).match(/^(\d{8}-\d{2,3})/) || [])[1]))).catch(() => {});
     if (!layer.isConnected) { ui().append(layer); refreshFeed().then(() => badges.forEach((b, r) => paintInvoice(b, (rowText(r).match(/^(\d{8}-\d{2,3})/) || [])[1]))).catch(() => {}); }
-    if (!logBtn.isConnected) ui().append(logBtn);
+    if (classic === false && !logBtn.isConnected) ui().append(logBtn);
+    if (classic && logBtn.isConnected) logBtn.remove();
     const rows = [...document.querySelectorAll('tbody tr')].filter(r => !r.closest('#wre-log') && /^\d{8}\b/.test(rowText(r)));
     const seen = new Set();
     const table = rows[0] && rows[0].closest('table');
@@ -699,8 +816,9 @@
       let b = badges.get(r);
       if (!b || b._base !== base) { if (b) { b._gone = true; const e = live.get(b._base); if (e) e.subs.delete(b._update); b.remove(); } b = makeBadge(base, sm ? sm[1] : ''); badges.set(r, b); layer.append(b); }
       seen.add(r);
-      if (b._gen !== idxGen) { b._gen = idxGen; labourFor(base, sm ? sm[1] : '', b._update); }
       const rr = r.getBoundingClientRect();
+      const near = classic === false || (classic && rr.bottom > -innerHeight && rr.top < 2 * innerHeight);
+      if (b._gen !== idxGen && near) { b._gen = idxGen; labourFor(base, sm ? sm[1] : '', b._update); }
       paintInvoice(b, full);
       b.style.top = Math.round(rr.top + scrollY + rr.height / 2 - 10) + 'px';
       b.style.left = Math.round((roomRight ? tr.right + 8 : rr.right - b.offsetWidth - 6) + scrollX) + 'px';
@@ -726,7 +844,7 @@
   panel.style.cssText = 'position:fixed;right:18px;bottom:60px;z-index:2147483645;max-width:360px;background:#fff;color:#222;border-radius:6px;box-shadow:0 2px 12px rgba(0,0,0,.35);font:13px/1.45 sans-serif;overflow:hidden';
   function paintPanel() {
     const po = capturePoPage();
-    if (!po) { if (panel.isConnected) panel.remove(); return; }
+    if (!po || classic !== false) { if (panel.isConnected) panel.remove(); return; }
     if (!panel.isConnected || (log.full && Date.now() - log.feedT > FEED_FRESH && !feedBusy)) { if (!panel.isConnected) ui().append(panel); refreshFeed().then(() => { panel._k = ''; paintPanel(); }).catch(() => {}); }
     if (!log.full || !idx) { if (panel._k !== 'b') { panel._k = 'b'; panel.textContent = ''; const h = document.createElement('div'); h.style.cssText = 'padding:8px 12px;background:#4b4540;color:#fff;font-weight:600'; h.textContent = 'Invoice log: building, about 20 seconds'; panel.append(h); } return; }
     const x = poPosition(po), k = po + '|' + x.kind + '|' + x.text + '|' + logVer + '|' + idxGen;
@@ -754,6 +872,7 @@
 
   setInterval(() => {
     if (document.hidden) return;
+    if (classic === null) isClassic(); // PC or phone mode, worked out once per page
     const w = wanted();
     if (w && !btn.isConnected) ui().append(btn);
     if (!w && btn.isConnected) { btn.remove(); byId('wre-jump-pick')?.remove(); }
