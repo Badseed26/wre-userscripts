@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Calendar NPT
 // @namespace    wre
-// @version      2.3
+// @version      2.4
 // @description  Notes, photos and timesheet badges on the AroFlo calendar for the days in view, kept in step with the WRE daily check issue list in Todoist
 // @match        https://office.aroflo.com/ims/Site/Calendar/*
 // @grant        GM_xmlhttpRequest
@@ -94,7 +94,7 @@
 
   // Notes: {date: [authors]}
   async function readNotes(E) {
-    const t = textOf(await get('/ims/Site/Service/Notes/AJAX_HTML_get_notes.cfm?dateorder=0&last3notes=0&isLoaded=1&wrCoded=' + E));
+    const t = textOf(await get('/ims/Site/Service/Notes/AJAX_HTML_get_notes.cfm?dateorder=0&last3notes=0&isLoaded=1&wrCoded=' + encodeURIComponent(E)));
     const d = {}, re = /\b(\d{1,2}) ([A-Z][a-z]+) (20\d\d) \d{1,2}:\d{2}[ap]m ([A-Z][\w'-]+ [A-Z][\w'-]+)/g;
     let m;
     while ((m = re.exec(t))) {
@@ -107,7 +107,7 @@
 
   // Labour: {date: ['L Buckley']}
   async function readLabour(E) {
-    const rows = textOf(await get('/ims/Site/Resource/Jobsheet/AJAX/view_jobsheet.cfm?wrCoded=' + E), true);
+    const rows = textOf(await get('/ims/Site/Resource/Jobsheet/AJAX/view_jobsheet.cfm?wrCoded=' + encodeURIComponent(E)), true);
     const d = {};
     rows.forEach(r => {
       if (r.length > 300 || !/Hrs @/.test(r)) return;
@@ -123,7 +123,7 @@
   // Photos: {date: {uploader: count}}, newest first, back to `from`.
   // AroFlo sends about 10 KB per file row whatever columns are asked for, so read as few rows as possible:
   // a tiny first page (often enough), then bigger pages, and stop as soon as every visit in view has a crew photo.
-  const docUrl = (E, rows, page) => '/ims/Site/Documents/AJAX_JSON_search_documents.cfm?searchdocumenttype=task&idcoded=' + E +
+  const docUrl = (E, rows, page) => '/ims/Site/Documents/AJAX_JSON_search_documents.cfm?searchdocumenttype=task&idcoded=' + encodeURIComponent(E) +
     '&customfield_id=0&columns=' + DOC_COLS + '&category_id=0&searchTaskBUs=childbus&_search=true&rows=' + rows + '&page=' + page +
     '&sidx=datetimeinserted&sord=desc';
   async function readPhotos(E, from, P, force, want) {
@@ -589,6 +589,108 @@
     GM_setValue('syncPaused', !paused()); sy.msg = paused() ? 'list paused' : 'list on'; sy.bad = false;
     header(lastJobs, false); if (!paused()) sync();
   });
+
+  // ---------- iPhone: one tap opens a booking, and the popup shows that day's notes, photos and timesheets ----------
+  // AroFlo's calendar (FullCalendar 1.5) only wires up a booking's click handler on its first mouseover, which a
+  // phone fakes unreliably, so taps mostly do nothing. On a phone we take the tap ourselves and call AroFlo's own
+  // booking click, then drop a box into the popup with what the crew put in that day.
+  const PHONE = matchMedia('(pointer:coarse)').matches && Math.min(screen.width, screen.height) < 820;
+  const eventFor = el => { for (const o of R.values()) if (o.el && o.el[0] === el) return o.ev; return null; };
+  const noteText = n => { // keep the line breaks from the note's HTML, drop the rest
+    const c = n.cloneNode(true);
+    c.querySelectorAll('br').forEach(b => b.replaceWith('\n'));
+    c.querySelectorAll('p,div,li').forEach(b => b.append('\n'));
+    return c.textContent.replace(/[ \t]+/g, ' ').replace(/\n\s*\n+/g, '\n').trim();
+  };
+  const dayOfNote = s => { const m = String(s).match(/(\d{1,2}) ([A-Z][a-z]+) (20\d\d)/); return m && MON[m[2]] ? m[3] + '-' + p2(MON[m[2]]) + '-' + p2(m[1]) : null; };
+  async function dayInfo(wrid, date) {
+    const E = await code(wrid), e = encodeURIComponent(E);
+    const [nh, lh] = await Promise.all([
+      get('/ims/Site/Service/Notes/AJAX_HTML_get_notes.cfm?dateorder=0&last3notes=0&isLoaded=1&wrCoded=' + e),
+      get('/ims/Site/Resource/Jobsheet/AJAX/view_jobsheet.cfm?wrCoded=' + e),
+    ]);
+    const nd = new DOMParser().parseFromString(nh, 'text/html');
+    const notes = [...nd.querySelectorAll('.noteItem')].map(it => {
+      const h = [...it.querySelectorAll('h3')].map(x => x.textContent.replace(/\s+/g, ' ').trim());
+      const body = it.querySelector('.noteOutput');
+      return { when: h[0] || '', who: h[1] || '', text: body ? noteText(body) : '' };
+    }).filter(n => dayOfNote(n.when) === date);
+    const ld = new DOMParser().parseFromString(lh, 'text/html');
+    const time = [];
+    ld.querySelectorAll('tr').forEach(r => {
+      const c = [...r.children].map(x => x.textContent.replace(/\s+/g, ' ').trim());
+      const det = c.find(x => /Hrs @/.test(x)), d = c.map(dmy).filter(Boolean).pop();
+      if (det && d === date) time.push({ who: c[2] || '', det });
+    });
+    const photos = [];
+    for (let page = 1; page <= 4; page++) { // newest first: stop once we're past that day
+      const j = await get(docUrl(E, 40, page), true), rows = j.rows || [];
+      let older = false;
+      for (const x of rows) {
+        const ins = dmy(strip(x.datetimeinserted)), tk = dmy(strip(x.imgdatetimetaken));
+        if (ins && ins < date) { older = true; continue; }
+        if (!PHOTO.test(x.documentname || strip(x.document))) continue;
+        if (ins === date || tk === date) photos.push({ thumb: x.timedlinkthumbnailsmall, big: x.timedlinkoriginal || x.timedlinkthumbnaillarge, by: strip(x.uploadedby), name: x.documentname || '' });
+      }
+      if (older || rows.length < 40) break;
+    }
+    return { notes, time, photos };
+  }
+  function infoCss() {
+    if (document.getElementById('wre-day-css')) return;
+    const s = document.createElement('style'); s.id = 'wre-day-css';
+    s.textContent = '.wre-day{margin:0 0 10px;padding:10px 12px;background:#f7f4f1;border-left:4px solid #e8731a;border-radius:6px;font:15px/1.4 Arial,sans-serif;color:#222}' +
+      '.wre-day h4{margin:0 0 6px;font:700 16px Arial,sans-serif}.wre-day h5{margin:10px 0 4px;font:700 14px Arial,sans-serif;color:#4b4540}' +
+      '.wre-day .n{margin:0 0 8px;white-space:pre-line}.wre-day .n small,.wre-day .t small,.wre-day .muted{color:#777}' +
+      '.wre-day .ph{display:flex;gap:6px;overflow-x:auto;padding-bottom:4px;-webkit-overflow-scrolling:touch}.wre-day .ph a{flex:0 0 auto}' +
+      '.wre-day .ph img{height:96px;width:auto;border-radius:4px;display:block;background:#ddd}.wre-day .t{margin:2px 0}';
+    document.head.appendChild(s);
+  }
+  let curBox = null;
+  async function openVisit(ev) {
+    W.fullcalEventClick(ev);
+    infoCss();
+    const date = ymd(new Date(ev.start));
+    const box = document.createElement('div'); box.className = 'wre-day';
+    box.innerHTML = '<h4>' + esc(new Date(ev.start).toLocaleDateString('en-AU', { weekday: 'short', day: 'numeric', month: 'numeric' }) + ' on site') + '</h4><div class="muted">Loading notes, photos and timesheets...</div>';
+    // AroFlo fills the popup in after it opens, so keep our box at the top of it for a few seconds
+    let tries = 0;
+    curBox = box;
+    const place = () => {
+      if (curBox !== box) return; // another booking's been opened since
+      const dlg = [...document.querySelectorAll('.ui-dialog')].find(d => d.offsetParent && d.style.display !== 'none');
+      const body = dlg && dlg.querySelector('.ui-dialog-content');
+      if (body && body.firstChild !== box) body.prepend(box);
+      if (++tries < 40) setTimeout(place, 250);
+    };
+    place();
+    let info;
+    try { info = await dayInfo(ev.wrid, date); } catch (e) { box.querySelector('.muted').textContent = "Couldn't read it: " + e.message; return; }
+    const h = [];
+    h.push('<h5>Notes</h5>' + (info.notes.length ? info.notes.map(n => '<div class="n"><small>' + esc(n.who + ', ' + (n.when.match(/\d{1,2}:\d{2}[ap]m/) || [''])[0]) + '</small><br>' + esc(n.text) + '</div>').join('') : '<div class="muted">None that day</div>'));
+    h.push('<h5>Photos (' + info.photos.length + ')</h5>' + (info.photos.length ? '<div class="ph">' + info.photos.map(p => '<a href="' + esc(p.big) + '" target="_blank" rel="noopener"><img loading="lazy" src="' + esc(p.thumb) + '" alt="' + esc(p.name) + '"></a>').join('') + '</div><div class="muted">' + esc([...new Set(info.photos.map(p => first(p.by)))].join(', ')) + '</div>' : '<div class="muted">None that day</div>'));
+    h.push('<h5>Timesheets</h5>' + (info.time.length ? info.time.map(t => '<div class="t">' + esc(t.who) + ' <small>' + esc(t.det) + '</small></div>').join('') : '<div class="muted">None that day</div>'));
+    box.innerHTML = box.querySelector('h4').outerHTML + h.join('');
+  }
+  if (PHONE) {
+    let t0 = null;
+    document.addEventListener('touchstart', e => {
+      const el = e.target.closest && e.target.closest('.fc-event');
+      t0 = el && e.touches.length === 1 && !e.target.closest('.wre-npt') ? { el, x: e.touches[0].clientX, y: e.touches[0].clientY, at: Date.now() } : null;
+    }, { capture: true, passive: true });
+    document.addEventListener('touchmove', e => {
+      if (t0 && Math.hypot(e.touches[0].clientX - t0.x, e.touches[0].clientY - t0.y) > 10) t0 = null; // a scroll, not a tap
+    }, { capture: true, passive: true });
+    document.addEventListener('touchend', e => {
+      const s = t0; t0 = null;
+      if (!s || Date.now() - s.at > 700 || typeof W.fullcalEventClick !== 'function') return;
+      const ev = eventFor(s.el);
+      if (!ev) return; // not a task booking: leave it to AroFlo
+      e.preventDefault(); // no fake mouse events after this, so AroFlo doesn't open it twice
+      e.stopPropagation();
+      openVisit(ev).catch(() => {});
+    }, { capture: true, passive: false });
+  }
 
   // ---------- hooking into the calendar ----------
   let scanT;
