@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ambrose <-> AroFlo jump
 // @namespace    wre
-// @version      3.7
+// @version      3.8
 // @description  "Open in AroFlo" on Ambrose PO and Tradies Web pages, "Open in Ambrose" on AroFlo tasks, and AroFlo labour hours, job profit and an invoiced-vs-PO-value log on the Ambrose PO list and PO pages
 // @match        https://office.aroflo.com/*
 // @match        https://tradiesadmin.ambroseconstruct.com.au/*
@@ -758,7 +758,8 @@
     b._base = base;
     b.style.cssText = 'position:absolute;white-space:nowrap;font:600 12px/20px sans-serif;color:#fff;border-radius:10px;padding:0 9px;background:' + COL.wait + ';cursor:default;box-shadow:0 1px 4px rgba(0,0,0,.3)';
     b.style.background = 'none'; b.style.boxShadow = 'none'; b.style.padding = '0';
-    const chip = (bg) => { const c = document.createElement('span'); c.style.cssText = 'display:inline-block;border-radius:10px;padding:0 9px;margin-left:4px;background:' + bg + ';box-shadow:0 1px 4px rgba(0,0,0,.3)'; return c; };
+    if (PHONE) b.style.cssText += ';display:flex;flex-direction:column;align-items:flex-start;gap:3px;font-size:13px';
+    const chip = (bg) => { const c = document.createElement('span'); c.style.cssText = 'display:inline-block;border-radius:10px;padding:0 9px;margin-left:' + (PHONE ? 0 : 4) + 'px;background:' + bg + ';box-shadow:0 1px 4px rgba(0,0,0,.3)'; return c; };
     const c1 = chip(COL.wait), c2 = chip(COL.none), c3 = chip(COL.none); c2.style.display = 'none'; c3.style.display = 'none';
     b.append(c1, c2, c3); b._c3 = c3;
     c1.textContent = '...'; b._c1 = c1;
@@ -780,9 +781,23 @@
 
   // On the PO list, slide Ambrose's centred content to the left so the chips have room on the right. Done with an
   // adopted stylesheet (no node added to the page, so Blazor never sees it) and only on wide screens.
-  let shiftSheet = null;
+  // On a phone: zoom the page out a bit (lay it out 520px wide via the existing viewport tag, an attribute change
+  // only) and narrow the list so the chips get their own strip down the right.
+  const PHONE = matchMedia('(pointer:coarse)').matches && Math.min(screen.width, screen.height) < 820;
+  const PHONE_W = 520, PHONE_STRIP = 150;
+  let shiftSheet = null, vpOrig = null;
   function shiftLayout(on) {
-    if (on && !shiftSheet) { try { shiftSheet = new CSSStyleSheet(); shiftSheet.replaceSync('@media (min-width: 1500px){ main > section.container { margin-left: 24px !important; margin-right: auto !important; } }'); } catch (e) { return; } }
+    if (on && !shiftSheet) { try { shiftSheet = new CSSStyleSheet(); shiftSheet.replaceSync(PHONE
+      ? 'main > section.container { margin-left: 4px !important; margin-right: 0 !important; max-width: calc(100% - ' + PHONE_STRIP + 'px) !important; padding-left: 6px !important; padding-right: 6px !important; }'
+      : '@media (min-width: 1500px){ main > section.container { margin-left: 24px !important; margin-right: auto !important; } }'); } catch (e) { return; } }
+    if (PHONE) {
+      const vp = document.querySelector('meta[name=viewport]');
+      if (vp) {
+        if (vpOrig === null) vpOrig = vp.getAttribute('content') || '';
+        const want = on ? 'width=' + PHONE_W : vpOrig;
+        if (vp.getAttribute('content') !== want) vp.setAttribute('content', want);
+      }
+    }
     if (!shiftSheet) return;
     const has = document.adoptedStyleSheets.includes(shiftSheet);
     if (on && !has) document.adoptedStyleSheets = [...document.adoptedStyleSheets, shiftSheet];
@@ -806,7 +821,7 @@
     const seen = new Set();
     const table = rows[0] && rows[0].closest('table');
     const tr = table && table.getBoundingClientRect();
-    const roomRight = tr && innerWidth - tr.right > 190;
+    const roomRight = tr && innerWidth - tr.right > (PHONE ? PHONE_STRIP - 10 : 190);
     rows.forEach(r => {
       const t = rowText(r);
       const full = (t.match(/^(\d{8}-\d{2,3})/) || [])[1];
@@ -820,7 +835,7 @@
       const near = classic === false || (classic && rr.bottom > -innerHeight && rr.top < 2 * innerHeight);
       if (b._gen !== idxGen && near) { b._gen = idxGen; labourFor(base, sm ? sm[1] : '', b._update); }
       paintInvoice(b, full);
-      b.style.top = Math.round(rr.top + scrollY + rr.height / 2 - 10) + 'px';
+      b.style.top = Math.round(rr.top + scrollY + rr.height / 2 - (PHONE ? b.offsetHeight / 2 : 10)) + 'px';
       b.style.left = Math.round((roomRight ? tr.right + 8 : rr.right - b.offsetWidth - 6) + scrollX) + 'px';
     });
     badges.forEach((b, r) => { if (!seen.has(r) || !r.isConnected) { b._gone = true; const e = live.get(b._base); if (e) e.subs.delete(b._update); b.remove(); badges.delete(r); } });
