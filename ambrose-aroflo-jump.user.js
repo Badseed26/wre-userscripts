@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ambrose <-> AroFlo jump
 // @namespace    wre
-// @version      3.9
+// @version      3.10
 // @description  "Open in AroFlo" on Ambrose PO and Tradies Web pages, "Open in Ambrose" on AroFlo tasks, and AroFlo labour hours, job profit and an invoiced-vs-PO-value log on the Ambrose PO list and PO pages
 // @match        https://office.aroflo.com/*
 // @match        https://tradiesadmin.ambroseconstruct.com.au/*
@@ -118,7 +118,14 @@
     if (!po && !street) return toast('Couldn\'t see a PO number or address on this page.', true);
     toast('Finding it in AroFlo...');
     let tasks = [], near = [];
-    try { await ensureIndex(); const m = await matchFull(po, street); tasks = m.tasks; near = m.near || []; } catch (e) { /* fall back to a live search */ }
+    try {
+      await ensureIndex();
+      let m = await matchFull(po, street);
+      // not found: the task might be newer than our saved list, or its description changed since we last read it.
+      // Get a fresh list and re-read the descriptions before giving up.
+      if (!m.tasks.length) { await freshIndex(); m = await matchFull(po, street, true); }
+      tasks = m.tasks; near = m.near || [];
+    } catch (e) { /* fall back to a live search */ }
     if (tasks.length === 1) return open(AF + tasks[0].href);
     if (tasks.length > 1) { chooser(tasks); return toast(tasks.length + ' tasks have PO ' + po + ' in the description. Pick one.'); }
     // nothing has the full PO: show what shares the base number, but say so
@@ -353,6 +360,11 @@
     live.forEach(e => { e.checked = 0; }); // every line gets re-matched against the new index
     return idx;
   }
+  function freshIndex() {
+    if (idx && Date.now() - idx.t < 30000) return Promise.resolve(idx);
+    if (!idxLoading) idxLoading = fetchIndex().finally(() => { idxLoading = null; });
+    return idxLoading;
+  }
   function ensureIndex() {
     if (idx && classic && idx.tasks.length && !('inv' in idx.tasks[0])) idx.t = 0; // pre-3.7 index, no invoice links
     if (idx && Date.now() - idx.t < IDX_FRESH) return Promise.resolve(idx);
@@ -360,9 +372,11 @@
     return idx && Date.now() - idx.t < IDX_MAX ? Promise.resolve(idx) : idxLoading; // stale index is fine to start with
   }
 
+  // the PO base anywhere in the task name: usually "20334628 - address", but some are "P.O. No: 20334628-04 ..."
+  const hasBase = (name, base) => new RegExp('(^|\\D)' + base + '(\\D|$)').test(name);
   function matchTasks(base, street) {
     if (!idx) return null;
-    let tasks = base ? idx.tasks.filter(t => t.name.startsWith(base)) : [], how = 'po'; // a Quote task with the PO in its name is still the job
+    let tasks = base ? idx.tasks.filter(t => hasBase(t.name, base)) : [], how = 'po'; // a Quote task with the PO in its name is still the job
     if (!tasks.length && street) { const re = new RegExp('\\b' + street.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'i'); tasks = idx.tasks.filter(t => re.test(t.name) && !/^quote$/i.test(t.status)); how = 'street'; }
     const live = tasks.filter(t => isLive(t.status));
     let note = '', noteFull = '';
@@ -373,24 +387,24 @@
 
   // Full PO matching (3.6): a task only counts for a PO when that exact PO, suffix and all, is in its description.
   // Tasks sharing the 8 digit base (a BIBB quote, a return visit) are kept as "near" for the chooser only.
-  async function taskPos(t) {
+  async function taskPos(t, po) { // with po: re-read the task if its saved description doesn't have it
     const h = hrsCache[t.id];
-    if (h && h.pos && Date.now() - h.t < IDX_MAX) return h.pos;
+    if (h && h.pos && Date.now() - h.t < IDX_MAX && !(po && !h.pos.includes(po))) return h.pos;
     await enqueue(() => fetchLabour(t.id), true).catch(() => {});
     return (hrsCache[t.id] && hrsCache[t.id].pos) || [];
   }
-  async function matchFull(po, street) {
+  async function matchFull(po, street, fresh) {
     await ensureIndex();
     if (!po || po.length <= 8) return matchTasks(po, street); // no suffix to check against
     const base = po.slice(0, 8);
-    let near = idx.tasks.filter(t => t.name.startsWith(base)), how = 'po';
+    let near = idx.tasks.filter(t => hasBase(t.name, base)), how = 'po';
     if (!near.length && street) { const re = new RegExp('\\b' + street.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'i'); near = idx.tasks.filter(t => re.test(t.name)).slice(0, 8); how = 'street'; }
     const hits = [];
     if (await isClassic()) { // phone: let AroFlo search the descriptions for the full PO
       const rows = await enqueue(() => descSearch(po), true);
       rows.forEach(r => hits.push(idx.tasks.find(t => t.id === r.id) || r));
       if (hits.length) how = 'po';
-    } else for (const t of near) if ((await taskPos(t)).includes(po)) hits.push(t);
+    } else for (const t of near) if ((await taskPos(t, fresh && po)).includes(po)) hits.push(t);
     let tasks = hits, note = '', noteFull = '';
     const live = hits.filter(t => isLive(t.status));
     if (live.length) tasks = live;
@@ -399,7 +413,7 @@
   }
   function matchFullCached(po) { // no fetching: only what's already been read
     if (!idx || !po) return [];
-    return idx.tasks.filter(t => t.name.startsWith(po.slice(0, 8)) && hrsCache[t.id] && (hrsCache[t.id].pos || []).includes(po));
+    return idx.tasks.filter(t => hasBase(t.name, po.slice(0, 8)) && hrsCache[t.id] && (hrsCache[t.id].pos || []).includes(po));
   }
 
   // --- labour per task ---
