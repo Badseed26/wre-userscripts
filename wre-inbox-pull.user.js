@@ -1,20 +1,56 @@
 // ==UserScript==
 // @name         WRE Inbox Pull
 // @namespace    wre
-// @version      1.1.0
-// @description  Reads the day's Inbox and Sent Items in the shared Outlook and copies one compact bundle for Claude's inbox check. Read only. Unread emails it opens go back to unread.
+// @version      1.2.0
+// @description  Reads a day's Inbox and Sent Items in the shared Outlook (read only, unread emails go back to unread) and hands one compact bundle to the WRE Dashboard's inbox check. The Pull button on the dashboard starts it.
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
 // @match        https://outlook.office365.com/*
+// @match        https://*.frame.claudeusercontent.com/*
 // @grant        GM_setClipboard
+// @grant        GM_setValue
+// @grant        GM_getValue
+// @grant        GM_addValueChangeListener
+// @grant        GM_openInTab
 // @run-at       document-start
-// @noframes
 // @updateURL    https://raw.githubusercontent.com/Badseed26/wre-userscripts/main/wre-inbox-pull.user.js
 // @downloadURL  https://raw.githubusercontent.com/Badseed26/wre-userscripts/main/wre-inbox-pull.user.js
 // ==/UserScript==
 
 (function () {
 'use strict';
+const OUTLOOK_URL = 'https://outlook.cloud.microsoft/mail/';
+const gmGet = (k, d) => { try { return typeof GM_getValue == 'function' ? GM_getValue(k, d) : d; } catch (e) { return d; } };
+const gmSet = (k, v) => { try { if (typeof GM_setValue == 'function') GM_setValue(k, v); } catch (e) {} };
+
+// ---------- dashboard side (the WRE Dashboard runs in a claudeusercontent frame) ----------
+// The dashboard's frame is locked down, so a tab it opens can't run this script properly. Here we catch the Pull click,
+// open Outlook as a normal tab, and hand the finished bundle back to the page (it saves it on its own).
+if (/\.frame\.claudeusercontent\.com$/.test(location.hostname)) {
+  const send = (name, detail) => { try { window.dispatchEvent(new CustomEvent(name, { detail: JSON.stringify(detail) })); } catch (e) {} };
+  const mark = () => { try { document.documentElement.setAttribute('data-wre-pull', '1.2'); } catch (e) {} };
+  mark(); document.addEventListener('DOMContentLoaded', mark);
+  let tab = null;
+  const deliver = () => { const b = gmGet('wreBundle', null); if (b && b.id && b.id !== gmGet('wreBundleSeen', '') && Date.now() - (b.at || 0) < 12 * 3600e3) send('wre-bundle', b); };
+  window.addEventListener('wre-bundle-ack', e => { try { gmSet('wreBundleSeen', JSON.parse(e.detail).id); } catch (x) {} });
+  window.addEventListener('wre-ready', deliver);
+  window.addEventListener('load', () => setTimeout(deliver, 1500));
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') deliver(); });
+  try {
+    GM_addValueChangeListener('wreBundle', () => deliver());
+    GM_addValueChangeListener('wreStatus', (k, o, v) => { if (!v) return; send('wre-pull-status', v); if (v.close && tab) { try { tab.close(); } catch (e) {} tab = null; } });
+  } catch (e) {}
+  document.addEventListener('click', e => {
+    const a = e.target && e.target.closest ? e.target.closest('a[href*="wre-inbox-run"]') : null; if (!a) return;
+    e.preventDefault(); e.stopPropagation();
+    const m = a.href.match(/wre-inbox-run(?:=([\w-]+))?/), day = (m && m[1]) || 'today';
+    gmSet('wreAuto', { day: day, at: Date.now() });
+    const st = { t: 'Opening Outlook...', kind: '', at: Date.now() }; gmSet('wreStatus', st); send('wre-pull-status', st);
+    try { tab = GM_openInTab(OUTLOOK_URL, { active: true, insert: true, setParent: true }); } catch (x) { window.open(OUTLOOK_URL, '_blank'); }
+  }, true);
+  return;
+}
+if (window.top !== window.self) return; // Outlook: top page only
 
 // ---------- settings ----------
 const MAX_BODY = 3500;      // new text per inbox email
@@ -25,8 +61,12 @@ const MAX_SENT_QUOTE = 500;
 const STORE = 'wreInboxBundle';
 
 // Dashboard trigger: open https://outlook.cloud.microsoft/mail/#wre-inbox-run (today) or #wre-inbox-run=2026-10-14 and it starts by itself
-const AUTO = location.hash.match(/wre-inbox-run(?:=([\w-]+))?/);
-if (AUTO) { try { sessionStorage.setItem('_wreAuto', AUTO[1] || 'today'); } catch (e) {} }
+// The dashboard's Pull sets wreAuto in Tampermonkey's own storage just before it opens this tab (works on iPhone Safari too).
+let AUTO_DAY = null;
+const AUTO = location.hash.match(/wre-inbox-run(?:=([\w-]+))?/), AUTOQ = location.search.match(/[?&]wrepull=([\w-]+)/);
+if (AUTO) AUTO_DAY = AUTO[1] || 'today'; else if (AUTOQ) AUTO_DAY = AUTOQ[1];
+else { const r = gmGet('wreAuto', null); if (r && r.at && Date.now() - r.at < 3 * 60e3) AUTO_DAY = r.day || 'today'; }
+if (AUTO_DAY) { gmSet('wreAuto', { at: 0 }); try { sessionStorage.setItem('_wreAuto', AUTO_DAY); } catch (e) {} }
 
 // ---------- Outlook helpers (same logic as the inbox check skill's tested setup script) ----------
 const rowsNow = () => [...document.querySelectorAll('div[role=option][data-convid]')];
@@ -161,7 +201,7 @@ const buildBundle = s => {
 };
 
 // ---------- the run ----------
-let BUSY = false, ABORT = false;
+let BUSY = false, ABORT = false, FROM_DASH = false;
 const run = async (DAY, listOnly) => {
  if (BUSY) return; BUSY = true; ABORT = false;
  const t0 = Date.now(); const d = dayDate(DAY);
@@ -216,20 +256,22 @@ const run = async (DAY, listOnly) => {
  }
  const text = buildBundle(s);
  try { localStorage.setItem(STORE, text); } catch (e) {}
+ if (!listOnly) gmSet('wreBundle', { id: 'b' + Date.now().toString(36), day: s.dayYmd, at: Date.now(), text: text });
  const copied = await copy(text);
  const kb = (text.length / 1024).toFixed(1);
  const f = s.fix;
  const bad = s.problem || (f && (f.failed.length || f.flippedBack.length));
  status((bad ? '⚠ ' : '✓ ') + (copied ? 'Copied' : 'Ready (copy failed, hit Copy)') + ': ' + s.inRead + ' inbox, ' + s.inPrev + ' preview only, ' + s.sentRead + ' sent, ' + kb + ' KB.' +
   (f ? ' Unread put back: ' + f.restored.length + (f.failed.length ? ', FAILED ' + f.failed.length : '') + (f.flippedBack.length ? ', flipped back ' + f.flippedBack.length : '') + '.' : '') +
-  (s.problem ? ' Problem: ' + s.problem : '') + (copied && !listOnly ? (FROM_DASH ? ' Go back to the dashboard and paste it into the inbox check.' : ' Paste it into the dashboard or a Claude chat.') : ''), bad ? 'warn' : 'ok');
+  (s.problem ? ' Problem: ' + s.problem : '') + (listOnly ? '' : FROM_DASH ? (bad ? ' Sent to the dashboard. Check the problem before closing this tab.' : ' Sent to the dashboard, closing this tab.') : ' Sent to the dashboard if it\'s open, and copied for a chat.'), bad ? 'warn' : 'ok', FROM_DASH && !listOnly && !bad);
+ if (FROM_DASH && !listOnly && !bad) setTimeout(() => { try { window.close(); } catch (e) {} }, 2500);
 };
 
 const copy = async text => { try { if (typeof GM_setClipboard == 'function') { GM_setClipboard(text, 'text'); return true; } } catch (e) {} try { await navigator.clipboard.writeText(text); return true; } catch (e) { return false; } };
 
 // ---------- the little panel ----------
-let ROOT, ST, SH, FROM_DASH = false;
-const status = (t, kind) => { if (!ST) return; ST.textContent = t; ST.className = 'st ' + (kind || ''); if (SH) SH.querySelector('.msg').textContent = t; };
+let ROOT, ST, SH;
+const status = (t, kind, close) => { if (FROM_DASH || close != null) gmSet('wreStatus', { t: t, kind: kind || '', at: Date.now(), close: !!close }); if (!ST) return; ST.textContent = t; ST.className = 'st ' + (kind || ''); if (SH) SH.querySelector('.msg').textContent = t; };
 const shield = on => { if (!SH) return; SH.style.display = on ? 'flex' : 'none'; };
 const mount = () => {
  if (ROOT || !document.body) return;
@@ -252,7 +294,7 @@ const mount = () => {
  <div class="pan"><div class="t">WRE inbox pull</div>
   <div class="row"><select class="day">${days.map(d => `<option value="${d[0]}">${d[1]}</option>`).join('')}</select><button class="b go">Pull</button></div>
   <div class="row"><button class="b cp">Copy last</button><button class="b dl">Download last</button><button class="b lo" title="Lists the day without opening anything">Test (list only)</button><button class="b fx" title="Put back unread emails from a run that didn't finish">Fix unread</button></div>
-  <div class="st">Reads the day's Inbox and Sent Items, read only, then copies a bundle to paste into Claude.</div></div>
+  <div class="st">Reads the day's Inbox and Sent Items, read only, and sends a bundle to the WRE Dashboard.</div></div>
  <div class="sh"><div class="card"><b>Pulling the inbox</b>Hands off Outlook and keep this tab in front for a minute or two.<div class="msg"></div><button class="b stop">Stop</button></div></div>`;
  ST = ROOT.querySelector('.st'); SH = ROOT.querySelector('.sh');
  const pan = ROOT.querySelector('.pan');
