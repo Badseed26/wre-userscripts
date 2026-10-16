@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Calendar NPT
 // @namespace    wre
-// @version      2.6
+// @version      2.7
 // @description  Notes, photos and timesheet badges on the AroFlo calendar for the days in view, kept in step with the WRE daily check issue list in Todoist
 // @match        https://office.aroflo.com/ims/Site/Calendar/*
 // @grant        GM_xmlhttpRequest
@@ -63,6 +63,7 @@
 
   // ---------- cache (localStorage, small) ----------
   // C.wc[wrid] = task code; C.j[wrid] = {u: last used, n/l/p: {t: read at, d: {date: ...}}}
+  // Labour is kept as 'L Buckley|travel' and 'L Buckley|site'; anything older (just the name) is read again.
   let C;
   try { C = JSON.parse(W.localStorage.getItem(KEY)) || {}; } catch (e) { C = {}; }
   C.wc = C.wc || {}; C.j = C.j || {}; C.ad = C.ad || {}; // C.ad[wrid] = the job's Location from AroFlo
@@ -72,6 +73,7 @@
       const J = C.j[w];
       if (!J.u || J.u < old) { delete C.j[w]; delete C.wc[w]; delete C.ad[w]; continue; }
       ['n', 'l', 'p'].forEach(k => { if (J[k] && J[k].d) for (const dt in J[k].d) if (dt < cut) delete J[k].d[dt]; });
+      if (J.l && Object.values(J.l.d || {}).some(a => !Array.isArray(a) || a.some(x => !String(x).includes('|')))) delete J.l;
     }
   })();
   let saveT;
@@ -105,7 +107,8 @@
     return d;
   }
 
-  // Labour: {date: ['L Buckley']}
+  // Labour: {date: ['L Buckley|travel', 'L Buckley|site']}. Each person needs both on the day: a Travel line and
+  // a time on site line (NTT, or NTA for apprentices; any type that isn't Travel counts as on site).
   async function readLabour(E) {
     const rows = textOf(await get('/ims/Site/Resource/Jobsheet/AJAX/view_jobsheet.cfm?wrCoded=' + E), true);
     const d = {};
@@ -114,7 +117,9 @@
       const n = r.match(/^([A-Z]) ([A-Z][\w'-]+) \d{1,2}:\d{2}[ap]m/);
       const ds = r.match(/\d{1,2}\/\d{1,2}\/\d{4}/g);
       if (!n || !ds) return;
-      const k = dmy(ds[ds.length - 1]), who = n[1] + ' ' + n[2];
+      const ty = r.match(/Hrs @ (\w+)/);
+      const kind = (ty ? /^travel/i.test(ty[1]) : /\bTravel\b/.test(r)) ? 'travel' : 'site';
+      const k = dmy(ds[ds.length - 1]), who = n[1] + ' ' + n[2] + '|' + kind;
       (d[k] = d[k] || []).includes(who) || d[k].push(who);
     });
     return d;
@@ -205,7 +210,7 @@
     return {
       n: has('n', a => a && a.some(x => crewSet.has(x))),
       p: has('p', o => !!o && Object.keys(o).length > 0), // any photo that day counts, whoever put it in (e.g. you uploading for a lad)
-      t: has('l', a => a && a.includes(ini(v.who))),
+      t: has('l', a => a && a.includes(ini(v.who) + '|travel') && a.includes(ini(v.who) + '|site')),
     };
   }
   // You OK'd it by hand (calendar or dashboard): notes and photos count for the whole crew that day, a timesheet only for that person.
@@ -264,11 +269,13 @@
     const nA = J.n && (J.n.d[v.date] || []).filter(x => v.crew.includes(x)).map(first);
     const pO = J.p && J.p.d[v.date] || {};
     const pTxt = 'in (' + Object.keys(pO).map(first).join(', ') + ')';
+    const me = ini(v.who), lab = J.l && J.l.d[v.date] || [], tr = lab.includes(me + '|travel'), si = lab.includes(me + '|site');
+    const tMiss = (tr ? 'travel in, ' : si ? 'on site in, ' : '') + [!tr && 'travel', !si && 'on site (NTT/NTA)'].filter(Boolean).join(' and ') + ' missing (' + me + ')';
     const t = Math.min(...['n', 'l', 'p'].map(k => (J[k] ? J[k].t : Infinity)));
     const text = (v.pending ? 'Pending: starts ' + hm(v.ev.start) + ', checked once it starts\n' : err ? "Couldn't check: " + err + '\n' : '') +
       'Notes: ' + (s.n === 'm' ? "none, OK'd by you" : s.n === true ? 'in (' + nA.join(', ') + ')' : no(s.n, 'none from the crew')) + '\n' +
       'Photos: ' + (s.p === 'm' ? "none, OK'd by you" : s.p === true ? pTxt : no(s.p, 'none that day')) + '\n' +
-      'Timesheet: ' + (s.t === 'm' ? "none, OK'd by you" : s.t === true ? 'in' : no(s.t, 'missing (' + ini(v.who) + ')')) + '\n' +
+      'Timesheet: ' + (s.t === 'm' ? "not all in, OK'd by you" : s.t === true ? 'travel and on site in' : no(s.t, tMiss)) + '\n' +
       'Crew: ' + crewTxt + (isFinite(t) && !v.pending ? '\nChecked ' + hm(t) : '') +
       (!v.pending && [s.n, s.p, s.t].some(x => x === false || x === 'm') ? '\n' + (PHONE ? 'Tap' : 'Click') + ' a red letter to OK it, a blue one to undo' : '');
     return { cls: [s.n, s.p, s.t].map(cls), text };
