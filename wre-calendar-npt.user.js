@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Calendar NPT
 // @namespace    wre
-// @version      2.5
+// @version      2.6
 // @description  Notes, photos and timesheet badges on the AroFlo calendar for the days in view, kept in step with the WRE daily check issue list in Todoist
 // @match        https://office.aroflo.com/ims/Site/Calendar/*
 // @grant        GM_xmlhttpRequest
@@ -173,7 +173,8 @@
   const R = new Map(); // fc event _id -> {ev, el}, only what's rendered right now
   let cal = null;
 
-  // Visits that need a badge, grouped by job. Today's bookings that haven't started yet are left alone.
+  // Visits that need a badge, grouped by job. Today's bookings that haven't started yet are badged orange as
+  // pending, but aren't read, counted or put on the issue list until they start.
   function visitsInView() {
     const now = new Date(), today = ymd(now);
     const evs = cal.fullCalendar('clientEvents').filter(e => e.type === 'task' && !isCancel(e));
@@ -188,9 +189,9 @@
       if (!o.el[0] || !o.el[0].isConnected) { R.delete(id); continue; }
       const ev = o.ev, st = new Date(ev.start), date = ymd(st);
       if (isCancel(ev) || NO_BADGE.test(ev.resourcename || '')) continue;
-      if (date > today || (date === today && st > now)) continue;
+      if (date > today) continue;
       const k = ev.wrid + '|' + date;
-      const v = { id, ev, el: o.el, date, today: date === today, who: ev.resourcename, crew: crew[k] || [ev.resourcename] };
+      const v = { id, ev, el: o.el, date, today: date === today, pending: date === today && st > now, who: ev.resourcename, crew: crew[k] || [ev.resourcename] };
       (jobs[ev.wrid] = jobs[ev.wrid] || []).push(v);
     }
     return jobs;
@@ -232,6 +233,7 @@
       '.wre-npt i{font-style:normal;width:11px;text-align:center;border-radius:2px;color:#fff;background:#9aa0a6}' +
       '.wre-npt i.g{background:#1e8e3e}.wre-npt i.r{background:#d93025}.wre-npt i.a{background:#e37400}.wre-npt i.m{background:#1a73e8}' +
       '.wre-npt i.r,.wre-npt i.a,.wre-npt i.m{cursor:pointer}.wre-npt i.r:hover,.wre-npt i.a:hover,.wre-npt i.m:hover{outline:1px solid #fff}' +
+      '.wre-npt.pend i{cursor:help!important;outline:0!important}' +
       '.wre-npt-h{margin-left:10px;font:600 12px Arial,sans-serif;color:#555;cursor:pointer;white-space:nowrap}.wre-npt-h b,.wre-npt-h small.bad{color:#d93025}.wre-npt-h small{font-weight:400;margin-left:6px}.wre-npt-tok{margin-left:8px;font-weight:600;color:#c9501a;text-decoration:underline}';
     document.head.appendChild(s);
   }
@@ -246,25 +248,29 @@
       b.addEventListener('click', e => { e.stopPropagation(); e.preventDefault(); const i = [...b.children].indexOf(e.target); if (i >= 0 && b.__v) badgeClick(b.__v, 'npt'[i], e.target.className); });
     }
     b.__v = v;
+    b.classList.toggle('pend', !!v.pending);
     const t = tipOf(v);
     t.cls.forEach((c, i) => { b.children[i].className = c; });
     b.title = t.text;
   }
-  // The badge's colours and its hover text (the phone shows the same in the booking popup).
+  // The badge's colours and its hover text (the booking popup shows the same, PC and phone).
   function tipOf(v) {
     const s = status(v), J = C.j[v.ev.wrid] || {}, err = errs[v.ev.wrid];
-    const cls = x => (x === null || err ? '' : x === 'm' ? 'm' : x ? 'g' : v.today ? 'a' : 'r');
+    // Not started yet: orange for anything not in, nothing to read or chase until it starts.
+    const cls = v.pending ? x => (x === 'm' ? 'm' : x === true ? 'g' : 'a')
+      : x => (x === null || err ? '' : x === 'm' ? 'm' : x ? 'g' : v.today ? 'a' : 'r');
+    const no = (x, none) => (x === null || (v.pending && x === false) ? (v.pending ? 'not due yet' : 'not read yet') : none);
     const crewTxt = v.crew.map(first).join(', ');
     const nA = J.n && (J.n.d[v.date] || []).filter(x => v.crew.includes(x)).map(first);
     const pO = J.p && J.p.d[v.date] || {};
     const pTxt = 'in (' + Object.keys(pO).map(first).join(', ') + ')';
     const t = Math.min(...['n', 'l', 'p'].map(k => (J[k] ? J[k].t : Infinity)));
-    const text = (err ? "Couldn't check: " + err + '\n' : '') +
-      'Notes: ' + (s.n === null ? 'not read yet' : s.n === 'm' ? "none, OK'd by you" : s.n ? 'in (' + nA.join(', ') + ')' : 'none from the crew') + '\n' +
-      'Photos: ' + (s.p === null ? 'not read yet' : s.p === 'm' ? "none, OK'd by you" : s.p ? pTxt : 'none that day') + '\n' +
-      'Timesheet: ' + (s.t === null ? 'not read yet' : s.t === 'm' ? "none, OK'd by you" : s.t ? 'in' : 'missing (' + ini(v.who) + ')') + '\n' +
-      'Crew: ' + crewTxt + (isFinite(t) ? '\nChecked ' + hm(t) : '') +
-      ([s.n, s.p, s.t].some(x => x === false || x === 'm') ? '\n' + (PHONE ? 'Tap' : 'Click') + ' a red letter to OK it, a blue one to undo' : '');
+    const text = (v.pending ? 'Pending: starts ' + hm(v.ev.start) + ', checked once it starts\n' : err ? "Couldn't check: " + err + '\n' : '') +
+      'Notes: ' + (s.n === 'm' ? "none, OK'd by you" : s.n === true ? 'in (' + nA.join(', ') + ')' : no(s.n, 'none from the crew')) + '\n' +
+      'Photos: ' + (s.p === 'm' ? "none, OK'd by you" : s.p === true ? pTxt : no(s.p, 'none that day')) + '\n' +
+      'Timesheet: ' + (s.t === 'm' ? "none, OK'd by you" : s.t === true ? 'in' : no(s.t, 'missing (' + ini(v.who) + ')')) + '\n' +
+      'Crew: ' + crewTxt + (isFinite(t) && !v.pending ? '\nChecked ' + hm(t) : '') +
+      (!v.pending && [s.n, s.p, s.t].some(x => x === false || x === 'm') ? '\n' + (PHONE ? 'Tap' : 'Click') + ' a red letter to OK it, a blue one to undo' : '');
     return { cls: [s.n, s.p, s.t].map(cls), text };
   }
   function header(jobs, busy) {
@@ -281,7 +287,7 @@
       (h.querySelector('h2') || h).appendChild(s);
     }
     let miss = 0, unk = 0;
-    Object.values(jobs).flat().forEach(v => { const x = status(v); if (errs[v.ev.wrid] || [x.n, x.p, x.t].includes(null)) unk++; else if (!(x.n && x.p && x.t)) miss++; });
+    Object.values(jobs).flat().forEach(v => { if (v.pending) return; const x = status(v); if (errs[v.ev.wrid] || [x.n, x.p, x.t].includes(null)) unk++; else if (!(x.n && x.p && x.t)) miss++; });
     const list = paused() ? 'issue list paused' : sy.msg;
     const tok = !token() || /token not accepted/.test(sy.msg);
     s.innerHTML = 'NPT ' + (busy ? 'checking...' : miss ? '<b>' + miss + ' missing</b>' : 'all in') + (unk && !busy ? ', ' + unk + " couldn't check" : '') + ' &#8635;' +
@@ -293,15 +299,21 @@
   const queue = new Map(); // wrid -> force
   let running = 0, lastJobs = {};
 
+  let pendT;
   function scan(force) {
     if (!cal) return;
     lastJobs = visitsInView();
     const now = Date.now();
+    // Look again when the next pending booking starts, in case AroFlo doesn't redraw by then.
+    const next = Math.min(...Object.values(lastJobs).flat().filter(v => v.pending).map(v => +new Date(v.ev.start)));
+    clearTimeout(pendT);
+    if (isFinite(next)) pendT = setTimeout(() => scan(false), Math.min(next - now + 5000, 36e5));
     for (const w in lastJobs) {
-      const vs = lastJobs[w];
+      const vs = lastJobs[w].filter(v => !v.pending);
       const J = C.j[w];
       if (J) J.u = now;
-      vs.forEach(paint);
+      lastJobs[w].forEach(paint);
+      if (!vs.length) continue;
       if (force) { delete errs[w]; queue.set(w, true); continue; }
       if (errs[w]) continue;
       const open = vs.filter(v => !isDone(v));
@@ -334,7 +346,7 @@
   }
 
   async function readJob(w, force) {
-    const vs = (lastJobs[w] || []);
+    const vs = (lastJobs[w] || []).filter(v => !v.pending);
     if (!vs.length) return;
     const now = Date.now();
     const J = (C.j[w] = C.j[w] || { u: now });
@@ -461,7 +473,7 @@
     try {
       const now = new Date(), today = ymd(now), oldest = ymd(new Date(now.getTime() - LIST_DAYS * 864e5));
       const want = new Map(); // key -> {v, missing}
-      const all = Object.values(lastJobs).flat();
+      const all = Object.values(lastJobs).flat().filter(v => !v.pending);
       // Anything red in view: read the list so OKs you made elsewhere (the dashboard, your phone) show here.
       if (all.some(v => { const r = raw(v); return r.n === false || r.p === false || r.t === false; })) {
         const was = tdState && tdState.at; await loadList(); if (tdState.at !== was) all.forEach(paint);
@@ -519,7 +531,7 @@
   // It's saved on the visit's issue in Todoist, so the dashboard shows it and an OK made there shows here.
   let busyOk = false;
   async function badgeClick(v, k, cls) {
-    if (!/\b(r|a|m)\b/.test(cls) || busyOk) return;
+    if (!/\b(r|a|m)\b/.test(cls) || busyOk || v.pending) return;
     if (!token()) { W.alert('Set the Todoist token first (link next to the dates up top), so the OK can be saved.'); return; }
     const item = ITEM[k], where = street(v.ev) + ' (' + dmS(v.date) + ')';
     const on = cls !== 'm';
@@ -596,17 +608,26 @@
     header(lastJobs, false); if (!paused()) sync();
   });
 
-  // ---------- iPhone: one tap opens a booking, and the popup shows its N P T ----------
-  // AroFlo's calendar (FullCalendar 1.5) only wires up a booking's click handler on its first mouseover, which a
-  // phone fakes unreliably, so taps mostly do nothing. On a phone we take the tap ourselves and call AroFlo's own
-  // booking click, then put the badge and its hover text (what the PC shows on hover) at the top of the popup.
+  // ---------- the booking popup shows its N P T (PC and phone) ----------
+  // The badge and its hover text go in a box at the top of AroFlo's booking popup.
+  // On PC that's done from the calendar's own booking click (see hook). On a phone, AroFlo's calendar
+  // (FullCalendar 1.5) only wires up a booking's click handler on its first mouseover, which a phone fakes
+  // unreliably, so taps mostly do nothing: there we take the tap ourselves and call AroFlo's own booking click.
   const PHONE = matchMedia('(pointer:coarse)').matches && Math.min(screen.width, screen.height) < 820;
   const eventFor = el => { for (const o of R.values()) if (o.el && o.el[0] === el) return o.ev; return null; };
+  const visitOf = (ev, el) => { // the badged visit for a booking, if it has one
+    if (!el) for (const o of R.values()) if (o.ev === ev) { el = o.el && o.el[0]; break; }
+    const bd = el && el.querySelector && el.querySelector(':scope > .wre-npt');
+    return bd && bd.__v && bd.__v.ev._id === ev._id ? bd.__v : null;
+  };
   let curBox = null;
   function openVisit(ev, v) {
     W.fullcalEventClick(ev);
+    dayBox(v);
+  }
+  function dayBox(v) {
     curBox = null;
-    if (!v) return; // a booking that's not due yet: no badge, nothing to add
+    if (!v) return; // a booking on a later day: no badge, nothing to add
     if (!document.getElementById('wre-day-css')) {
       const st = document.createElement('style'); st.id = 'wre-day-css';
       st.textContent = '.wre-day{display:flex;gap:10px;align-items:flex-start;margin:0 0 8px;padding:8px 10px;background:#f7f4f1;border-left:4px solid #e8731a;border-radius:6px;font:13px/1.4 Arial,sans-serif;color:#222}' +
@@ -616,7 +637,7 @@
     const box = document.createElement('div'); box.className = 'wre-day';
     const draw = () => {
       const t = tipOf(v);
-      box.innerHTML = '<span class="wre-npt">' + 'NPT'.split('').map((l, i) => '<i class="' + t.cls[i] + '">' + l + '</i>').join('') + '</span><div class="tx">' + esc(t.text) + '</div>';
+      box.innerHTML = '<span class="wre-npt' + (v.pending ? ' pend' : '') + '">' + 'NPT'.split('').map((l, i) => '<i class="' + t.cls[i] + '">' + l + '</i>').join('') + '</span><div class="tx">' + esc(t.text) + '</div>';
     };
     draw();
     box.addEventListener('click', e => { // OK / undo straight from the popup, same as the PC badge
@@ -655,8 +676,7 @@
       if (!ev) return; // not a task booking: leave it to AroFlo
       e.preventDefault(); // no fake mouse events after this, so AroFlo doesn't open it twice
       e.stopPropagation();
-      const bd = el.querySelector(':scope > .wre-npt');
-      try { openVisit(ev, bd && bd.__v); } catch (err) {}
+      try { openVisit(ev, visitOf(ev, el)); } catch (err) {}
     }, { capture: true, passive: false });
   }
 
@@ -676,6 +696,17 @@
     if (!fc) return false;
     cal = c;
     const o = fc.options;
+    // PC: after AroFlo opens a booking's popup, add the N P T box to it (the phone path calls AroFlo directly).
+    if (!(o.eventClick && o.eventClick.__wre)) {
+      const prevClick = o.eventClick;
+      const click = function (ev) {
+        const r = prevClick ? prevClick.apply(this, arguments) : undefined;
+        try { if (ev && ev.type === 'task') dayBox(visitOf(ev, this && this.nodeType === 1 ? this : null)); else curBox = null; } catch (e) {}
+        return r;
+      };
+      click.__wre = 1;
+      o.eventClick = click;
+    }
     if (o.eventAfterRender && o.eventAfterRender.__wre) return true;
     const prev = o.eventAfterRender;
     const wrap = function (ev, el) {
