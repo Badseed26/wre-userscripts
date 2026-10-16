@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Pull
 // @namespace    wre
-// @version      1.2.0
+// @version      1.2.1
 // @description  Reads a day's Inbox and Sent Items in the shared Outlook (read only, unread emails go back to unread) and hands one compact bundle to the WRE Dashboard's inbox check. The Pull button on the dashboard starts it.
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -278,7 +278,10 @@ const mount = () => {
  const host = document.createElement('div'); host.id = 'wre-inbox-pull'; document.body.appendChild(host);
  ROOT = host.attachShadow({ mode: 'open' });
  const days = [['today', 'Today ' + nice(new Date())]]; for (let k = 1; k <= 6; k++) { const x = new Date(); x.setDate(x.getDate() - k); days.push([NM[x.getDay()], nice(x)]); }
- ROOT.innerHTML = `<style>
+ // Built with DOM calls, not innerHTML: Outlook's security rules (Trusted Types) block innerHTML (16/10).
+ const el = (tag, cls, txt, attrs) => { const e = document.createElement(tag); if (cls) e.className = cls; if (txt != null) e.textContent = txt; if (attrs) for (const k in attrs) e.setAttribute(k, attrs[k]); return e; };
+ const add = (p, ...kids) => { kids.forEach(k => p.appendChild(k)); return p; };
+ const style = el('style'); style.textContent = `
   :host{all:initial}
   .fab{position:fixed;left:14px;bottom:14px;z-index:2147483646;background:#E3701C;color:#fff;border:0;border-radius:20px;padding:8px 13px;font:600 13px system-ui,sans-serif;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,.25)}
   .pan{position:fixed;left:14px;bottom:56px;z-index:2147483646;width:300px;background:#fff;color:#2b2b2b;border:1px solid #d8d3cc;border-radius:10px;padding:12px;font:13px system-ui,sans-serif;box-shadow:0 6px 24px rgba(0,0,0,.2);display:none}
@@ -289,15 +292,15 @@ const mount = () => {
   .sh{position:fixed;inset:0;z-index:2147483645;background:rgba(40,36,32,.35);display:none;align-items:center;justify-content:center}
   .card{background:#fff;border-radius:12px;padding:18px 20px;max-width:340px;font:14px system-ui,sans-serif;color:#2b2b2b;text-align:center;box-shadow:0 8px 30px rgba(0,0,0,.3)}
   .card b{display:block;margin-bottom:6px} .msg{font-size:13px;color:#555;margin:8px 0 12px}
- </style>
- <button class="fab">WRE inbox</button>
- <div class="pan"><div class="t">WRE inbox pull</div>
-  <div class="row"><select class="day">${days.map(d => `<option value="${d[0]}">${d[1]}</option>`).join('')}</select><button class="b go">Pull</button></div>
-  <div class="row"><button class="b cp">Copy last</button><button class="b dl">Download last</button><button class="b lo" title="Lists the day without opening anything">Test (list only)</button><button class="b fx" title="Put back unread emails from a run that didn't finish">Fix unread</button></div>
-  <div class="st">Reads the day's Inbox and Sent Items, read only, and sends a bundle to the WRE Dashboard.</div></div>
- <div class="sh"><div class="card"><b>Pulling the inbox</b>Hands off Outlook and keep this tab in front for a minute or two.<div class="msg"></div><button class="b stop">Stop</button></div></div>`;
+ `;
+ const sel = el('select', 'day'); days.forEach(d => { const o = el('option', null, d[1]); o.value = d[0]; sel.appendChild(o); });
+ const pan = add(el('div', 'pan'), el('div', 't', 'WRE inbox pull'),
+  add(el('div', 'row'), sel, el('button', 'b go', 'Pull')),
+  add(el('div', 'row'), el('button', 'b cp', 'Copy last'), el('button', 'b dl', 'Download last'), el('button', 'b lo', 'Test (list only)', { title: 'Lists the day without opening anything' }), el('button', 'b fx', 'Fix unread', { title: "Put back unread emails from a run that didn't finish" })),
+  el('div', 'st', "Reads the day's Inbox and Sent Items, read only, and sends a bundle to the WRE Dashboard."));
+ const card = add(el('div', 'card'), el('b', null, 'Pulling the inbox'), document.createTextNode('Hands off Outlook and keep this tab in front for a minute or two.'), el('div', 'msg'), el('button', 'b stop', 'Stop'));
+ add(ROOT, style, el('button', 'fab', 'WRE inbox'), pan, add(el('div', 'sh'), card));
  ST = ROOT.querySelector('.st'); SH = ROOT.querySelector('.sh');
- const pan = ROOT.querySelector('.pan');
  ROOT.querySelector('.fab').onclick = () => pan.classList.toggle('on');
  ROOT.querySelector('.go').onclick = () => run(ROOT.querySelector('.day').value, false);
  ROOT.querySelector('.lo').onclick = () => run(ROOT.querySelector('.day').value, true);
