@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ambrose <-> AroFlo jump
 // @namespace    wre
-// @version      3.14
+// @version      3.15
 // @description  "Open in AroFlo" on Ambrose PO and Tradies Web pages, "Open in Ambrose" on AroFlo tasks, and AroFlo labour hours, job profit and an invoiced-vs-PO-value log on the Ambrose PO list and PO pages
 // @match        https://office.aroflo.com/*
 // @match        https://tradiesadmin.ambroseconstruct.com.au/*
@@ -464,6 +464,7 @@
   // (checked across Pearce, Ethan and Lachie on NTT, Travel and NTA: all $80/hr), plus materials at cost.
   const COST_RATE = 80;
   const profFresh = () => classic === false ? 15 * 60000 : 30 * 60000; // phone pages are big, so it checks less often
+  const profOk = pc => pc && pc.cv === 2 && Date.now() - pc.t < profFresh(); // cv: older versions' figures get redone
   const profCache = gmGet('wreProf', {}); // id -> { t, cost, inv, invN, exp }
   let profDirty = 0;
   const saveProf = () => { clearTimeout(profDirty); profDirty = setTimeout(() => gmSet('wreProf', profCache), 2500); };
@@ -494,10 +495,12 @@
     // On the PC the page is only re-read when the hours, materials or expense count change.
     const sig = h.v + '|' + h.mat + '|' + (h.exp || 0), old = profCache[t.id];
     let total = h.classic && h.total != null ? h.total : old && old.sig === sig && old.cv === 2 ? old.total : undefined;
-    if (total === undefined) total = await taskPageCost(t).catch(() => null);
+    let why = old && old.sig === sig && old.cv === 2 ? old.why || '' : '';
+    if (total === undefined) total = await taskPageCost(t).catch(e => { why = e.message; return null; });
     const worked = Math.round((h.v * COST_RATE + h.mat) * 100) / 100;
     const ok = total != null && total >= h.mat - 0.5; // a total under the materials alone means we misread it
-    const r = { t: Date.now(), cost: ok ? total : worked, src: ok ? 'aroflo' : 'worked', sig, cv: 2, total: ok ? total : null, inv, invN, exp: h.exp || 0, hrs: h.v, mat: h.mat, phone: !!h.classic };
+    if (total != null && !ok) why = 'read ' + fmt$(total) + ', less than the materials';
+    const r = { t: Date.now(), cost: ok ? total : worked, src: ok ? 'aroflo' : 'worked', why: ok ? '' : why, sig, cv: 2, total: ok ? total : null, inv, invN, exp: h.exp || 0, hrs: h.v, mat: h.mat, phone: !!h.classic };
     profCache[t.id] = r;
     saveProf();
     return r;
@@ -505,15 +508,18 @@
   // the Worksheet tab's costing table comes from its own small page, not the task page
   async function taskPageCost(t) {
     const code = ((t.href || '').match(/wrCoded=([^&]+)/i) || [])[1];
-    if (!code) return null;
+    if (!code) throw new Error('no task link to read it from');
     const r = await gm({ method: 'GET', url: AF + '/ims/Site/Resource/Jobsheet/AJAX/view_jobsheet.cfm?wrCoded=' + code });
     if (signedOut(r.responseText)) throw new Error('AroFlo is signed out');
-    return pageCost(new DOMParser().parseFromString(r.responseText, 'text/html'));
+    if (r.status !== 200) throw new Error('jobsheet came back ' + r.status);
+    const v = pageCost(new DOMParser().parseFromString(r.responseText, 'text/html'));
+    if (v == null) throw new Error(/Total Ex/i.test(r.responseText) ? 'no Totals row on the jobsheet' : 'no costing table on the jobsheet (' + r.responseText.length + ' chars)');
+    return v;
   }
   const fmt$ = n => (n < 0 ? '-' : '') + '$' + Math.abs(Math.round(n)).toLocaleString('en-AU');
   function profitText(pr) {
     if (!pr) return null;
-    const how = pr.src === 'aroflo' ? 'AroFlo total cost ' + fmt$(pr.cost) + ' ex (labour, materials and expenses)' : 'cost ' + fmt$(pr.cost) + ' ex, worked out as ' + pr.hrs + ' hrs at $' + COST_RATE + ' plus ' + fmt$(pr.mat) + ' materials (couldn\'t read AroFlo\'s total)' + (pr.exp ? '. ' + pr.exp + ' expense' + (pr.exp > 1 ? 's' : '') + ' on the task not counted' : '');
+    const how = pr.src === 'aroflo' ? 'AroFlo total cost ' + fmt$(pr.cost) + ' ex (labour, materials and expenses)' : 'cost ' + fmt$(pr.cost) + ' ex, worked out as ' + pr.hrs + ' hrs at $' + COST_RATE + ' plus ' + fmt$(pr.mat) + ' materials (couldn\'t read AroFlo\'s total' + (pr.why ? ': ' + pr.why : '') + ')' + (pr.exp ? '. ' + pr.exp + ' expense' + (pr.exp > 1 ? 's' : '') + ' on the task not counted' : '');
     if (!pr.invN) return { kind: 'none', text: fmt$(pr.cost) + ' cost', title: (pr.phone ? 'No invoice AroFlo shows the phone (part invoices on open jobs only show on the PC). ' : 'Nothing invoiced on this task yet. ') + how };
     const p = pr.inv - pr.cost, pct = pr.inv ? Math.round(p / pr.inv * 100) : 0;
     return { kind: p >= 0 ? 'good' : 'bad', text: (p >= 0 ? '+' : '') + fmt$(p) + ' (' + pct + '%)', title: 'Invoiced ' + fmt$(pr.inv) + ' ex across ' + pr.invN + ' invoice' + (pr.invN > 1 ? 's' : '') + ', ' + how + '. Whole task, not just this PO.' };
@@ -556,7 +562,7 @@
       const cached = t && hrsCache[t.id];
       push(resultFrom(base, street, m, cached ? cached.v : null)); // instant, from what we already know
       if (t && !(cached && Date.now() - cached.t < HRS_FRESH)) push(resultFrom(base, street, m, await enqueue(() => fetchLabour(t.id), true)));
-      if (t) { const pc = profCache[t.id]; if (!(pc && Date.now() - pc.t < profFresh())) { await enqueue(() => fetchProfit(t), true).catch(() => {}); push(resultFrom(base, street, m, (hrsCache[t.id] || {}).v)); } }
+      if (t) { if (!profOk(profCache[t.id])) { await enqueue(() => fetchProfit(t), true).catch(() => {}); push(resultFrom(base, street, m, (hrsCache[t.id] || {}).v)); } }
       if ((m.tasks.length === 0 || m.note) && idx && Date.now() - idx.t > 2 * 60000) {
         await (idxLoading || fetchIndex()).catch(() => {});
         const m2 = await matchFull(base, street);
@@ -578,7 +584,7 @@
   function warmAll() {
     if (!idx || classic !== false || Date.now() - warmed < profFresh()) return;
     warmed = Date.now();
-    idx.tasks.filter(t => isLive(t.status) && !(profCache[t.id] && Date.now() - profCache[t.id].t < profFresh()))
+    idx.tasks.filter(t => isLive(t.status) && !profOk(profCache[t.id]))
       .forEach(t => enqueue(() => fetchProfit(t), false).catch(() => {}));
   }
 
