@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Calendar NPT
 // @namespace    wre
-// @version      2.7
+// @version      2.8
 // @description  Notes, photos and timesheet badges on the AroFlo calendar for the days in view, kept in step with the WRE daily check issue list in Todoist
 // @match        https://office.aroflo.com/ims/Site/Calendar/*
 // @grant        GM_xmlhttpRequest
@@ -31,10 +31,11 @@
   const PHOTO = /\.(jpe?g|png|heic|heif|gif|webp|bmp|tiff?|mov|mp4|m4v|avi)\b/i;
   const DOC_COLS = 'checkboxdownload,dragrow,thumbnail,document,comment,filter,datetimeinserted,uploadedby,datetimeexpires,imgdatetimetaken,imgGpslocation,category,btnpubliclink,btndelete,actions';
   const ISSUES = '6hgGFjPF6mWJGvf6';      // Todoist project: WRE daily check (the issue list)
+  const FU = '6hfHcM9Gf74fgcJw';          // Todoist project: WRE follow ups (your own misses go here, due the day they're added)
   const LIST_DAYS = 14;                    // only visits from the last 14 days go on the issue list
   const LIST_HOUR = 17;                    // today's misses go on the list from 5pm
   const NICK = { Lachlan: 'Lachie' };      // names as the issue list uses them
-  const NO_LIST = /^Ethan\b/;             // your own bookings get badges but stay off the lads' issue list
+  const OWN = /^Ethan\b/;                 // your own bookings: misses go in your follow ups, not the lads' issue list
   const MON = { January: 1, February: 2, March: 3, April: 4, May: 5, June: 6, July: 7, August: 8, September: 9, October: 10, November: 11, December: 12 };
 
   // ---------- small helpers ----------
@@ -400,7 +401,11 @@
   const OKL = /^ok: (.+)$/m;
   const splitL = x => String(x || '').split(',').map(y => y.trim()).filter(Boolean);
   const descOf = (jn, wrid, date, full, missing, ok) => 'JN ' + jn + ' | wrid ' + wrid + ' | visit ' + date + ' | ' + full + ' | missing: ' + missing.join(', ') + (ok.length ? '\nok: ' + ok.join(', ') : '');
-  const titleOf = (v, missing) => nick(v.who) + ', ' + street(v.ev) + ' (' + dmS(v.date) + '): ' + missing.join(', ');
+  const titleOf = (v, missing) => OWN.test(v.who) ? 'Put in ' + listed(missing) + ' for ' + street(v.ev) + ' (' + dmS(v.date) + ')'
+    : nick(v.who) + ', ' + street(v.ev) + ' (' + dmS(v.date) + '): ' + missing.join(', ');
+  const projOf = who => (OWN.test(who) ? FU : ISSUES);
+  // A new issue: the lads' go on the issue list, yours go in your follow ups due today so they show in Needs me.
+  const newIssue = (who, content, description) => td('POST', 'tasks', Object.assign({ project_id: projOf(who), content, description }, OWN.test(who) ? { due_date: ymd(new Date()) } : {}));
   const OV = new Map(); // visit key -> Set of items you OK'd (open issues: the ok line; ticked off issues: everything on them)
   const ikey = (wrid, date, full) => wrid + '|' + date + '|' + full;
   const dmS = d => +d.slice(8) + '/' + +d.slice(5, 7);
@@ -421,6 +426,7 @@
   const nick = full => NICK[first(full)] || first(full);
   const listed = s => s.length === 1 ? s[0] : s.slice(0, -1).join(', ') + ' and ' + s[s.length - 1];
 
+  const noMove = new Set(); // issues of yours Todoist wouldn't move to the follow ups, this page load only
   let tdState = null;          // {at, open: Map key -> task, done: Map key -> task}
   let syncing = false, syncAgain = false;
   const sy = { msg: '', bad: false };
@@ -447,22 +453,27 @@
     const now = Date.now(), my = ++loadSeq;
     if (!fresh && tdState && now - tdState.at < 60000) return tdState;
     const open = new Map(), done = new Map();
+    // Issues live on the issue list (the lads') and in your follow ups (yours); only tasks in the issue shape count.
     const rec = t => { const m = (t.description || '').match(DESC); if (!m) return null; const o = (t.description || '').match(OKL);
-      return { k: ikey(m[2], m[3], m[4].trim()), id: t.id, missing: m[5].trim(), ok: splitL(o && o[1]), jn: m[1] }; };
-    let cur = null, n = 0;
-    do {
-      const j = await td('GET', 'tasks?project_id=' + ISSUES + '&limit=200' + (cur ? '&cursor=' + encodeURIComponent(cur) : ''));
-      (j && j.results || []).forEach(t => { const r = rec(t); if (r) open.set(r.k, r); });
-      cur = j && j.next_cursor; n++;
-    } while (cur && n < 5);
-    // Ticked off in the last ~2 months: never added again, and whatever was still on them counts as OK'd by you.
+      return { k: ikey(m[2], m[3], m[4].trim()), id: t.id, pid: t.project_id, missing: m[5].trim(), ok: splitL(o && o[1]), jn: m[1] }; };
     const since = new Date(now - 60 * 864e5).toISOString().slice(0, 19) + 'Z', until = new Date(now + 864e5).toISOString().slice(0, 19) + 'Z';
-    cur = null; n = 0;
-    do {
-      const j = await td('GET', 'tasks/completed/by_completion_date?project_id=' + ISSUES + '&since=' + since + '&until=' + until + '&limit=200' + (cur ? '&cursor=' + encodeURIComponent(cur) : ''));
-      (j && j.items || []).forEach(t => { const r = rec(t); if (r && !open.has(r.k)) done.set(r.k, r); });
-      cur = j && j.next_cursor; n++;
-    } while (cur && n < 5);
+    for (const P of [ISSUES, FU]) {
+      let cur = null, n = 0;
+      do {
+        const j = await td('GET', 'tasks?project_id=' + P + '&limit=200' + (cur ? '&cursor=' + encodeURIComponent(cur) : ''));
+        (j && j.results || []).forEach(t => { const r = rec(t); if (r) open.set(r.k, Object.assign(r, { pid: r.pid || P })); });
+        cur = j && j.next_cursor; n++;
+      } while (cur && n < 5);
+    }
+    // Ticked off in the last ~2 months: never added again, and whatever was still on them counts as OK'd by you.
+    for (const P of [ISSUES, FU]) {
+      let cur = null, n = 0;
+      do {
+        const j = await td('GET', 'tasks/completed/by_completion_date?project_id=' + P + '&since=' + since + '&until=' + until + '&limit=200' + (cur ? '&cursor=' + encodeURIComponent(cur) : ''));
+        (j && j.items || []).forEach(t => { const r = rec(t); if (r && !open.has(r.k)) done.set(r.k, Object.assign(r, { pid: r.pid || P })); });
+        cur = j && j.next_cursor; n++;
+      } while (cur && n < 5);
+    }
     // A slower, older read finishing after a newer one never overwrites it.
     if (my < loadApplied && tdState) return tdState;
     loadApplied = my;
@@ -479,19 +490,20 @@
     syncing = true;
     try {
       const now = new Date(), today = ymd(now), oldest = ymd(new Date(now.getTime() - LIST_DAYS * 864e5));
-      const want = new Map(); // key -> {v, missing}
+      const want = new Map(); // key -> {v, missing, early}
       const all = Object.values(lastJobs).flat().filter(v => !v.pending);
       // Anything red in view: read the list so OKs you made elsewhere (the dashboard, your phone) show here.
       if (all.some(v => { const r = raw(v); return r.n === false || r.p === false || r.t === false; })) {
         const was = tdState && tdState.at; await loadList(); if (tdState.at !== was) all.forEach(paint);
       }
       all.forEach(v => {
-        if (errs[v.ev.wrid] || NO_LIST.test(v.who) || v.date < oldest || (v.today && now.getHours() < LIST_HOUR)) return;
+        if (errs[v.ev.wrid] || v.date < oldest) return;
         if (LOCAL.has(ikey(v.ev.wrid, v.date, v.who))) return; // you just clicked this one: the click already saved it, leave it be
         const s = status(v);
         if ([s.n, s.p, s.t].includes(null)) return;
         const missing = [!s.n && 'notes', !s.p && 'photos', !s.t && 'timesheet'].filter(Boolean);
-        want.set(ikey(v.ev.wrid, v.date, v.who), { v, missing });
+        // Before 5pm today's misses aren't added yet, but an issue that's already there (e.g. from an OK) still updates and ticks off.
+        want.set(ikey(v.ev.wrid, v.date, v.who), { v, missing, early: v.today && now.getHours() < LIST_HOUR });
       });
       if (!want.size) {
         if (/token saved/.test(sy.msg)) { await loadList(); sy.bad = false; sy.msg = 'list on ' + hm(Date.now()); } // proves the token works
@@ -499,19 +511,26 @@
       }
       const L = await loadList();
       let added = 0, closed = 0, changed = 0;
-      for (const [k, { v, missing }] of want) {
+      for (const [k, { v, missing, early }] of want) {
         const ex = L.open.get(k), m = missing.join(', ');
         if (missing.length) {
           if (ex) {
+            if (OWN.test(v.who) && ex.pid !== FU && !noMove.has(ex.id)) { // one of yours still on the lads' list (from before 2.8): move it to your follow ups
+              try {
+                await td('POST', 'tasks/' + ex.id + '/move', { project_id: FU });
+                await td('POST', 'tasks/' + ex.id, { content: titleOf(v, missing), due_date: today });
+                ex.pid = FU; changed++;
+              } catch (e) { if (/token/.test(e.message)) throw e; noMove.add(ex.id); } // couldn't move it: leave it where it is, it still updates and ticks off
+            }
             if (ex.missing === m) continue;
             const was = ex.missing.split(', '), r0 = raw(v), gone = was.filter(x => !missing.includes(x));
             const inNow = gone.filter(x => r0[{ notes: 'n', photos: 'p', timesheet: 't' }[x]] === true), okd = gone.filter(x => !inNow.includes(x));
             await td('POST', 'tasks/' + ex.id, { content: titleOf(v, missing), description: descOf(ex.jn || jnOf(v.ev), v.ev.wrid, v.date, v.who, missing, ex.ok) });
             if (gone.length) await td('POST', 'comments', { task_id: ex.id, content: dmS(today) + ': ' + [inNow.length && listed(inNow) + ' in', okd.length && listed(okd) + " OK'd by Ethan"].filter(Boolean).join(', ') + ', ' + listed(missing) + ' still missing' });
             ex.missing = m; changed++;
-          } else if (!L.done.has(k)) {
-            const t = await td('POST', 'tasks', { project_id: ISSUES, content: titleOf(v, missing), description: descOf(jnOf(v.ev), v.ev.wrid, v.date, v.who, missing, []) });
-            if (t && t.id) L.open.set(k, { id: t.id, missing: m, ok: [], jn: jnOf(v.ev) });
+          } else if (!L.done.has(k) && !early) {
+            const t = await newIssue(v.who, titleOf(v, missing), descOf(jnOf(v.ev), v.ev.wrid, v.date, v.who, missing, []));
+            if (t && t.id) L.open.set(k, { id: t.id, pid: projOf(v.who), missing: m, ok: [], jn: jnOf(v.ev) });
             added++;
           }
         } else if (ex) {
@@ -584,7 +603,7 @@
       if (!on && !(rec && (closed ? splitL(rec.missing).concat(rec.ok) : rec.ok).includes(item))) continue;
       const who = k.split('|')[2], vv = Object.assign({}, v, { who }), rawMissing = rawMiss(vv);
       if (!rec) { // no issue yet for that visit: make one, so the OK is kept
-        const t = await td('POST', 'tasks', { project_id: ISSUES, content: titleOf(vv, rawMissing.length ? rawMissing : [item]), description: descOf(jnOf(v.ev), v.ev.wrid, v.date, who, rawMissing.length ? rawMissing : [item], []) });
+        const t = await newIssue(who, titleOf(vv, rawMissing.length ? rawMissing : [item]), descOf(jnOf(v.ev), v.ev.wrid, v.date, who, rawMissing.length ? rawMissing : [item], []));
         rec = { id: t.id, missing: (rawMissing.length ? rawMissing : [item]).join(', '), ok: [], jn: jnOf(v.ev) };
       }
       if (closed) await td('POST', 'tasks/' + rec.id + '/reopen');
