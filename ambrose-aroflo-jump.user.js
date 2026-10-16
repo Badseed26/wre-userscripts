@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ambrose <-> AroFlo jump
 // @namespace    wre
-// @version      3.13
+// @version      3.14
 // @description  "Open in AroFlo" on Ambrose PO and Tradies Web pages, "Open in Ambrose" on AroFlo tasks, and AroFlo labour hours, job profit and an invoiced-vs-PO-value log on the Ambrose PO list and PO pages
 // @match        https://office.aroflo.com/*
 // @match        https://tradiesadmin.ambroseconstruct.com.au/*
@@ -297,7 +297,7 @@
     const rows = [...th.closest('table').querySelectorAll('tr')].reverse();
     for (const tr of rows) {
       const cells = [...tr.children].map(x => clean(x.textContent)).filter(Boolean);
-      if (!/^Totals?\b/i.test(cells[0] || '')) continue;
+      if (!/^Totals?\b/i.test(cells[0] || '') && !(/\bTotals?\b/i.test(cells.join(' ')) && !/Total Ex/i.test(cells.join(' ')))) continue;
       const $ = cells.filter(c => /^-?\$[\d,]+(\.\d+)?$/.test(c)).map(money);
       if ($.length >= 2) return $[$.length - 2];
     }
@@ -493,18 +493,20 @@
     // cost: AroFlo's Total Ex(Cost) off the task page (the quick feed only has materials and hours, no labour $).
     // On the PC the page is only re-read when the hours, materials or expense count change.
     const sig = h.v + '|' + h.mat + '|' + (h.exp || 0), old = profCache[t.id];
-    let total = h.classic ? h.total : old && old.sig === sig && 'total' in old ? old.total : undefined;
+    let total = h.classic && h.total != null ? h.total : old && old.sig === sig && old.cv === 2 ? old.total : undefined;
     if (total === undefined) total = await taskPageCost(t).catch(() => null);
     const worked = Math.round((h.v * COST_RATE + h.mat) * 100) / 100;
     const ok = total != null && total >= h.mat - 0.5; // a total under the materials alone means we misread it
-    const r = { t: Date.now(), cost: ok ? total : worked, src: ok ? 'aroflo' : 'worked', sig, total: ok ? total : null, inv, invN, exp: h.exp || 0, hrs: h.v, mat: h.mat, phone: !!h.classic };
+    const r = { t: Date.now(), cost: ok ? total : worked, src: ok ? 'aroflo' : 'worked', sig, cv: 2, total: ok ? total : null, inv, invN, exp: h.exp || 0, hrs: h.v, mat: h.mat, phone: !!h.classic };
     profCache[t.id] = r;
     saveProf();
     return r;
   }
+  // the Worksheet tab's costing table comes from its own small page, not the task page
   async function taskPageCost(t) {
-    if (!t.href) return null;
-    const r = await gm({ method: 'GET', url: AF + t.href });
+    const code = ((t.href || '').match(/wrCoded=([^&]+)/i) || [])[1];
+    if (!code) return null;
+    const r = await gm({ method: 'GET', url: AF + '/ims/Site/Resource/Jobsheet/AJAX/view_jobsheet.cfm?wrCoded=' + code });
     if (signedOut(r.responseText)) throw new Error('AroFlo is signed out');
     return pageCost(new DOMParser().parseFromString(r.responseText, 'text/html'));
   }
