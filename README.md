@@ -2,7 +2,7 @@
 
 Tampermonkey scripts for WRE. Open an install link in a browser with Tampermonkey and hit Install. Updates come through automatically.
 
-- Ambrose <-> AroFlo jump 3.10 (jump buttons, PO chips, invoice log, auto-reload): https://raw.githubusercontent.com/Badseed26/wre-userscripts/main/ambrose-aroflo-jump.user.js
+- Ambrose <-> AroFlo jump 3.11 (jump buttons, task name check, PO chips, invoice log, auto-reload): https://raw.githubusercontent.com/Badseed26/wre-userscripts/main/ambrose-aroflo-jump.user.js
 - AroFlo photo grab 1.9 (Ambrose): https://raw.githubusercontent.com/Badseed26/wre-userscripts/main/aroflo-photo-grab.user.js
 - AroFlo to Ambrose photo drag 1.4 (PC only): https://raw.githubusercontent.com/Badseed26/wre-userscripts/main/aroflo-photo-drag.user.js
 - Tradies Web quick fill 1.8 (Ambrose): https://raw.githubusercontent.com/Badseed26/wre-userscripts/main/tradies-quick-fill.user.js

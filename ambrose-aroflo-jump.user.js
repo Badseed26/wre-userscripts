@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ambrose <-> AroFlo jump
 // @namespace    wre
-// @version      3.10
+// @version      3.11
 // @description  "Open in AroFlo" on Ambrose PO and Tradies Web pages, "Open in Ambrose" on AroFlo tasks, and AroFlo labour hours, job profit and an invoiced-vs-PO-value log on the Ambrose PO list and PO pages
 // @match        https://office.aroflo.com/*
 // @match        https://tradiesadmin.ambroseconstruct.com.au/*
@@ -185,6 +185,16 @@
         const po = arofloPo();
         if (po) {
           ui().append(makeBtn('wre-jump-amb', 'Open in Ambrose', 18, async () => open(AMB + '/PurchaseOrders#wre-po=' + po)));
+          // Ambrose task names should start with the PO number ("20334628 - address"). Warn only, never rename.
+          const name = (clean(document.title).match(/^JN \d+ - (.+)$/) || [])[1];
+          if (name && !name.startsWith(po.slice(0, 8))) {
+            const w = document.createElement('div');
+            w.id = 'wre-jump-name';
+            w.textContent = 'Task name should start with ' + po.slice(0, 8);
+            w.title = 'Ambrose task names go "' + po.slice(0, 8) + ' - full address". The jump still works, this is just to keep things tidy.';
+            w.style.cssText = 'position:fixed;right:18px;bottom:62px;z-index:2147483646;background:#b3261e;color:#fff;border-radius:6px;padding:6px 10px;font:600 12px sans-serif;box-shadow:0 2px 8px rgba(0,0,0,.35)';
+            ui().append(w);
+          }
           return;
         }
         await sleep(1500);
@@ -493,8 +503,9 @@
     if (!tasks.length) return { kind: 'none', text: 'not in AroFlo', title: 'No AroFlo task found for PO ' + base + (street ? ' or ' + street : '') };
     if (tasks.length > 1) return { kind: 'err', text: tasks.length + ' tasks, check', title: 'More than one AroFlo task matches ' + label + ': ' + tasks.map(t => 'JN ' + t.jn + ' (' + t.status + ')').join(', ') + '. Not adding them up, check which is right.' };
     const t = tasks[0], pr = profitText(profCache[t.id]);
-    if (hrs == null) return { kind: 'wait', text: 'JN ' + t.jn + ' ...', title: 'Reading labour on JN ' + t.jn, href: t.href, jn: t.jn, pr };
-    return { kind: 'ok', text: (Math.round(hrs * 100) / 100) + ' hrs' + (m.note ? ' (' + m.note + ')' : ''), title: 'JN ' + t.jn + ' (' + t.status + '): labour logged in AroFlo' + (m.how === 'street' ? '. Matched by street, not PO' : '') + (m.noteFull ? '. ' + m.noteFull : ''), href: t.href, jn: t.jn, pr };
+    const nameNote = m.how === 'po' && t.name && !t.name.startsWith(base.slice(0, 8)) ? '. JN ' + t.jn + '\'s name doesn\'t start with the PO' : '';
+    if (hrs == null) return { kind: 'wait', text: 'JN ' + t.jn + ' ...', title: 'Reading labour on JN ' + t.jn + nameNote, href: t.href, jn: t.jn, pr };
+    return { kind: 'ok', text: (Math.round(hrs * 100) / 100) + ' hrs' + (m.note ? ' (' + m.note + ')' : ''), title: 'JN ' + t.jn + ' (' + t.status + '): labour logged in AroFlo' + (m.how === 'street' ? '. Matched by street, not PO' : '') + (m.noteFull ? '. ' + m.noteFull : '') + nameNote, href: t.href, jn: t.jn, pr };
   }
 
   const live = new Map(); // base -> { res, subs }
