@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ambrose <-> AroFlo jump
 // @namespace    wre
-// @version      3.12
+// @version      3.13
 // @description  "Open in AroFlo" on Ambrose PO and Tradies Web pages, "Open in Ambrose" on AroFlo tasks, and AroFlo labour hours, job profit and an invoiced-vs-PO-value log on the Ambrose PO list and PO pages
 // @match        https://office.aroflo.com/*
 // @match        https://tradiesadmin.ambroseconstruct.com.au/*
@@ -289,6 +289,20 @@
     return rows;
   }
   const money = v => +String(v).replace(/[^0-9.\-]/g, '') || 0;
+  // AroFlo's own total cost off a task page: the Totals row of the costing table, Total Ex(Cost) then Total Ex(Sell).
+  // Labour, materials and expenses at AroFlo's cost rates. null if the page doesn't have the table.
+  function pageCost(d) {
+    const th = [...d.querySelectorAll('th,td')].find(x => /^Total Ex\s*\(Cost\)$/.test(clean(x.textContent)));
+    if (!th) return null;
+    const rows = [...th.closest('table').querySelectorAll('tr')].reverse();
+    for (const tr of rows) {
+      const cells = [...tr.children].map(x => clean(x.textContent)).filter(Boolean);
+      if (!/^Totals?\b/i.test(cells[0] || '')) continue;
+      const $ = cells.filter(c => /^-?\$[\d,]+(\.\d+)?$/.test(c)).map(money);
+      if ($.length >= 2) return $[$.length - 2];
+    }
+    return null;
+  }
   async function fetchLabourClassic(id) {
     const t = idx && idx.tasks.find(x => x.id === id);
     if (!t || !t.href) throw new Error('no AroFlo link for that task');
@@ -324,7 +338,8 @@
     const il = [...d.querySelectorAll('a')].find(a => /^Invoices \(\d+\)$/.test(clean(a.textContent)));
     const invList = il && +clean(il.textContent).replace(/\D/g, '') > 0 ? il.getAttribute('href') : '';
     hrs = Math.round(hrs * 100) / 100;
-    hrsCache[id] = { t: Date.now(), v: hrs, mat: Math.round(mat * 100) / 100, invN: invList || t.inv ? 1 : 0, exp, pos: (hrsCache[id] && hrsCache[id].pos) || [], classic: true, invList };
+    const total = pageCost(d);
+    hrsCache[id] = { t: Date.now(), v: hrs, total, mat: Math.round(mat * 100) / 100, invN: invList || t.inv ? 1 : 0, exp, pos: (hrsCache[id] && hrsCache[id].pos) || [], classic: true, invList };
     saveHrs();
     return hrs;
   }
@@ -475,15 +490,28 @@
       const j = JSON.parse(r.responseText);
       (j.items || []).forEach(i => { if (!/void|cancel|delet/i.test(i.status || '')) { inv += +(i.totalAmountEx || 0); invN++; } });
     }
-    const r = { t: Date.now(), cost: Math.round((h.v * COST_RATE + h.mat) * 100) / 100, inv, invN, exp: h.exp || 0, hrs: h.v, mat: h.mat, phone: !!h.classic };
+    // cost: AroFlo's Total Ex(Cost) off the task page (the quick feed only has materials and hours, no labour $).
+    // On the PC the page is only re-read when the hours, materials or expense count change.
+    const sig = h.v + '|' + h.mat + '|' + (h.exp || 0), old = profCache[t.id];
+    let total = h.classic ? h.total : old && old.sig === sig && 'total' in old ? old.total : undefined;
+    if (total === undefined) total = await taskPageCost(t).catch(() => null);
+    const worked = Math.round((h.v * COST_RATE + h.mat) * 100) / 100;
+    const ok = total != null && total >= h.mat - 0.5; // a total under the materials alone means we misread it
+    const r = { t: Date.now(), cost: ok ? total : worked, src: ok ? 'aroflo' : 'worked', sig, total: ok ? total : null, inv, invN, exp: h.exp || 0, hrs: h.v, mat: h.mat, phone: !!h.classic };
     profCache[t.id] = r;
     saveProf();
     return r;
   }
+  async function taskPageCost(t) {
+    if (!t.href) return null;
+    const r = await gm({ method: 'GET', url: AF + t.href });
+    if (signedOut(r.responseText)) throw new Error('AroFlo is signed out');
+    return pageCost(new DOMParser().parseFromString(r.responseText, 'text/html'));
+  }
   const fmt$ = n => (n < 0 ? '-' : '') + '$' + Math.abs(Math.round(n)).toLocaleString('en-AU');
   function profitText(pr) {
     if (!pr) return null;
-    const how = 'cost ' + fmt$(pr.cost) + ' ex (' + pr.hrs + ' hrs at $' + COST_RATE + ' plus ' + fmt$(pr.mat) + ' materials)' + (pr.exp ? '. ' + pr.exp + ' expense' + (pr.exp > 1 ? 's' : '') + ' on the task not counted' : '');
+    const how = pr.src === 'aroflo' ? 'AroFlo total cost ' + fmt$(pr.cost) + ' ex (labour, materials and expenses)' : 'cost ' + fmt$(pr.cost) + ' ex, worked out as ' + pr.hrs + ' hrs at $' + COST_RATE + ' plus ' + fmt$(pr.mat) + ' materials (couldn\'t read AroFlo\'s total)' + (pr.exp ? '. ' + pr.exp + ' expense' + (pr.exp > 1 ? 's' : '') + ' on the task not counted' : '');
     if (!pr.invN) return { kind: 'none', text: fmt$(pr.cost) + ' cost', title: (pr.phone ? 'No invoice AroFlo shows the phone (part invoices on open jobs only show on the PC). ' : 'Nothing invoiced on this task yet. ') + how };
     const p = pr.inv - pr.cost, pct = pr.inv ? Math.round(p / pr.inv * 100) : 0;
     return { kind: p >= 0 ? 'good' : 'bad', text: (p >= 0 ? '+' : '') + fmt$(p) + ' (' + pct + '%)', title: 'Invoiced ' + fmt$(pr.inv) + ' ex across ' + pr.invN + ' invoice' + (pr.invN > 1 ? 's' : '') + ', ' + how + '. Whole task, not just this PO.' };
