@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Ambrose <-> AroFlo jump
 // @namespace    wre
-// @version      3.11
+// @version      3.12
 // @description  "Open in AroFlo" on Ambrose PO and Tradies Web pages, "Open in Ambrose" on AroFlo tasks, and AroFlo labour hours, job profit and an invoiced-vs-PO-value log on the Ambrose PO list and PO pages
 // @match        https://office.aroflo.com/*
 // @match        https://tradiesadmin.ambroseconstruct.com.au/*
@@ -123,7 +123,7 @@
       let m = await matchFull(po, street);
       // not found: the task might be newer than our saved list, or its description changed since we last read it.
       // Get a fresh list and re-read the descriptions before giving up.
-      if (!m.tasks.length) { await freshIndex(); m = await matchFull(po, street, true); }
+      if (!m.tasks.length) { await freshIndex(); m = await matchFull(po, street, 0); }
       tasks = m.tasks; near = m.near || [];
     } catch (e) { /* fall back to a live search */ }
     if (tasks.length === 1) return open(AF + tasks[0].href);
@@ -240,7 +240,7 @@
   // ======================= Ambrose PO list: AroFlo labour beside each line =======================
   // Fast path: one call fetches every Ambrose task in AroFlo (about 0.5s for 500 tasks), so matching a PO
   // to a task is instant and needs no search. Labour comes from AroFlo's small per-task JSON (5KB, ~0.2s).
-  const IDX_FRESH = 5 * 60000, IDX_MAX = 3 * 36e5, HRS_FRESH = 15 * 60000, PAR = 4;
+  const IDX_FRESH = 5 * 60000, IDX_MAX = 3 * 36e5, HRS_FRESH = 15 * 60000, MISS_FRESH = 5 * 60000, PAR = 4;
   const gmGet = (k, d) => { try { return JSON.parse(GM_getValue(k, 'null')) ?? d; } catch (e) { return d; } };
   const gmSet = (k, v) => { try { GM_setValue(k, JSON.stringify(v)); } catch (e) {} };
   const STREET_RE = /\b\d+[A-Za-z]?\/?\d*\s+([A-Z][A-Za-z']+(?:\s[A-Z][A-Za-z']+)*)\s+(?:Street|St|Road|Rd|Drive|Dr|Avenue|Ave|Court|Ct|Place|Pl|Crescent|Cres|Terrace|Tce|Close|Cl|Parade|Pde|Way|Lane|Ln|Circuit|Cct|Boulevard|Blvd|Highway|Hwy|Grove|Gr|Esplanade)\b/;
@@ -397,13 +397,15 @@
 
   // Full PO matching (3.6): a task only counts for a PO when that exact PO, suffix and all, is in its description.
   // Tasks sharing the 8 digit base (a BIBB quote, a return visit) are kept as "near" for the chooser only.
-  async function taskPos(t, po) { // with po: re-read the task if its saved description doesn't have it
-    const h = hrsCache[t.id];
-    if (h && h.pos && Date.now() - h.t < IDX_MAX && !(po && !h.pos.includes(po))) return h.pos;
+  // PC only (the phone searches descriptions instead). Re-read after 15 minutes, or sooner (missAge) when the
+  // saved description doesn't have the PO, so a PO added to a task shows up within a few minutes.
+  async function taskPos(t, po, missAge) {
+    const h = hrsCache[t.id], age = h && h.pos ? Date.now() - h.t : Infinity;
+    if (age < HRS_FRESH && !(po && !h.pos.includes(po) && age >= missAge)) return h.pos;
     await enqueue(() => fetchLabour(t.id), true).catch(() => {});
     return (hrsCache[t.id] && hrsCache[t.id].pos) || [];
   }
-  async function matchFull(po, street, fresh) {
+  async function matchFull(po, street, missAge = MISS_FRESH) {
     await ensureIndex();
     if (!po || po.length <= 8) return matchTasks(po, street); // no suffix to check against
     const base = po.slice(0, 8);
@@ -414,7 +416,7 @@
       const rows = await enqueue(() => descSearch(po), true);
       rows.forEach(r => hits.push(idx.tasks.find(t => t.id === r.id) || r));
       if (hits.length) how = 'po';
-    } else for (const t of near) if ((await taskPos(t, fresh && po)).includes(po)) hits.push(t);
+    } else for (const t of near) if ((await taskPos(t, po, missAge)).includes(po)) hits.push(t);
     let tasks = hits, note = '', noteFull = '';
     const live = hits.filter(t => isLive(t.status));
     if (live.length) tasks = live;
@@ -446,7 +448,7 @@
   // --- job profit: invoiced ex GST minus cost. Labour at the cost rate AroFlo has on every timesheet line
   // (checked across Pearce, Ethan and Lachie on NTT, Travel and NTA: all $80/hr), plus materials at cost.
   const COST_RATE = 80;
-  const PROF_FRESH = 30 * 60000;
+  const profFresh = () => classic === false ? 15 * 60000 : 30 * 60000; // phone pages are big, so it checks less often
   const profCache = gmGet('wreProf', {}); // id -> { t, cost, inv, invN, exp }
   let profDirty = 0;
   const saveProf = () => { clearTimeout(profDirty); profDirty = setTimeout(() => gmSet('wreProf', profCache), 2500); };
@@ -524,7 +526,7 @@
       const cached = t && hrsCache[t.id];
       push(resultFrom(base, street, m, cached ? cached.v : null)); // instant, from what we already know
       if (t && !(cached && Date.now() - cached.t < HRS_FRESH)) push(resultFrom(base, street, m, await enqueue(() => fetchLabour(t.id), true)));
-      if (t) { const pc = profCache[t.id]; if (!(pc && Date.now() - pc.t < PROF_FRESH)) { await enqueue(() => fetchProfit(t), true).catch(() => {}); push(resultFrom(base, street, m, (hrsCache[t.id] || {}).v)); } }
+      if (t) { const pc = profCache[t.id]; if (!(pc && Date.now() - pc.t < profFresh())) { await enqueue(() => fetchProfit(t), true).catch(() => {}); push(resultFrom(base, street, m, (hrsCache[t.id] || {}).v)); } }
       if ((m.tasks.length === 0 || m.note) && idx && Date.now() - idx.t > 2 * 60000) {
         await (idxLoading || fetchIndex()).catch(() => {});
         const m2 = await matchFull(base, street);
@@ -544,9 +546,9 @@
   // after the rows on screen are done, quietly warm every live Ambrose task so the next pages are instant
   let warmed = 0;
   function warmAll() {
-    if (!idx || classic !== false || Date.now() - warmed < PROF_FRESH) return;
+    if (!idx || classic !== false || Date.now() - warmed < profFresh()) return;
     warmed = Date.now();
-    idx.tasks.filter(t => isLive(t.status) && !(profCache[t.id] && Date.now() - profCache[t.id].t < PROF_FRESH))
+    idx.tasks.filter(t => isLive(t.status) && !(profCache[t.id] && Date.now() - profCache[t.id].t < profFresh()))
       .forEach(t => enqueue(() => fetchProfit(t), false).catch(() => {}));
   }
 
