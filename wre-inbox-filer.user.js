@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.0
+// @version      0.9.1
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -31,7 +31,7 @@ const HOST = location.hostname;
 const ON_MAIL = /outlook/.test(HOST), ON_AF = HOST === 'office.aroflo.com';
 
 // ---------- fixed bits ----------
-const VER = '0.9.0';
+const VER = '0.9.1';
 const MODEL = 'claude-haiku-5-5';
 const PRICE_IN = 0.10, PRICE_OUT = 0.50; // USD per million tokens
 const TD = 'https://api.todoist.com/api/v1/';
@@ -222,6 +222,7 @@ try {
 
 // Which tab does the work: only one opened with #wre-filer (it remembers through reloads).
 if (/#wre-filer/.test(location.hash)) { try { sessionStorage.setItem('wfRole', '1'); } catch (e) {} }
+const tabId = () => { let t = ss('wfTabId'); if (!t) { t = 't' + now() + Math.random().toString(36).slice(2, 6); ss('wfTabId', t); } return t; };
 const IS_FILER = (() => { try { return sessionStorage.getItem('wfRole') === '1'; } catch (e) { return false; } })();
 
 // =====================================================================
@@ -292,6 +293,7 @@ if (ON_MAIL) {
   // Step 2 (after the reload): Haiku reads it and the job goes in the queue for the AroFlo tab.
   async function finishPending() {
     const P = gget('wfPending', null); if (!P) return false;
+    if (P.tab && P.tab !== tabId() && now() - (P.at || 0) < 5 * 60e3) return false; // another tab's, give it 5 min
     if ((P.tries || 0) >= 3) { gdel('wfPending'); markSeen(P.key, 'failed'); await safeFu({ sec: 'check', key: 'err-read-' + P.key.slice(0, 60), title: 'Filer couldn\'t read an email: ' + P.info.subject.slice(0, 60), desc: 'From ' + P.info.from + ', ' + P.info.date + '. Check it by hand.', p1: false, due: ymd(new Date()) }); return true; }
     P.tries = (P.tries || 0) + 1; gset('wfPending', P);
     const R = await rules(); const pdfB64 = P.pdfKey ? gget(P.pdfKey, '') : '';
@@ -319,7 +321,7 @@ if (ON_MAIL) {
     let pdfKey = '';
     if (pick) { const b64 = await grabPdf(pick); if (b64) { pdfKey = 'wfPdf_' + id; gset(pdfKey, b64); } else log('Couldn\'t grab the PDF on ' + p.head.slice(0, 60)); }
     if (wasUnread) { await park(); const ok = await markUnread(key); if (!ok) log('!! couldn\'t put back to unread: ' + p.head.slice(0, 60)); }
-    gset('wfPending', { id, key: test ? 'test|' + fullKey : fullKey, rowKey: key, emailAt: (rowTime(p.when) || new Date()).getTime(), builder: sd.builder, info, pdfKey, pdfName: pick, test: !!test });
+    gset('wfPending', { tab: tabId(), at: now(), id, key: test ? 'test|' + fullKey : fullKey, rowKey: key, emailAt: (rowTime(p.when) || new Date()).getTime(), builder: sd.builder, info, pdfKey, pdfName: pick, test: !!test });
     markSeen(key + '|' + ymd(new Date()), 'row');
     if (pdfKey) { status('reloading after the preview'); await sleep(500); location.reload(); return true; }
     return await finishPending();
@@ -329,7 +331,7 @@ if (ON_MAIL) {
   async function scan() {
     if (busy || !IS_FILER) return; busy = true;
     try {
-      const lk = gget('wfMailLock', null); const me = ss('wfTabId') || (ss('wfTabId', 't' + now()), ss('wfTabId'));
+      const lk = gget('wfMailLock', null); const me = tabId();
       if (lk && lk.tab !== me && now() - lk.at < 90e3) { status('another Outlook filer tab is running'); return; }
       gset('wfMailLock', { tab: me, at: now() });
       if (await finishPending()) return;
@@ -516,7 +518,9 @@ if (ON_AF) {
       let row = document.querySelector('[name=locationName]'); while (row && row.querySelectorAll('button,a.afBtn,[role=button]').length < 2) row = row.parentElement;
       const btns = row ? [...row.querySelectorAll('button,a.afBtn,[role=button]')].filter(b => b.offsetParent) : [];
       const pb = btns[btns.length - 1];
-      if (!pb) return opDone(op, { createErr: 'no + button for a new location' }); pb.click();
+      if (!pb) return opDone(op, { createErr: 'no + button for a new location' });
+      if (op.dry) return opDone(op, { createDry: 'no location for ' + a.street + ' yet, would make a new one under ' + v('clientName') + ' (site contact ' + [(op.contact || {}).name, (op.contact || {}).phone].filter(Boolean).join(' ') + ')' });
+      pb.click();
       if (!(await waitFor(() => !!document.getElementById('btnOptSaveLocation'), 8000))) return opDone(op, { createErr: 'new location box didn\'t open' });
       const set = (n, val) => { const e = document.querySelector('.ui-dialog [name=' + n + ']'); if (e && val) setv(e, val); };
       set('SiteContact', (op.contact || {}).name); set('SitePhone', (op.contact || {}).phone); set('Location', a.street); set('suburb', a.suburb); set('postcode', a.postcode);
@@ -631,7 +635,7 @@ if (ON_AF) {
 
   async function runJob(job) {
     const x = job.x, R = job.res || {}, plan = job.plan || [];
-    const fin = async (lines, err) => { job.status = err ? 'error' : 'done'; job.plan = lines; saveJob(job); if (job.dry) await dryNote(job, lines); if (job.pdfKey && !job.dry) gdel(job.pdfKey); log((err ? 'Error: ' : 'Done: ') + job.info.subject.slice(0, 60) + ' | ' + lines.join(' | ')); };
+    const fin = async (lines, err) => { job.status = err ? 'error' : 'done'; job.plan = lines; saveJob(job); if (job.dry) await dryNote(job, job.test && (x.blocks || []).length && !lines.some(l => /^Description: |^Would add under/.test(l)) ? lines.concat(['Scope as it would write it: ' + plain(poBlock(job)).slice(0, 1800)]) : lines); if (job.pdfKey && !job.dry) gdel(job.pdfKey); log((err ? 'Error: ' : 'Done: ') + job.info.subject.slice(0, 60) + ' | ' + lines.join(' | ')); };
     const errFu = async msg => { if (!job.dry) await safeFu({ sec: 'check', key: 'err-' + job.id, p1: true, due: ymd(new Date()), title: 'Filer: ' + msg.slice(0, 80), desc: 'Email: ' + job.info.subject + '\nFrom ' + job.info.from + ', ' + job.info.date + (job.pdfKey ? '\nPDF attached below.' : ''), pdf: job.pdfKey && gget(job.pdfKey, '') ? { name: fileName(job), b64: gget(job.pdfKey, '') } : null }); return fin([msg], true); };
 
     if (/^(po|updated_po|esa)$/.test(x.kind) && !job.pdfKey) return errFu((x.kind == 'esa' ? 'Energex safety advice' : 'PO ' + (x.po_full || '')) + ': couldn\'t grab the PDF out of the email');
@@ -731,7 +735,7 @@ if (ON_AF) {
   async function tick() {
     if (running || !IS_FILER) return; running = true;
     try {
-      const lk = gget('wfAfLock', null); const me = ss('wfTabId') || (ss('wfTabId', 't' + now()), ss('wfTabId'));
+      const lk = gget('wfAfLock', null); const me = tabId();
       if (lk && lk.tab !== me && now() - lk.at < 90e3) { status('another AroFlo filer tab is running'); return; }
       gset('wfAfLock', { tab: me, at: now() });
       if (/login|signin/i.test(location.pathname) || !document.querySelector('a[href*="Calendar"],#topMenu,.afTopNav,nav')) { status('AroFlo looks signed out', true); await safeFu({ sec: 'check', key: 'af-signed-out-' + ymd(new Date()), p1: true, due: ymd(new Date()), title: 'Filer: AroFlo is signed out on your PC', desc: 'Sign back in on the filer tab. Nothing gets filed till then.' }); return; }
