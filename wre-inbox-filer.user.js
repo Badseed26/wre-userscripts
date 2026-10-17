@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.3
+// @version      0.9.4
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -31,7 +31,7 @@ const HOST = location.hostname;
 const ON_MAIL = /outlook/.test(HOST), ON_AF = HOST === 'office.aroflo.com';
 
 // ---------- fixed bits ----------
-const VER = '0.9.3';
+const VER = '0.9.4';
 const PAGE = 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); // this page load
 const MODEL = 'claude-haiku-5-5';
 const PRICE_IN = 0.10, PRICE_OUT = 0.50; // USD per million tokens
@@ -540,10 +540,10 @@ if (ON_AF) {
     setv(document.querySelector('[name=wrname]'), op.name); setv(document.querySelector('[name=custON]'), op.custON); setv(document.querySelector('[name=RequiredBy]'), dmy(new Date()));
     const rich = document.querySelector('[name=descriptionType][value=rich]'); if (rich && !rich.checked) rich.click();
     if (W.CKEDITOR && W.CKEDITOR.instances.myeditor) W.CKEDITOR.instances.myeditor.setData('<p>TBC</p>'); else setv(document.querySelector('[name=description]'), 'TBC');
-    const btn = [...document.querySelectorAll('button,a,input[type=button],input[type=submit]')].filter(b => b.offsetParent).find(b => /(^|\s)Create Task\s*$/i.test((b.innerText || b.value || '').trim()));
+    const btn = document.getElementById('btnAddRequest'); // the green Create Task box at the bottom (a div, checked 18/10)
     if (!btn) return opDone(op, { createErr: 'no Create Task button' });
     if (op.dry) return opDone(op, { createDry: 'filled: ' + v('clientName') + ' | ' + v('locationName') + ' | ' + v('serviceName') + ' | ' + v('wrname') });
-    op.fired = true; ss('wfOp', op); btn.click();
+    op.fired = true; ss('wfOp', op); if ($) $(btn).trigger('click'); else btn.click();
   }
 
   async function resumeOp() {
