@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.6
+// @version      0.9.7
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -31,7 +31,7 @@ const HOST = location.hostname;
 const ON_MAIL = /outlook/.test(HOST), ON_AF = HOST === 'office.aroflo.com';
 
 // ---------- fixed bits ----------
-const VER = '0.9.6';
+const VER = '0.9.7';
 const MAX_READS_DAY = 80; // Haiku reads a day before it stops itself (a runaway loop can't burn the budget)
 const PAGE = 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); // this page load
 const MODEL = 'claude-haiku-5-5';
@@ -123,7 +123,7 @@ async function rules(force) {
     const line = h => ((d.match(new RegExp('^' + h + ':\\s*(.*)$', 'mi')) || [])[1] || '').trim();
     const pd = (line('PAUSE DATES').match(/(\d{4}-\d{2}-\d{2})\D+(\d{4}-\d{2}-\d{2})/) || []); const today = ymd(new Date()); const onLeave = !!pd[1] && today >= pd[1] && today <= pd[2];
     const r = { at: now(), paused: /^y/i.test(line('PAUSED')) || onLeave, onLeave, pauseTo: pd[2] || '', dry: !/^n/i.test(line('DRY RUN')),
-      senders: sec('SENDERS').map(x => { const [k, b] = x.split('|').map(y => y.trim()); return { k: (k || '').toLowerCase(), builder: b || '' }; }).filter(x => x.k),
+      senders: sec('SENDERS').map(x => { const [k, b, w] = x.split('|').map(y => y.trim()); return { k: (k || '').toLowerCase(), builder: b || '', words: (w || '').split(',').map(y => y.trim().toLowerCase()).filter(y => y.length > 2) }; }).filter(x => x.k),
       pull: line('PULL'), skip: line('SKIP') };
     gset('wfRules', r); return r;
   } catch (e) { if (c) return c; throw e; }
@@ -176,11 +176,12 @@ Work out what this email is:
 
 Reply with ONLY one JSON object:
 {"kind":"po|updated_po|esa|dates_not_accurate|new_dates|cancelled|skip","why":"few words",
- "builder":"builder company","po_full":"20305368-07","po_base":"20305368","ref":"builder's own job ref if not Ambrose, else empty",
+ "builder":"builder company","po_full":"20305368-07","po_base":"20305368","ref":"",
  "address":{"street":"3 Natone Court","suburb":"Edens Landing","state":"QLD","postcode":"4207"},
  "dates":[{"what":"isolation","start":"2026-11-09T07:00","end":"2026-11-09T10:00"}],
  "summary":"one short line in plain words, e.g. New PO, isolation and fit off for 2 ACs"}
-Leave a field empty ("" or []) when the email doesn't say. Dates only for WRE's own work, local Brisbane time.`;
+Leave a field empty ("" or []) when the email doesn't say. Dates only for WRE's own work, local Brisbane time.
+Numbers: po_full is the purchase or work order number as printed (Ambrose 20305368-07, NthStar LNG40018493, ARC PO117723-BU01-001, Responsive RB-8504-301, Reconstruct JB04574-7483, Bentino 17473-30152). po_base is Ambrose only: the 8 digits before the dash. ref is the builder's own job reference for everyone but Ambrose, the thing their job is known by: NthStar GC3712 or RES4637, Responsive RB-8504, Reconstruct JB04574, Bentino 17473, ARC 118964-BU01 (the "ARC Ref"). Leave ref empty for Ambrose.`;
 
 const SCOPE_RULES = `Also write the job up for WRE's field staff ("the boys") the way Ethan wants it in AroFlo. The goal: a lad reads it on site and knows exactly what to do on each visit. Keep the content, change the wording.
 
@@ -290,7 +291,7 @@ if (ON_MAIL) {
 
   const seen = () => gget('wfSeen', {});
   const markSeen = k => { const s = seen(); s[k] = now(); const cut = now() - 40 * 864e5; Object.keys(s).forEach(x => { if (!(+s[x] > cut)) delete s[x]; }); gset('wfSeen', s); };
-  const senderOf = (head, R) => R.senders.find(s => head.toLowerCase().includes(s.k) || (s.builder && head.toLowerCase().includes(s.builder.toLowerCase().split(' ')[0])));
+  const senderOf = (head, R) => { const h = head.toLowerCase(); return R.senders.find(s => h.includes(s.k) || (s.builder && h.includes(s.builder.toLowerCase().split(' ')[0])) || s.words.some(w => h.includes(w))); };
   const SKIP_SUBJ = /Acceptance Required - Purchase Order|Safety Advice Request Form - Submission|Remittance Advice|Tax Invoice|RCTI/i;
 
   // Read the open email in the reading pane.
@@ -455,7 +456,7 @@ if (ON_AF) {
   const P = x => '<p>' + x + '</p>', B = x => '<strong>' + x + '</strong>', BU = x => '<strong><u>' + x + '</u></strong>', A = (u, t) => '<a href="' + esc(u) + '">' + esc(t) + '</a>';
   const ul = a => a && a.length ? '<ul>' + a.map(i => '<li>' + esc(typeof i == 'string' ? i : (i.t || '')) + '</li>').join('') + '</ul>' : '';
   const addrLine = a => [a.street, a.suburb, a.state || 'QLD', a.postcode].filter(Boolean).join(' ');
-  const poLine = (job) => { const x = job.x; return /ambrose/i.test(job.builder) ? 'P.O. No: ' + x.po_full + '- ' + addrLine(x.address) : 'P.O. No: ' + [x.ref, x.po_full].filter(Boolean).join(' - ') + ' - ' + addrLine(x.address); };
+  const poLine = (job) => { const x = job.x; return /ambrose/i.test(job.builder) ? 'P.O. No: ' + x.po_full + '- ' + addrLine(x.address) : 'P.O. No: ' + [...new Set([x.ref, x.po_full].filter(Boolean))].join(' - ') + ' - ' + addrLine(x.address); };
   const poBlock = job => { const x = job.x, i = job.info; let h = P(BU(esc(poLine(job)))); if (i.rs) h += P('View Repair Schedule - ' + A(i.rs, 'Repair Schedule')); if (i.img) h += P('View Site Images - ' + A(i.img, 'Images'));
     (x.blocks || []).forEach(b => { h += P(' '); if (b.h) h += P(BU(esc(b.h))); (b.rooms || []).forEach(r => { h += P(B(esc(r.r))) + ul(r.items); }); h += ul(b.items); }); return h; };
   const fullDesc = job => { const x = job.x; let h = ''; (x.warn || []).forEach(w => h += P(B(esc(w))));
@@ -663,7 +664,8 @@ if (ON_AF) {
   // ---------- the job runner ----------
   const fileName = job => { const x = job.x; if (x.kind == 'esa') return 'ESA ' + shortStreet(x.address.street) + '.pdf'; const b = /ambrose/i.test(job.builder) ? ' Ambrose' : job.builder ? ' ' + job.builder.split(' ')[0] : ''; return 'PO ' + (x.po_full || x.ref) + b + (x.kind == 'updated_po' ? ' updated ' + dmy(new Date()).slice(0, 5).replace('/', '-') : '') + '.pdf'; };
   const trialOn = () => { const s = gget('wfLiveAt', 0); return !s || now() - s < TRIAL_DAYS * 864e5; };
-  const tasksFor = async x => { const out = new Map(); if (x.po_base) (await search(x.po_base, 'CustOn')).forEach(r => out.set(r.jn, r)); if (x.address && x.address.street) (await search(x.address.street.replace(/^\S+\s+/, ''), 'Location')).filter(r => hasAddr(r.name, x.address.street)).forEach(r => out.set(r.jn, r)); return [...out.values()]; };
+  const jobKey = x => x.po_base || x.ref || '';
+  const tasksFor = async x => { const out = new Map(); if (jobKey(x)) (await search(jobKey(x), 'CustOn')).forEach(r => out.set(r.jn, r)); if (jobKey(x)) (await search(jobKey(x), 'RefNo')).forEach(r => out.set(r.jn, r)); if (x.address && x.address.street) (await search(x.address.street.replace(/^\S+\s+/, ''), 'Location')).filter(r => hasAddr(r.name, x.address.street)).forEach(r => out.set(r.jn, r)); return [...out.values()]; };
 
   // For test runs: what Haiku read out of the email, so it can be checked by eye.
   const covText = c => c.none ? 'Haiku didn\'t list the PO lines, so it couldn\'t be checked' : c.lines + ' PO lines, ' + (c.missing.length || c.leftOut.length ? (c.missing.length ? 'MISSING: ' + c.missing.join(' / ') : '') + (c.leftOut.length ? (c.missing.length ? '. ' : '') + 'LEFT OUT (not a charge): ' + c.leftOut.join(' / ') : '') : 'all accounted for');
@@ -704,7 +706,7 @@ if (ON_AF) {
     if (x.kind == 'cancelled') {
       const ts = (await tasksFor(x)).filter(isOpenTask); const who = ts.length ? ts.map(r => 'JN ' + r.jn).join(', ') : 'no open task found';
       if (job.dry) return fin(['Cancellation: would flag it (' + who + ')']);
-      await safeFu({ sec: 'check', key: 'cancel-' + (x.po_full || x.po_base || norm(x.address.street)), p1: true, due: ymd(new Date()), title: 'Builder cancelled: ' + (shortStreet(x.address.street) || x.po_full || 'see email') + (ts.length ? ' (' + who + ')' : ''), desc: (x.summary || 'Cancellation email from the builder.') + '\nNothing changed in AroFlo. Cancel the bookings if they\'re still there.\nEmail: ' + job.info.subject });
+      await safeFu({ sec: 'check', key: 'cancel-' + (x.po_full || jobKey(x) || norm(x.address.street)), p1: true, due: ymd(new Date()), title: 'Builder cancelled: ' + (shortStreet(x.address.street) || x.po_full || 'see email') + (ts.length ? ' (' + who + ')' : ''), desc: (x.summary || 'Cancellation email from the builder.') + '\nNothing changed in AroFlo. Cancel the bookings if they\'re still there.\nEmail: ' + job.info.subject });
       return fin(['Cancellation flagged (' + who + ')']);
     }
     if (x.kind == 'dates_not_accurate' || x.kind == 'new_dates') {
@@ -717,8 +719,8 @@ if (ON_AF) {
     if (x.kind == 'po' || x.kind == 'updated_po') {
       if (!x.po_full && !x.ref) return errFu('PO email but I couldn\'t read a PO number');
       if (!job.target && !job.creating) {
-        const all = await tasksFor(x); const open = all.filter(isOpenTask).filter(r => x.po_base ? (r.name.startsWith(x.po_base) || r.ref.includes(x.po_base)) : hasAddr(r.name, x.address.street));
-        if (open.length > 1) return errFu('PO ' + x.po_full + ': ' + open.length + ' open tasks for that base number (JN ' + open.map(r => r.jn).join(', ') + ')');
+        const all = await tasksFor(x); const k = jobKey(x); const open = all.filter(isOpenTask).filter(r => k ? (r.name.toUpperCase().startsWith(k.toUpperCase()) || (r.ref || '').toUpperCase().includes(k.toUpperCase())) : hasAddr(r.name, x.address.street));
+        if (open.length > 1) return errFu('PO ' + x.po_full + ': ' + open.length + ' open tasks for ' + (k || 'that address') + ' (JN ' + open.map(r => r.jn).join(', ') + ')');
         if (open.length == 1) { job.target = { jn: open[0].jn, href: open[0].href, name: open[0].name }; saveJob(job); }
         else {
           if (x.kind == 'updated_po') return errFu('Updated PO ' + x.po_full + ' but no open task has it');
@@ -748,9 +750,9 @@ if (ON_AF) {
       if (job.creating) {
         const amb = /ambrose/i.test(job.builder);
         const name = (amb ? x.po_base : (x.ref || x.po_full)) + ' - ' + addrLine(x.address);
-        if (job.dry && !R.createDry && !R.createErr) return startOp({ op: 'create', jobId: job.id, dry: true, address: x.address, client: job.builder, contact: (x.site_contacts || [])[0], name, custON: x.po_base || x.po_full, taskType: amb ? 'Ambrose Construct Services' : 'General Electrical' }, '/ims/Site/Service/workrequest/index.cfm?new=1&tid=IMS.CRT.TSK');
+        if (job.dry && !R.createDry && !R.createErr) return startOp({ op: 'create', jobId: job.id, dry: true, address: x.address, client: job.builder, contact: (x.site_contacts || [])[0], name, custON: jobKey(x) || x.po_full, taskType: amb ? 'Ambrose Construct Services' : 'General Electrical' }, '/ims/Site/Service/workrequest/index.cfm?new=1&tid=IMS.CRT.TSK');
         if (job.dry) return fin(['New PO ' + x.po_full + ': no open task, would create one', 'Create page check: ' + (R.createDry || R.createErr), 'Task name: ' + name, 'Description: ' + plain(fullDesc(job)).split(poLine(job))[0] + poLine(job) + scopeText(x), 'Vague lines: ' + ((x.vague || []).map(v => v.po_said).join(' / ') || 'none'), 'Would attach ' + fileName(job)]);
-        if (!R.jn && !R.createErr) return startOp({ op: 'create', jobId: job.id, address: x.address, client: job.builder, contact: (x.site_contacts || [])[0], name, custON: x.po_base || x.po_full, taskType: amb ? 'Ambrose Construct Services' : 'General Electrical' }, '/ims/Site/Service/workrequest/index.cfm?new=1&tid=IMS.CRT.TSK');
+        if (!R.jn && !R.createErr) return startOp({ op: 'create', jobId: job.id, address: x.address, client: job.builder, contact: (x.site_contacts || [])[0], name, custON: jobKey(x) || x.po_full, taskType: amb ? 'Ambrose Construct Services' : 'General Electrical' }, '/ims/Site/Service/workrequest/index.cfm?new=1&tid=IMS.CRT.TSK');
         if (R.createErr) return errFu('New PO ' + x.po_full + ', couldn\'t create the task: ' + R.createErr);
         const r = await findJn(R.jn); if (!r) return errFu('Created JN ' + R.jn + ' but can\'t find it');
         if (!R.desc && !R.descErr) { const d = await getDoc(r.href); return startOp({ op: 'desc', jobId: job.id, mode: 'set', html: fullDesc(job), jn: R.jn }, headerHref(d)); }
@@ -771,7 +773,7 @@ if (ON_AF) {
     if (x.cov && (x.cov.none || x.cov.missing.length || x.cov.leftOut.length)) issues.push('PO line check: ' + covText(x.cov) + '. Add anything missing to the description.');
     if (x.overhead_power) issues.push('Overhead power on this PO. Needs an ESA lodged if there isn\'t one.');
     if (issues.length || trialOn()) await safeFu({ sec: 'check', key: 'chk-' + x.po_full, p1: !!(R.upErr || R.descErr || (x.cov && x.cov.missing.length)), due: ymd(new Date()), title: (issues.length ? 'Check ' : 'Check the description on ') + 'JN ' + jn + ', ' + st + (isNew ? ' (new task)' : ' (PO -' + x.po_full.split('-')[1] + ' added)'), desc: (issues.join('\n\n') || 'Trial run: eyeball what the filer wrote.') + '\nEmail: ' + job.info.subject });
-    const b = gget('wfBases', {}); b[x.po_base || x.po_full] = now(); gset('wfBases', b);
+    const b = gget('wfBases', {}); b[jobKey(x) || x.po_full] = now(); gset('wfBases', b);
   }
 
   // 5pm: two open tasks sharing a base number.
@@ -779,7 +781,7 @@ if (ON_AF) {
     const k = 'wfDU_' + ymd(new Date()); if (gget(k, 0) || new Date().getHours() < 17) return; gset(k, 1);
     const b = gget('wfBases', {}); const cut = now() - 30 * 864e5;
     for (const base of Object.keys(b)) { if (b[base] < cut) { delete b[base]; continue; }
-      const open = (await search(base, 'CustOn')).filter(isOpenTask).filter(r => r.name.startsWith(base));
+      const open = (await search(base, 'CustOn')).filter(isOpenTask).filter(r => r.name.toUpperCase().startsWith(base.toUpperCase()));
       if (open.length > 1) await safeFu({ sec: 'check', key: 'dup-' + base, p1: true, due: ymd(new Date()), title: 'Double up: ' + open.length + ' open tasks for PO ' + base + ' (JN ' + open.map(r => r.jn).join(', ') + ')', desc: open.map(r => '- JN ' + r.jn + ' ' + r.name + ' (' + r.status + ')').join('\n') }); }
     gset('wfBases', b);
   }
