@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.2
+// @version      0.9.3
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -31,7 +31,8 @@ const HOST = location.hostname;
 const ON_MAIL = /outlook/.test(HOST), ON_AF = HOST === 'office.aroflo.com';
 
 // ---------- fixed bits ----------
-const VER = '0.9.2';
+const VER = '0.9.3';
+const PAGE = 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); // this page load
 const MODEL = 'claude-haiku-5-5';
 const PRICE_IN = 0.10, PRICE_OUT = 0.50; // USD per million tokens
 const TD = 'https://api.todoist.com/api/v1/';
@@ -110,7 +111,7 @@ const reopenFu = id => td('POST', 'tasks/' + id + '/reopen');
 // ---------- rules (the Inbox filer rules task, edited on the dashboard) ----------
 async function rules(force) {
   const c = gget('wfRules', null);
-  if (!force && c && now() - c.at < 10 * 60e3) return c;
+  if (!force && c && now() - c.at < 2 * 60e3) return c;
   try {
     const t = await td('GET', 'tasks/' + RULES_TASK);
     const d = (t && t.description) || '';
@@ -298,16 +299,17 @@ if (ON_MAIL) {
     const P = gget('wfPending', null); if (!P) return false;
     if (P.tab && P.tab !== tabId() && now() - (P.at || 0) < 5 * 60e3) return false; // another tab's, give it 5 min
     if ((P.tries || 0) >= 3) { gdel('wfPending'); markSeen(P.key, 'failed'); await safeFu({ sec: 'check', key: 'err-read-' + P.key.slice(0, 60), title: 'Filer couldn\'t read an email: ' + P.info.subject.slice(0, 60), desc: 'From ' + P.info.from + ', ' + P.info.date + '. Check it by hand.', p1: false, due: ymd(new Date()) }); return true; }
-    P.tries = (P.tries || 0) + 1; gset('wfPending', P);
+    if (P.run && P.run.page !== PAGE && now() - P.run.at < 3 * 60e3) return false; // already being read (this tab, before or after a reload)
+    P.tries = (P.tries || 0) + 1; P.run = { page: PAGE, at: now() }; gset('wfPending', P);
     const R = await rules(); const pdfB64 = P.pdfKey ? gget(P.pdfKey, '') : '';
     status('reading ' + P.info.subject.slice(0, 40));
     const content = [{ type: 'text', text: READ_RULES + (pdfB64 ? '\n\n' + SCOPE_RULES : '') + '\n\nEMAIL\nFrom: ' + P.info.from + '\nDate: ' + P.info.date + '\nSubject: ' + P.info.subject + '\nAttachments: ' + (P.info.pdfs.join(', ') || 'none') + '\n\n' + P.info.body }];
     if (pdfB64) content.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdfB64 } });
     let x; try { x = await ai(content, pdfB64 ? 9000 : 1200, !!pdfB64); } catch (e) { log('Haiku failed: ' + e.message); status('Haiku: ' + e.message, true); return true; }
     x.address = x.address || {}; x.dates = x.dates || []; x.blocks = x.blocks || []; x.vague = x.vague || []; x.site_contacts = x.site_contacts || []; x.warn = x.warn || [];
-    const job = { id: P.id, at: now(), emailAt: P.emailAt, dry: R.dry || !!P.test, test: !!P.test, key: P.key, builder: P.builder || x.builder || '', info: { from: P.info.from, date: P.info.date, subject: P.info.subject, rs: P.info.rs, rec: P.info.rec, img: P.info.img, pdfName: P.pdfName || '' }, pdfKey: P.pdfKey || '', x, status: 'new' };
+    const job = { id: P.id + Math.random().toString(36).slice(2, 6), at: now(), emailAt: P.emailAt, dry: R.dry || !!P.test, test: !!P.test, key: P.key, builder: P.builder || x.builder || '', info: { from: P.info.from, date: P.info.date, subject: P.info.subject, rs: P.info.rs, rec: P.info.rec, img: P.info.img, pdfName: P.pdfName || '' }, pdfKey: P.pdfKey || '', x, status: 'new' };
     if (x.kind == 'skip' || !x.kind) { log('Skip: ' + P.info.subject.slice(0, 70) + ' (' + (x.why || '') + ')'); if (P.pdfKey) gdel(P.pdfKey); if (job.test) await dryNote(job, ['Would skip it: ' + (x.why || '')]); }
-    else { const q = gget('wfJobs', []); q.push(job); gset('wfJobs', q); log('Queued ' + x.kind + ': ' + P.info.subject.slice(0, 70)); }
+    else { const q = gget('wfJobs', []); if (q.some(j => j.key == job.key && now() - j.at < 30 * 60e3)) log('Already queued, not doubling up: ' + P.info.subject.slice(0, 70)); else { q.push(job); gset('wfJobs', q); log('Queued ' + x.kind + ': ' + P.info.subject.slice(0, 70)); } }
     if (!P.test) markSeen(P.key); gdel('wfPending'); status('idle'); return true;
   }
 
@@ -326,13 +328,13 @@ if (ON_MAIL) {
     if (wasUnread) { await park(); const ok = await markUnread(key); if (!ok) log('!! couldn\'t put back to unread: ' + p.head.slice(0, 60)); }
     gset('wfPending', { tab: tabId(), at: now(), id, key: test ? 'test|' + fullKey : fullKey, rowKey: key, emailAt: test ? 0 : (rowTime(p.when) || new Date()).getTime(), builder: sd.builder, info, pdfKey, pdfName: pick, test: !!test });
     markSeen(key + '|' + ymd(new Date()), 'row');
-    if (pdfKey) { status('reloading after the preview'); await sleep(500); location.reload(); return true; }
+    if (pdfKey) { reloading = true; status('reloading after the preview'); await sleep(500); location.reload(); return true; }
     return await finishPending();
   }
 
-  let busy = false;
+  let busy = false, reloading = false;
   async function scan() {
-    if (busy || !IS_FILER) return; busy = true;
+    if (busy || reloading || !IS_FILER) return; busy = true;
     try {
       if (await finishPending()) return;
       const lk = gget('wfMailLock', null); const me = tabId();
@@ -538,7 +540,7 @@ if (ON_AF) {
     setv(document.querySelector('[name=wrname]'), op.name); setv(document.querySelector('[name=custON]'), op.custON); setv(document.querySelector('[name=RequiredBy]'), dmy(new Date()));
     const rich = document.querySelector('[name=descriptionType][value=rich]'); if (rich && !rich.checked) rich.click();
     if (W.CKEDITOR && W.CKEDITOR.instances.myeditor) W.CKEDITOR.instances.myeditor.setData('<p>TBC</p>'); else setv(document.querySelector('[name=description]'), 'TBC');
-    const btn = [...document.querySelectorAll('button,a,input[type=button]')].find(b => /^\s*Create Task\s*$/i.test(b.innerText || b.value || ''));
+    const btn = [...document.querySelectorAll('button,a,input[type=button],input[type=submit]')].filter(b => b.offsetParent).find(b => /(^|\s)Create Task\s*$/i.test((b.innerText || b.value || '').trim()));
     if (!btn) return opDone(op, { createErr: 'no Create Task button' });
     if (op.dry) return opDone(op, { createDry: 'filled: ' + v('clientName') + ' | ' + v('locationName') + ' | ' + v('serviceName') + ' | ' + v('wrname') });
     op.fired = true; ss('wfOp', op); btn.click();
@@ -759,7 +761,9 @@ if (ON_AF) {
       const R = await rules(); if (R.paused) { status('paused'); return; }
       if (R.dry === false && !gget('wfLiveAt', 0)) gset('wfLiveAt', now());
       const q = jobs().filter(j => j.status == 'new' && (!j.notBefore || j.notBefore <= now()));
-      if (q.length) { status('working: ' + q[0].info.subject.slice(0, 40)); await runJob(q[0]); }
+      if (q.length) { const j = q[0]; j.tries = (j.tries || 0) + 1; saveJob(j);
+        if (j.tries > 5) { j.status = 'error'; saveJob(j); log('Gave up after 5 goes: ' + j.info.subject.slice(0, 60)); if (!j.dry) await safeFu({ sec: 'check', key: 'err-' + j.id, p1: true, due: ymd(new Date()), title: 'Filer got stuck on: ' + j.info.subject.slice(0, 60), desc: 'It tried 5 times. Check it by hand.' }); }
+        else { status('working: ' + j.info.subject.slice(0, 40)); await runJob(j); } }
       else {
         status('idle, ' + new Date().toLocaleTimeString('en-AU', { hour: 'numeric', minute: '2-digit' }));
         if (now() - gget('wfBookAt', 0) > 60 * 60e3 && !R.dry) { gset('wfBookAt', now()); await checkToBook(); }
@@ -775,6 +779,7 @@ if (ON_AF) {
     await waitFor(() => !!document.body, 10000); mountChip();
     if (!IS_FILER) return;
     status('starting');
+    { const seenIds = new Set(), seenKeys = new Set(); const q = jobs().filter(j => { if (seenIds.has(j.id) || (j.status == 'new' && seenKeys.has(j.key))) return false; seenIds.add(j.id); if (j.status == 'new') seenKeys.add(j.key); return true; }); if (q.length != jobs().length) { log('Cleared ' + (jobs().length - q.length) + ' doubled up job(s)'); gset('wfJobs', q); } }
     if (await resumeOp()) return;
     if (!/Site\/Home/.test(location.pathname)) { go(HOME); return; }
     setInterval(tick, 20e3); setTimeout(tick, 3000);
