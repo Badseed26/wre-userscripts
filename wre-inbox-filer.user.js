@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.4
+// @version      0.9.5
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -31,7 +31,7 @@ const HOST = location.hostname;
 const ON_MAIL = /outlook/.test(HOST), ON_AF = HOST === 'office.aroflo.com';
 
 // ---------- fixed bits ----------
-const VER = '0.9.4';
+const VER = '0.9.5';
 const PAGE = 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); // this page load
 const MODEL = 'claude-haiku-5-5';
 const PRICE_IN = 0.10, PRICE_OUT = 0.50; // USD per million tokens
@@ -127,11 +127,23 @@ async function rules(force) {
 
 // ---------- Claude Haiku ----------
 const aiKey = () => gget('wreAnthropicKey', '');
-async function ai(content, maxTok, think) {
+// Did every PO line make it into the description? Plain script, no AI: each line's dot point has to really be in blocks,
+// and only charges can be left out.
+function coverage(x) {
+  const n = t => String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const items = []; (x.blocks || []).forEach(b => { (b.rooms || []).forEach(r => (r.items || []).forEach(i => items.push(n(typeof i == 'string' ? i : i.t)))); (b.items || []).forEach(i => items.push(n(typeof i == 'string' ? i : i.t))); });
+  const missing = [], leftOut = [];
+  (x.po_lines || []).forEach(l => { const w = String(l.went || '');
+    if (/^left out/i.test(w)) { if (!/call ?out|minimum|labour rate|hourly|allowance|attendance fee|travel|double (site )?visit/i.test(l.said || '') || /safety advice|shroud|overhead/i.test(l.said || '')) leftOut.push(l.said + ' (' + w + ')'); }
+    else if (!w || !items.some(i => i && (i == n(w) || i.includes(n(w)) || n(w).includes(i)))) missing.push(l.said); });
+  return { lines: (x.po_lines || []).length, items: items.length, missing, leftOut, none: !(x.po_lines || []).length && items.length > 0 };
+}
+async function ai(content, maxTok, think, effort) {
   if (!aiKey()) throw new Error('no Anthropic API key (Tampermonkey menu: Set Anthropic API key)');
   const body = { model: MODEL, max_tokens: maxTok || 3000, messages: [{ role: 'user', content }] };
-  if (!think) body.thinking = { type: 'disabled' };
-  const r = await gm({ method: 'POST', url: 'https://api.anthropic.com/v1/messages', timeout: 120000,
+  if (effort) body.output_config = { effort }; // xhigh can't have thinking turned off
+  if (!think && !/^(xhigh|max)$/.test(effort || '')) body.thinking = { type: 'disabled' };
+  const r = await gm({ method: 'POST', url: 'https://api.anthropic.com/v1/messages', timeout: 300000,
     headers: { 'content-type': 'application/json', 'x-api-key': aiKey(), 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' }, data: JSON.stringify(body) });
   if (!r.responseText) throw new Error('no reply from Haiku (status ' + r.status + ')');
   let j; try { j = JSON.parse(r.responseText); } catch (e) { throw new Error('Haiku sent back something odd (' + r.status + ')'); }
@@ -186,7 +198,10 @@ Add these fields to the same JSON object:
  "make_safe":false,"overhead_power":false,
  "blocks":[{"h":"VISIT 1 - ISO","rooms":[{"r":"Hallway","items":["Disconnect, label and store 2 x light switches"]}],"items":[]}],
  "vague":[{"po_said":"","wrote":""}],
- "changes":"for updated_po only: what's different on this version, if you can tell"`;
+ "changes":"for updated_po only: what's different on this version, if you can tell",
+ "po_lines":[{"said":"one PO line item, copied word for word with its quantity","went":"the dot point it became, copied exactly as you wrote it in blocks, or 'left out: <reason>'"}]
+
+po_lines is a check on your own work. List EVERY line item on the PO scope, in order, including charges. For each, "went" is the exact dot point text from blocks (if one PO line became two dot points, e.g. disconnect in visit 1 and reconnect in visit 2, give the first one). Only charge lines (minimum call out, labour rate, allowance for a double visit, attendance fee) may be "left out: charge only". Never leave out a work line or an instruction to the contractor.`;
 
 // ---------- small UI chip ----------
 let chip = null;
@@ -305,7 +320,8 @@ if (ON_MAIL) {
     status('reading ' + P.info.subject.slice(0, 40));
     const content = [{ type: 'text', text: READ_RULES + (pdfB64 ? '\n\n' + SCOPE_RULES : '') + '\n\nEMAIL\nFrom: ' + P.info.from + '\nDate: ' + P.info.date + '\nSubject: ' + P.info.subject + '\nAttachments: ' + (P.info.pdfs.join(', ') || 'none') + '\n\n' + P.info.body }];
     if (pdfB64) content.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdfB64 } });
-    let x; try { x = await ai(content, pdfB64 ? 9000 : 1200, !!pdfB64); } catch (e) { log('Haiku failed: ' + e.message); status('Haiku: ' + e.message, true); return true; }
+    let x; try { x = await ai(content, pdfB64 ? 32000 : 1200, !!pdfB64, pdfB64 ? 'xhigh' : 'low'); } catch (e) { log('Haiku failed: ' + e.message); status('Haiku: ' + e.message, true); return true; }
+    x.po_lines = x.po_lines || []; if (/^(po|updated_po)$/.test(x.kind)) x.cov = coverage(x);
     x.address = x.address || {}; x.dates = x.dates || []; x.blocks = x.blocks || []; x.vague = x.vague || []; x.site_contacts = x.site_contacts || []; x.warn = x.warn || [];
     const job = { id: P.id + Math.random().toString(36).slice(2, 6), at: now(), emailAt: P.emailAt, dry: R.dry || !!P.test, test: !!P.test, key: P.key, builder: P.builder || x.builder || '', info: { from: P.info.from, date: P.info.date, subject: P.info.subject, rs: P.info.rs, rec: P.info.rec, img: P.info.img, pdfName: P.pdfName || '' }, pdfKey: P.pdfKey || '', x, status: 'new' };
     if (x.kind == 'skip' || !x.kind) { log('Skip: ' + P.info.subject.slice(0, 70) + ' (' + (x.why || '') + ')'); if (P.pdfKey) gdel(P.pdfKey); if (job.test) await dryNote(job, ['Would skip it: ' + (x.why || '')]); }
@@ -641,6 +657,7 @@ if (ON_AF) {
   const tasksFor = async x => { const out = new Map(); if (x.po_base) (await search(x.po_base, 'CustOn')).forEach(r => out.set(r.jn, r)); if (x.address && x.address.street) (await search(x.address.street.replace(/^\S+\s+/, ''), 'Location')).filter(r => norm(r.name).includes(norm(x.address.street))).forEach(r => out.set(r.jn, r)); return [...out.values()]; };
 
   // For test runs: what Haiku read out of the email, so it can be checked by eye.
+  const covText = c => c.none ? 'Haiku didn\'t list the PO lines, so it couldn\'t be checked' : c.lines + ' PO lines, ' + (c.missing.length || c.leftOut.length ? (c.missing.length ? 'MISSING: ' + c.missing.join(' / ') : '') + (c.leftOut.length ? (c.missing.length ? '. ' : '') + 'LEFT OUT (not a charge): ' + c.leftOut.join(' / ') : '') : 'all accounted for');
   const readOut = (job, lines) => { const x = job.x, o = ['Read as: ' + x.kind + (x.po_full ? ', PO ' + x.po_full : '') + (x.address && x.address.street ? ', ' + addrLine(x.address) : '') + (x.summary ? ' (' + x.summary + ')' : '')];
     const sc = (x.site_contacts || []).filter(c => c.name || c.phone).map(c => [c.name, c.phone].filter(Boolean).join(' ')).join(' OR '); if (sc) o.push('Site contact: ' + sc);
     if (x.supervisor && x.supervisor.name) o.push('Supervisor: ' + [x.supervisor.name, x.supervisor.phone].filter(Boolean).join(' '));
@@ -649,12 +666,13 @@ if (ON_AF) {
     if ((x.blocks || []).length && !lines.some(l => /^Description: |^Would add under/.test(l))) o.push('Scope as it would write it: ' + scopeText(x));
     else if (/^(po|updated_po)$/.test(x.kind) && !(x.blocks || []).length) o.push('Scope: Haiku wrote none');
     if ((x.vague || []).length) o.push('Not sure about: ' + x.vague.map(v => v.po_said).join(' / '));
+    if (x.cov) o.push('Line check: ' + covText(x.cov));
     return o; };
   // The scope as plain lines, headings in capitals, so it reads like the AroFlo description.
   const scopeText = x => (x.blocks || []).map(b => (b.h ? '\n' + b.h.toUpperCase() : '') + (b.rooms || []).map(r => '\n' + r.r + (r.items || []).map(i => '\n  * ' + (typeof i == 'string' ? i : i.t)).join('')).join('') + (b.items || []).map(i => '\n  * ' + (typeof i == 'string' ? i : i.t)).join('')).join('\n').slice(0, 2500);
   async function runJob(job) {
     const x = job.x, R = job.res || {}, plan = job.plan || [];
-    const fin = async (lines, err) => { job.status = err ? 'error' : 'done'; job.plan = lines; saveJob(job); if (job.dry) await dryNote(job, job.test ? lines.concat(readOut(job, lines)) : lines); if (job.pdfKey && !job.dry) gdel(job.pdfKey); log((err ? 'Error: ' : 'Done: ') + job.info.subject.slice(0, 60) + ' | ' + lines.join(' | ')); };
+    const fin = async (lines, err) => { job.status = err ? 'error' : 'done'; job.plan = lines; saveJob(job); if (job.dry) await dryNote(job, job.test ? lines.concat(readOut(job, lines)) : x.cov ? lines.concat(['Line check: ' + covText(x.cov)]) : lines); if (job.pdfKey && !job.dry) gdel(job.pdfKey); log((err ? 'Error: ' : 'Done: ') + job.info.subject.slice(0, 60) + ' | ' + lines.join(' | ')); };
     const errFu = async msg => { if (!job.dry) await safeFu({ sec: 'check', key: 'err-' + job.id, p1: true, due: ymd(new Date()), title: 'Filer: ' + msg.slice(0, 80), desc: 'Email: ' + job.info.subject + '\nFrom ' + job.info.from + ', ' + job.info.date + (job.pdfKey ? '\nPDF attached below.' : ''), pdf: job.pdfKey && gget(job.pdfKey, '') ? { name: fileName(job), b64: gget(job.pdfKey, '') } : null }); return fin([msg], true); };
 
     if (/^(po|updated_po|esa)$/.test(x.kind) && !job.pdfKey) return errFu((x.kind == 'esa' ? 'Energex safety advice' : 'PO ' + (x.po_full || '')) + ': couldn\'t grab the PDF out of the email');
@@ -735,8 +753,9 @@ if (ON_AF) {
     if (R.upErr) issues.push('PDF upload failed: ' + R.upErr);
     if (R.descErr) issues.push('Description failed: ' + R.descErr);
     if ((x.vague || []).length) issues.push('Lines I wasn\'t sure about:\n' + x.vague.map(v => '- PO said: ' + v.po_said + '\n  I wrote: ' + v.wrote).join('\n'));
+    if (x.cov && (x.cov.none || x.cov.missing.length || x.cov.leftOut.length)) issues.push('PO line check: ' + covText(x.cov) + '. Add anything missing to the description.');
     if (x.overhead_power) issues.push('Overhead power on this PO. Needs an ESA lodged if there isn\'t one.');
-    if (issues.length || trialOn()) await safeFu({ sec: 'check', key: 'chk-' + x.po_full, p1: !!(R.upErr || R.descErr), due: ymd(new Date()), title: (issues.length ? 'Check ' : 'Check the description on ') + 'JN ' + jn + ', ' + st + (isNew ? ' (new task)' : ' (PO -' + x.po_full.split('-')[1] + ' added)'), desc: (issues.join('\n\n') || 'Trial run: eyeball what the filer wrote.') + '\nEmail: ' + job.info.subject });
+    if (issues.length || trialOn()) await safeFu({ sec: 'check', key: 'chk-' + x.po_full, p1: !!(R.upErr || R.descErr || (x.cov && x.cov.missing.length)), due: ymd(new Date()), title: (issues.length ? 'Check ' : 'Check the description on ') + 'JN ' + jn + ', ' + st + (isNew ? ' (new task)' : ' (PO -' + x.po_full.split('-')[1] + ' added)'), desc: (issues.join('\n\n') || 'Trial run: eyeball what the filer wrote.') + '\nEmail: ' + job.info.subject });
     const b = gget('wfBases', {}); b[x.po_base || x.po_full] = now(); gset('wfBases', b);
   }
 
