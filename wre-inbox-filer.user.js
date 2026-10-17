@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.1
+// @version      0.9.2
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -31,7 +31,7 @@ const HOST = location.hostname;
 const ON_MAIL = /outlook/.test(HOST), ON_AF = HOST === 'office.aroflo.com';
 
 // ---------- fixed bits ----------
-const VER = '0.9.1';
+const VER = '0.9.2';
 const MODEL = 'claude-haiku-5-5';
 const PRICE_IN = 0.10, PRICE_OUT = 0.50; // USD per million tokens
 const TD = 'https://api.todoist.com/api/v1/';
@@ -207,9 +207,12 @@ function showLog() {
   const box = document.createElement('div');
   box.style.cssText = 'position:fixed;inset:40px;z-index:2147483647;background:#FBFAF8;color:#21201D;border-radius:10px;box-shadow:0 4px 24px rgba(0,0,0,.4);display:flex;flex-direction:column;font:13px/1.4 system-ui,sans-serif';
   const sp = gget('wfSpend', {}); const mk = ymd(new Date()).slice(0, 7);
-  box.innerHTML = '<div style="display:flex;gap:10px;align-items:center;padding:10px 14px;border-bottom:1px solid #D5D1CA"><b>WRE Inbox Filer ' + VER + '</b><span style="color:#69645E">Haiku this month: US$' + (sp[mk] || 0).toFixed(3) + '</span><span style="flex:1"></span><button data-x>Close</button></div><pre style="margin:0;padding:10px 14px;overflow:auto;flex:1;white-space:pre-wrap"></pre>';
-  box.querySelector('pre').textContent = gget('wfLog', []).slice().reverse().join('\n');
-  box.querySelector('[data-x]').onclick = () => box.remove(); document.body.appendChild(box);
+  const el = (tag, css, txt) => { const e = document.createElement(tag); if (css) e.style.cssText = css; if (txt != null) e.textContent = txt; return e; };
+  const head = el('div', 'display:flex;gap:10px;align-items:center;padding:10px 14px;border-bottom:1px solid #D5D1CA');
+  head.append(el('b', '', 'WRE Inbox Filer ' + VER), el('span', 'color:#69645E', 'Haiku this month: US$' + (sp[mk] || 0).toFixed(3)), el('span', 'flex:1'));
+  const x = el('button', '', 'Close'); x.onclick = () => box.remove(); head.append(x);
+  const pre = el('pre', 'margin:0;padding:10px 14px;overflow:auto;flex:1;white-space:pre-wrap', gget('wfLog', []).slice().reverse().join('\n'));
+  box.append(head, pre); document.body.appendChild(box);
 }
 
 // ---------- menu ----------
@@ -321,7 +324,7 @@ if (ON_MAIL) {
     let pdfKey = '';
     if (pick) { const b64 = await grabPdf(pick); if (b64) { pdfKey = 'wfPdf_' + id; gset(pdfKey, b64); } else log('Couldn\'t grab the PDF on ' + p.head.slice(0, 60)); }
     if (wasUnread) { await park(); const ok = await markUnread(key); if (!ok) log('!! couldn\'t put back to unread: ' + p.head.slice(0, 60)); }
-    gset('wfPending', { tab: tabId(), at: now(), id, key: test ? 'test|' + fullKey : fullKey, rowKey: key, emailAt: (rowTime(p.when) || new Date()).getTime(), builder: sd.builder, info, pdfKey, pdfName: pick, test: !!test });
+    gset('wfPending', { tab: tabId(), at: now(), id, key: test ? 'test|' + fullKey : fullKey, rowKey: key, emailAt: test ? 0 : (rowTime(p.when) || new Date()).getTime(), builder: sd.builder, info, pdfKey, pdfName: pick, test: !!test });
     markSeen(key + '|' + ymd(new Date()), 'row');
     if (pdfKey) { status('reloading after the preview'); await sleep(500); location.reload(); return true; }
     return await finishPending();
@@ -331,10 +334,10 @@ if (ON_MAIL) {
   async function scan() {
     if (busy || !IS_FILER) return; busy = true;
     try {
+      if (await finishPending()) return;
       const lk = gget('wfMailLock', null); const me = tabId();
       if (lk && lk.tab !== me && now() - lk.at < 90e3) { status('another Outlook filer tab is running'); return; }
       gset('wfMailLock', { tab: me, at: now() });
-      if (await finishPending()) return;
       const R = await rules(); if (R.paused) { status('paused'); return; }
       if (!gget('wfStartAt', 0)) gset('wfStartAt', now());
       const start = gget('wfStartAt', now());
@@ -359,6 +362,7 @@ if (ON_MAIL) {
   // Test run: search Outlook and run each hit through Haiku in dry run (nothing written anywhere but the test log).
   W.wreFilerTest = async (q, n) => {
     if (!IS_FILER) return 'open Outlook with #wre-filer first';
+    if (gget('wfPending', null)) return 'still reading the last one, try again in a minute';
     const inp = document.querySelector('input[aria-label="Search"],#topSearchInput'); inp.focus(); inp.click();
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(inp, q); inp.dispatchEvent(new Event('input', { bubbles: true }));
     inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
@@ -375,6 +379,7 @@ if (ON_MAIL) {
     busy = true; try { return await takeOne(el, await rules(), true); } finally { busy = false; }
   };
 
+  W.wreFilerPeek = () => JSON.stringify({ ver: VER, pending: (gget('wfPending', null) || {}).key || '', jobs: gget('wfJobs', []).slice(-8).map(j => j.status + ' | ' + j.info.subject.slice(0, 50) + (j.notBefore && j.notBefore > now() ? ' | waits ' + Math.round((j.notBefore - now()) / 1000) + 's' : '')), log: gget('wfLog', []).slice(-12) });
   const boot = async () => {
     await waitFor(() => !!document.body, 10000); mountChip();
     if (!IS_FILER) return;
@@ -633,9 +638,21 @@ if (ON_AF) {
   const trialOn = () => { const s = gget('wfLiveAt', 0); return !s || now() - s < TRIAL_DAYS * 864e5; };
   const tasksFor = async x => { const out = new Map(); if (x.po_base) (await search(x.po_base, 'CustOn')).forEach(r => out.set(r.jn, r)); if (x.address && x.address.street) (await search(x.address.street.replace(/^\S+\s+/, ''), 'Location')).filter(r => norm(r.name).includes(norm(x.address.street))).forEach(r => out.set(r.jn, r)); return [...out.values()]; };
 
+  // For test runs: what Haiku read out of the email, so it can be checked by eye.
+  const readOut = (job, lines) => { const x = job.x, o = ['Read as: ' + x.kind + (x.po_full ? ', PO ' + x.po_full : '') + (x.address && x.address.street ? ', ' + addrLine(x.address) : '') + (x.summary ? ' (' + x.summary + ')' : '')];
+    const sc = (x.site_contacts || []).filter(c => c.name || c.phone).map(c => [c.name, c.phone].filter(Boolean).join(' ')).join(' OR '); if (sc) o.push('Site contact: ' + sc);
+    if (x.supervisor && x.supervisor.name) o.push('Supervisor: ' + [x.supervisor.name, x.supervisor.phone].filter(Boolean).join(' '));
+    if ((x.dates || []).length) o.push('Dates: ' + x.dates.map(d => (d.what || '') + ' ' + String(d.start || '').replace('T', ' ')).join(', '));
+    if (x.overhead_power) o.push('Overhead power: yes');
+    if ((x.blocks || []).length && !lines.some(l => /^Description: |^Would add under/.test(l))) o.push('Scope as it would write it: ' + scopeText(x));
+    else if (/^(po|updated_po)$/.test(x.kind) && !(x.blocks || []).length) o.push('Scope: Haiku wrote none');
+    if ((x.vague || []).length) o.push('Not sure about: ' + x.vague.map(v => v.po_said).join(' / '));
+    return o; };
+  // The scope as plain lines, headings in capitals, so it reads like the AroFlo description.
+  const scopeText = x => (x.blocks || []).map(b => (b.h ? '\n' + b.h.toUpperCase() : '') + (b.rooms || []).map(r => '\n' + r.r + (r.items || []).map(i => '\n  * ' + (typeof i == 'string' ? i : i.t)).join('')).join('') + (b.items || []).map(i => '\n  * ' + (typeof i == 'string' ? i : i.t)).join('')).join('\n').slice(0, 2500);
   async function runJob(job) {
     const x = job.x, R = job.res || {}, plan = job.plan || [];
-    const fin = async (lines, err) => { job.status = err ? 'error' : 'done'; job.plan = lines; saveJob(job); if (job.dry) await dryNote(job, job.test && (x.blocks || []).length && !lines.some(l => /^Description: |^Would add under/.test(l)) ? lines.concat(['Scope as it would write it: ' + plain(poBlock(job)).slice(0, 1800)]) : lines); if (job.pdfKey && !job.dry) gdel(job.pdfKey); log((err ? 'Error: ' : 'Done: ') + job.info.subject.slice(0, 60) + ' | ' + lines.join(' | ')); };
+    const fin = async (lines, err) => { job.status = err ? 'error' : 'done'; job.plan = lines; saveJob(job); if (job.dry) await dryNote(job, job.test ? lines.concat(readOut(job, lines)) : lines); if (job.pdfKey && !job.dry) gdel(job.pdfKey); log((err ? 'Error: ' : 'Done: ') + job.info.subject.slice(0, 60) + ' | ' + lines.join(' | ')); };
     const errFu = async msg => { if (!job.dry) await safeFu({ sec: 'check', key: 'err-' + job.id, p1: true, due: ymd(new Date()), title: 'Filer: ' + msg.slice(0, 80), desc: 'Email: ' + job.info.subject + '\nFrom ' + job.info.from + ', ' + job.info.date + (job.pdfKey ? '\nPDF attached below.' : ''), pdf: job.pdfKey && gget(job.pdfKey, '') ? { name: fileName(job), b64: gget(job.pdfKey, '') } : null }); return fin([msg], true); };
 
     if (/^(po|updated_po|esa)$/.test(x.kind) && !job.pdfKey) return errFu((x.kind == 'esa' ? 'Energex safety advice' : 'PO ' + (x.po_full || '')) + ': couldn\'t grab the PDF out of the email');
@@ -679,7 +696,7 @@ if (ON_AF) {
       if (job.target) {
         const d = await descOf(job.target.href); const has = plain(d.html).includes(x.po_full);
         if (x.kind == 'updated_po' || has) {
-          if (job.dry) return fin(['PO ' + x.po_full + ' is already on JN ' + job.target.jn + '. Would attach ' + fileName(job) + (x.kind == 'updated_po' ? ' and flag it to check: ' + (x.changes || x.summary || 'updated PO') : '')]);
+          if (job.dry) return fin(['PO ' + x.po_full + ' is already on JN ' + job.target.jn + '. ' + (x.kind == 'updated_po' ? 'Would attach ' + fileName(job) + ' and flag it to check: ' + (x.changes || x.summary || 'updated PO') : 'Would skip it, already set up')]);
           if (x.kind != 'updated_po') return fin(['PO ' + x.po_full + ' already on JN ' + job.target.jn + ', skipped']);
           if (!R.up && !R.upErr) return startOp({ op: 'upload', jobId: job.id, pdfKey: job.pdfKey, name: fileName(job) }, job.target.href);
           await safeFu({ sec: 'check', key: 'upd-' + x.po_full + '-' + ymd(new Date()), due: ymd(new Date()), title: 'Updated PO, check the scope: ' + shortStreet(x.address.street) + ' (JN ' + job.target.jn + ', PO -' + x.po_full.split('-')[1] + ')', desc: (x.changes || x.summary || 'Builder sent an updated PO.') + '\nThe updated PDF is on the task' + (R.upErr ? ' (upload FAILED: ' + R.upErr + ')' : '') + '. The description wasn\'t changed.' });
@@ -687,7 +704,7 @@ if (ON_AF) {
         }
         // revised PO: new works go under the existing description
         const block = poBlock(job);
-        if (job.dry) return fin(['Revised PO ' + x.po_full + ' goes on JN ' + job.target.jn + ' (' + job.target.name.slice(0, 50) + ')', 'Would attach ' + fileName(job), 'Would add under the description: ' + plain(block).slice(0, 1500), 'Vague lines: ' + ((x.vague || []).map(v => v.po_said).join(' / ') || 'none'), 'To book: ' + ((x.dates || []).length ? 'dates in email' : 'from the live repair schedule, or a confirm dates draft')]);
+        if (job.dry) return fin(['Revised PO ' + x.po_full + ' goes on JN ' + job.target.jn + ' (' + job.target.name.slice(0, 50) + ')', 'Would attach ' + fileName(job), 'Would add under the description: ' + poLine(job) + scopeText(x), 'Vague lines: ' + ((x.vague || []).map(v => v.po_said).join(' / ') || 'none'), 'To book: ' + ((x.dates || []).length ? 'dates in email' : 'from the live repair schedule, or a confirm dates draft')]);
         if (!R.up && !R.upErr) return startOp({ op: 'upload', jobId: job.id, pdfKey: job.pdfKey, name: fileName(job) }, job.target.href);
         if (!R.desc && !R.descErr) { const h = d.hh; return startOp({ op: 'desc', jobId: job.id, mode: 'append', html: block, mustNotHave: x.po_full, jn: job.target.jn }, h); }
         await afterWrite(job, job.target.jn); return fin(['Revised PO ' + x.po_full + ' on JN ' + job.target.jn + ': ' + (R.upErr ? 'upload FAILED (' + R.upErr + ')' : 'PDF attached') + ', ' + (R.descErr ? 'description FAILED (' + R.descErr + ')' : 'new works added')]);
@@ -697,7 +714,7 @@ if (ON_AF) {
         const amb = /ambrose/i.test(job.builder);
         const name = (amb ? x.po_base : (x.ref || x.po_full)) + ' - ' + addrLine(x.address);
         if (job.dry && !R.createDry && !R.createErr) return startOp({ op: 'create', jobId: job.id, dry: true, address: x.address, client: job.builder, contact: (x.site_contacts || [])[0], name, custON: x.po_base || x.po_full, taskType: amb ? 'Ambrose Construct Services' : 'General Electrical' }, '/ims/Site/Service/workrequest/index.cfm?new=1&tid=IMS.CRT.TSK');
-        if (job.dry) return fin(['New PO ' + x.po_full + ': no open task, would create one', 'Create page check: ' + (R.createDry || R.createErr), 'Task name: ' + name, 'Description: ' + plain(fullDesc(job)).slice(0, 1800), 'Vague lines: ' + ((x.vague || []).map(v => v.po_said).join(' / ') || 'none'), 'Would attach ' + fileName(job)]);
+        if (job.dry) return fin(['New PO ' + x.po_full + ': no open task, would create one', 'Create page check: ' + (R.createDry || R.createErr), 'Task name: ' + name, 'Description: ' + plain(fullDesc(job)).split(poLine(job))[0] + poLine(job) + scopeText(x), 'Vague lines: ' + ((x.vague || []).map(v => v.po_said).join(' / ') || 'none'), 'Would attach ' + fileName(job)]);
         if (!R.jn && !R.createErr) return startOp({ op: 'create', jobId: job.id, address: x.address, client: job.builder, contact: (x.site_contacts || [])[0], name, custON: x.po_base || x.po_full, taskType: amb ? 'Ambrose Construct Services' : 'General Electrical' }, '/ims/Site/Service/workrequest/index.cfm?new=1&tid=IMS.CRT.TSK');
         if (R.createErr) return errFu('New PO ' + x.po_full + ', couldn\'t create the task: ' + R.createErr);
         const r = await findJn(R.jn); if (!r) return errFu('Created JN ' + R.jn + ' but can\'t find it');
