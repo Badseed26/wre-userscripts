@@ -124,8 +124,12 @@ GrabText() {
 }
 
 GetKey() {
-    if FileExist(KEYFILE)
-        return Trim(FileRead(KEYFILE, "UTF-8"))
+    if FileExist(KEYFILE) {
+        k := Trim(FileRead(KEYFILE, "UTF-8"))
+        if (k != "")
+            return k
+        try FileDelete KEYFILE
+    }
     r := InputBox("Paste your Anthropic API key (console.anthropic.com). It's saved in " KEYFILE " on this PC only.", "WRE Clipboard Brain", "w460 h140 Password")
     if (r.Result != "OK" || Trim(r.Value) = "")
         return ""
@@ -177,7 +181,7 @@ ShowPreview(text, target, title) {
     bX.OnEvent("Click", (*) => g.Destroy())
     g.OnEvent("Escape", (*) => g.Destroy())
     g.Show()
-    ControlFocus bP
+    bP.Focus()
 }
 
 ShowPromise(key, res, orig, target) {
@@ -205,16 +209,19 @@ ShowPromise(key, res, orig, target) {
 }
 
 FixIt(key, orig, target) {
-    try ShowPreview(Ask(key, RULES_FIX, orig), target, "fixed version")
-    catch as e
+    try {
+        ShowPreview(Ask(key, RULES_FIX, orig), target, "fixed version")
+    } catch as e {
         MsgBox "Didn't work: " e.Message, "WRE Clipboard Brain", "Icon!"
-    ToolTip
+    } finally {
+        ToolTip
+    }
 }
 
 DoPaste(target) {
-    if target && WinExist(target) {
-        WinActivate target
-        WinWaitActive target, , 2
+    if target && WinExist("ahk_id " target) {
+        WinActivate "ahk_id " target
+        WinWaitActive "ahk_id " target, , 2
     }
     Sleep 150
     Send "^v"
