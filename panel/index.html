@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="WRE Panel">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
+<title>WRE Panel</title>
+<style>
+  :root {
+    --bg: #23201e;
+    --bar: #2c2826;
+    --tile: #36312e;
+    --tile-press: #453e3a;
+    --line: #4a433e;
+    --text: #f3eee9;
+    --muted: #a99f97;
+    --orange: #f26a1b;
+    --good: #5cc28a;
+    --bad: #e5534b;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+    -webkit-user-select: none; user-select: none; -webkit-touch-callout: none; }
+  body { padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left); }
+
+  header { display: flex; align-items: center; justify-content: space-between;
+    padding: 18px 22px 10px; }
+  .brand { display: flex; align-items: center; }
+  .mark { width: 34px; height: 34px; border-radius: 8px; background: var(--orange);
+    color: #fff; font-weight: 800; font-size: 19px; display: flex; align-items: center;
+    justify-content: center; margin-right: 12px; }
+  .brand h1 { font-size: 20px; margin: 0; font-weight: 700; letter-spacing: 0.2px; }
+  .status { font-size: 13px; color: var(--muted); margin-top: 2px; }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+    background: var(--muted); margin-right: 6px; vertical-align: 1px; }
+  .dot.on { background: var(--good); }
+  .dot.off { background: var(--bad); }
+  .clock { text-align: right; }
+  .clock .t { font-size: 30px; font-weight: 300; font-variant-numeric: tabular-nums; }
+  .clock .d { font-size: 13px; color: var(--muted); }
+
+  nav { display: flex; overflow-x: auto; -webkit-overflow-scrolling: touch;
+    padding: 6px 16px 0; border-bottom: 1px solid var(--line); }
+  nav button { flex: 0 0 auto; background: none; border: 0; color: var(--muted);
+    font: inherit; font-size: 16px; font-weight: 600; padding: 12px 14px 14px;
+    margin-right: 4px; border-bottom: 3px solid transparent; }
+  nav button.on { color: var(--text); border-bottom-color: var(--orange); }
+
+  main { padding: 18px 16px 30px; }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); grid-gap: 12px; }
+  @media (min-width: 900px) { .grid { grid-template-columns: repeat(4, 1fr); } }
+  @media (max-width: 560px) { .grid { grid-template-columns: repeat(2, 1fr); } }
+
+  .tile { position: relative; background: var(--tile); border: 1px solid var(--line);
+    border-radius: 14px; padding: 18px 16px; min-height: 110px; text-align: left;
+    color: var(--text); font: inherit; display: flex; flex-direction: column;
+    justify-content: space-between; overflow: hidden; }
+  .tile:active { background: var(--tile-press); }
+  .tile .lbl { font-size: 18px; font-weight: 650; line-height: 1.2; }
+  .tile .sub { font-size: 13px; color: var(--muted); margin-top: 8px; padding-right: 54px; }
+  .tile .kind { position: absolute; bottom: 15px; right: 14px; font-size: 11px;
+    font-weight: 700; letter-spacing: 0.5px; color: var(--muted); text-transform: uppercase; }
+  .tile.busy { border-color: var(--orange); }
+  .tile.ok { border-color: var(--good); }
+  .tile.err { border-color: var(--bad); }
+  .tile.arm { background: var(--orange); border-color: var(--orange); }
+  .tile.arm .sub, .tile.arm .kind { color: #fff; }
+
+  .msg { text-align: center; color: var(--muted); padding: 60px 24px; font-size: 16px; line-height: 1.5; }
+  .toast { position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%);
+    background: #111; color: var(--text); padding: 12px 18px; border-radius: 10px;
+    font-size: 15px; max-width: 90%; opacity: 0; transition: opacity 0.2s; pointer-events: none; }
+  .toast.show { opacity: 1; }
+  .toast.bad { background: var(--bad); }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <div class="mark">W</div>
+    <div>
+      <h1 id="title">WRE Panel</h1>
+      <div class="status"><span id="dot" class="dot"></span><span id="stat">Connecting</span></div>
+    </div>
+  </div>
+  <div class="clock"><div class="t" id="time"></div><div class="d" id="date"></div></div>
+</header>
+<nav id="tabs"></nav>
+<main id="main"><div class="msg">Loading</div></main>
+<div class="toast" id="toast"></div>
+
+<script>
+(function () {
+  var KEY_STORE = "wrePanelKey", TAB_STORE = "wrePanelTab";
+  var key = "", data = null, current = 0;
+
+  function store(k, v) { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (e) { return null; } }
+
+  // key comes from the link the first time, then it's remembered
+  var m = location.search.match(/[?&]k=([^&]+)/);
+  if (m) { key = decodeURIComponent(m[1]); store(KEY_STORE, key); }
+  else { key = store(KEY_STORE) || ""; }
+
+  var KIND = { url: "PC", urls: "PC", claude: "Claude", ahk: "AHK", file: "PC", keys: "Keys", lock: "PC", update: "PC", ipad: "iPad" };
+  var pcVersion = null;
+
+  function $(id) { return document.getElementById(id); }
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]; }); }
+
+  var toastTimer;
+  function toast(text, bad) {
+    var t = $("toast");
+    t.textContent = text;
+    t.className = "toast show" + (bad ? " bad" : "");
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(function () { t.className = "toast" + (bad ? " bad" : ""); }, bad ? 4000 : 1800);
+  }
+
+  function setStatus(on, text) {
+    $("dot").className = "dot " + (on ? "on" : "off");
+    $("stat").textContent = text;
+  }
+
+  function tick() {
+    var d = new Date();
+    var h = d.getHours(), mi = d.getMinutes();
+    var ap = h >= 12 ? "pm" : "am";
+    h = h % 12 || 12;
+    $("time").textContent = h + ":" + (mi < 10 ? "0" : "") + mi + " " + ap;
+    var days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    var mons = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    $("date").textContent = days[d.getDay()] + " " + d.getDate() + " " + mons[d.getMonth()];
+  }
+
+  function renderTabs() {
+    var html = "";
+    for (var i = 0; i < data.groups.length; i++) {
+      html += '<button data-i="' + i + '" class="' + (i === current ? "on" : "") + '">' + esc(data.groups[i].name) + "</button>";
+    }
+    $("tabs").innerHTML = html;
+  }
+
+  function renderGrid() {
+    var g = data.groups[current], html = '<div class="grid">';
+    for (var i = 0; i < g.buttons.length; i++) {
+      var b = g.buttons[i];
+      html += '<button class="tile" data-id="' + esc(b.id) + '">' +
+        '<span class="kind">' + esc(KIND[b.type] || "") + "</span>" +
+        '<span class="lbl">' + esc(b.label) + "</span>" +
+        '<span class="sub">' + esc(b.sub || "") + "</span></button>";
+    }
+    $("main").innerHTML = html + "</div>";
+  }
+
+  function findBtn(id) {
+    for (var i = 0; i < data.groups.length; i++)
+      for (var j = 0; j < data.groups[i].buttons.length; j++)
+        if (data.groups[i].buttons[j].id === id) return data.groups[i].buttons[j];
+    return null;
+  }
+
+  function flash(el, cls) {
+    el.className = "tile " + cls;
+    setTimeout(function () { el.className = "tile"; }, 1200);
+  }
+
+  function run(el, b) {
+    if (b.type === "ipad") { window.open(b.href, "_blank"); return; }
+    if (b.confirm && el.className.indexOf("arm") < 0) {
+      el.className = "tile arm";
+      el.querySelector(".sub").textContent = "Tap again to confirm";
+      setTimeout(function () { if (el.className.indexOf("arm") >= 0) { el.className = "tile"; el.querySelector(".sub").textContent = b.sub || ""; } }, 3000);
+      return;
+    }
+    if (b.confirm) el.querySelector(".sub").textContent = b.sub || "";
+    el.className = "tile busy";
+    fetch("/api/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ k: key, id: b.id }) })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+      .then(function (res) {
+        if (res.ok) { flash(el, "ok"); toast(res.j.msg || (b.label + " done")); }
+        else { flash(el, "err"); toast(res.j.error || "Didn't work", true); }
+      })
+      .catch(function () { flash(el, "err"); toast("Can't reach the PC", true); setStatus(false, "PC not reachable"); });
+  }
+
+  $("tabs").addEventListener("click", function (e) {
+    var t = e.target.closest ? e.target.closest("button") : e.target;
+    if (!t || t.getAttribute("data-i") === null) return;
+    current = +t.getAttribute("data-i");
+    store(TAB_STORE, String(current));
+    renderTabs(); renderGrid();
+  });
+
+  $("main").addEventListener("click", function (e) {
+    var el = e.target;
+    while (el && el !== this && !(el.className && String(el.className).indexOf("tile") === 0)) el = el.parentNode;
+    if (!el || el === this) return;
+    var b = findBtn(el.getAttribute("data-id"));
+    if (b) run(el, b);
+  });
+
+  function load() {
+    if (!key) {
+      $("main").innerHTML = '<div class="msg">Open the address from <b>ipad_address.txt</b> in the panel folder on the PC. It has the key on the end, you only need it once.</div>';
+      setStatus(false, "No key yet");
+      return;
+    }
+    fetch("/api/buttons?k=" + encodeURIComponent(key), { cache: "no-store" })
+      .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j }; }); })
+      .then(function (res) {
+        if (!res.ok) {
+          $("main").innerHTML = '<div class="msg">' + esc(res.j.error === "bad key" ? "The key's wrong. Open the address from ipad_address.txt again." : res.j.error) + "</div>";
+          setStatus(false, "Problem");
+          return;
+        }
+        data = res.j;
+        $("title").textContent = data.title || "WRE Panel";
+        var saved = +(store(TAB_STORE) || 0);
+        current = saved < data.groups.length ? saved : 0;
+        renderTabs(); renderGrid();
+        setStatus(true, "PC connected" + (pcVersion ? " \u00b7 v" + pcVersion : ""));
+      })
+      .catch(function () {
+        $("main").innerHTML = '<div class="msg">Can\'t reach the PC. Check it\'s on and the panel is running.</div>';
+        setStatus(false, "PC not reachable");
+      });
+  }
+
+  function ping() {
+    fetch("/api/ping", { cache: "no-store" })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        // the PC updated itself, so reload to pick up the new page
+        if (pcVersion && j.version && j.version !== pcVersion) { location.reload(); return; }
+        pcVersion = j.version || pcVersion;
+        if (!data) load(); else setStatus(true, "PC connected" + (pcVersion ? " \u00b7 v" + pcVersion : ""));
+      })
+      .catch(function () { setStatus(false, "PC not reachable"); });
+  }
+
+  // reload buttons when the app comes back to the front, so edits to buttons.json show up
+  document.addEventListener("visibilitychange", function () { if (!document.hidden) load(); });
+
+  tick(); setInterval(tick, 10000);
+  ping(); load(); setInterval(ping, 30000);
+})();
+</script>
+</body>
+</html>

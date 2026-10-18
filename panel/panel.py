@@ -1,0 +1,502 @@
+# WRE Panel
+# Little server on the PC that the iPad talks to over home wifi.
+# Only runs the buttons in buttons.json, nothing else. Home network only.
+#
+#   python panel.py            run it with a window (shows the iPad address)
+#   python panel.py --startup  start it hidden every time Windows starts
+#   python panel.py --nostartup  stop it starting with Windows
+#
+# Updates itself from the wre-userscripts repo (panel folder) every 15 minutes,
+# and keeps Clipboard Brain up to date too. Put a file called no_auto_update.txt
+# in this folder to turn that off.
+
+import ctypes
+import ipaddress
+import json
+import os
+import secrets
+import socket
+import subprocess
+import sys
+import threading
+import time
+import urllib.parse
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+VERSION = "1.1"
+HERE = os.path.dirname(os.path.abspath(__file__))
+RAW = "https://raw.githubusercontent.com/Badseed26/wre-userscripts/main/"
+CHECK_EVERY = 15 * 60
+PANEL_FILES = ["panel.py", "index.html", "buttons.json", "icon.png", "README.txt"]
+PORT = 8765
+BUTTONS = os.path.join(HERE, "buttons.json")
+KEYFILE = os.path.join(HERE, "panel_key.txt")
+ADDRFILE = os.path.join(HERE, "ipad_address.txt")
+LOGFILE = os.path.join(HERE, "panel.log")
+STARTUP_VBS = os.path.join(
+    os.environ.get("APPDATA", ""),
+    r"Microsoft\Windows\Start Menu\Programs\Startup\WRE Panel.vbs",
+)
+
+
+def log(msg):
+    line = time.strftime("%d/%m %H:%M:%S ") + msg
+    try:
+        print(line)
+    except Exception:
+        pass  # pythonw has no console
+    try:
+        with open(LOGFILE, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+        # keep the log small
+        if os.path.getsize(LOGFILE) > 200_000:
+            with open(LOGFILE, "r", encoding="utf-8") as f:
+                tail = f.readlines()[-500:]
+            with open(LOGFILE, "w", encoding="utf-8") as f:
+                f.writelines(tail)
+    except Exception:
+        pass
+
+
+def get_key():
+    if os.path.exists(KEYFILE):
+        k = open(KEYFILE, encoding="utf-8").read().strip()
+        if k:
+            return k
+    k = secrets.token_urlsafe(12)
+    with open(KEYFILE, "w", encoding="utf-8") as f:
+        f.write(k)
+    return k
+
+
+def local_ip():
+    # works out which address the PC uses on the home network (sends nothing)
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("10.255.255.255", 1))
+        return s.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
+    finally:
+        s.close()
+
+
+def load_buttons():
+    with open(BUTTONS, encoding="utf-8") as f:
+        return json.load(f)
+
+
+# ---------- opening things on the PC ----------
+
+def find_chrome():
+    for base in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
+        root = os.environ.get(base)
+        if root:
+            p = os.path.join(root, r"Google\Chrome\Application\chrome.exe")
+            if os.path.exists(p):
+                return p
+    return None
+
+
+def open_url(url, cfg):
+    if cfg.get("browser", "chrome") == "chrome":
+        chrome = find_chrome()
+        if chrome:
+            subprocess.Popen([chrome, url])
+            return
+    os.startfile(url)
+
+
+# ---------- sending a hotkey to whatever window is in front ----------
+
+VK = {"ctrl": 0x11, "alt": 0x12, "shift": 0x10, "win": 0x5B,
+      "enter": 0x0D, "esc": 0x1B, "tab": 0x09, "space": 0x20}
+for i in range(1, 13):
+    VK["f%d" % i] = 0x6F + i
+
+
+def send_keys(combo):
+    names = [p.strip().lower() for p in combo.split("+")]
+    codes = []
+    for n in names:
+        if n in VK:
+            codes.append(VK[n])
+        elif len(n) == 1 and n.isalnum():
+            codes.append(ord(n.upper()))
+        else:
+            raise ValueError("Unknown key: " + n)
+    kb = ctypes.windll.user32.keybd_event
+    for c in codes:
+        kb(c, 0, 0, 0)
+    time.sleep(0.05)
+    for c in reversed(codes):
+        kb(c, 0, 2, 0)
+
+
+# ---------- finding files ----------
+
+def known_folder(guid):
+    # asks Windows where a folder really is (handles Documents moved to OneDrive or another drive)
+    try:
+        import ctypes.wintypes
+        class GUID(ctypes.Structure):
+            _fields_ = [("a", ctypes.c_ulong), ("b", ctypes.c_ushort),
+                        ("c", ctypes.c_ushort), ("d", ctypes.c_ubyte * 8)]
+        h = guid.strip("{}").split("-")
+        tail = bytes.fromhex(h[3] + h[4])
+        g = GUID(int(h[0], 16), int(h[1], 16), int(h[2], 16),
+                 (ctypes.c_ubyte * 8)(*tail))
+        out = ctypes.c_wchar_p()
+        if ctypes.windll.shell32.SHGetKnownFolderPath(ctypes.byref(g), 0, None, ctypes.byref(out)) == 0:
+            path = out.value
+            ctypes.windll.ole32.CoTaskMemFree(out)
+            return path
+    except Exception:
+        pass
+    return None
+
+
+def resolve_path(target):
+    t = target
+    if "%DOCUMENTS%" in t:
+        docs = known_folder("{FDD39AD0-238F-46AF-ADB4-6C85480369C7}") or os.path.expanduser(r"~\Documents")
+        t = t.replace("%DOCUMENTS%", docs)
+    if "%DESKTOP%" in t:
+        desk = known_folder("{B4BFCC3A-DB2C-424C-B029-7FE99A87C641}") or os.path.expanduser(r"~\Desktop")
+        t = t.replace("%DESKTOP%", desk)
+    t = os.path.expandvars(t)
+    if not os.path.isabs(t):
+        t = os.path.join(HERE, t)
+    if os.path.exists(t):
+        return t
+    # browsers sometimes save .ahk as .ahk.txt and Windows hides the .txt
+    if os.path.exists(t + ".txt"):
+        raise FileNotFoundError("It's saved as %s.txt, rename it to drop the .txt" % os.path.basename(t))
+    # last go: same file name next to the panel
+    here = os.path.join(HERE, os.path.basename(t))
+    if os.path.exists(here):
+        return here
+    raise FileNotFoundError("Can't find " + t)
+
+
+# ---------- running a button ----------
+
+def run_button(btn, cfg):
+    t = btn["type"]
+    if t == "url":
+        open_url(btn["target"], cfg)
+    elif t == "urls":
+        for u in btn["targets"]:
+            open_url(u, cfg)
+            time.sleep(0.6)
+    elif t == "claude":
+        open_url("https://claude.ai/new?q=" + urllib.parse.quote(btn["prompt"]), cfg)
+    elif t in ("ahk", "file"):
+        path = resolve_path(btn["target"])
+        os.startfile(path)
+    elif t == "keys":
+        send_keys(btn["keys"])
+    elif t == "lock":
+        ctypes.windll.user32.LockWorkStation()
+    elif t == "update":
+        return check_updates()
+    else:
+        raise ValueError("Unknown button type: " + t)
+
+
+def find_button(cfg, bid):
+    for g in cfg.get("groups", []):
+        for b in g.get("buttons", []):
+            if b.get("id") == bid:
+                return b
+    return None
+
+
+def public_view(cfg):
+    # what the iPad gets: labels and layout, not file paths
+    out = {"title": cfg.get("title", "WRE Panel"), "groups": []}
+    for g in cfg.get("groups", []):
+        gb = []
+        for b in g.get("buttons", []):
+            item = {"id": b["id"], "label": b["label"], "sub": b.get("sub", ""),
+                    "type": b["type"]}
+            if b["type"] == "ipad":
+                item["href"] = b["target"]
+            if b.get("confirm"):
+                item["confirm"] = True
+            gb.append(item)
+        out["groups"].append({"name": g["name"], "buttons": gb})
+    return out
+
+
+# ---------- auto updates ----------
+
+SRV = None
+RESTARTING = False
+update_lock = threading.Lock()
+last_check = {"when": "", "result": "Not checked yet"}
+
+
+def fetch(path):
+    url = RAW + urllib.parse.quote(path) + "?t=%d" % int(time.time())
+    req = urllib.request.Request(url, headers={"Cache-Control": "no-cache"})
+    with urllib.request.urlopen(req, timeout=15) as r:
+        return r.read()
+
+
+def looks_ok(name, data):
+    # never swap in a half downloaded or broken file
+    if not data:
+        return False
+    try:
+        if name.endswith(".py"):
+            compile(data, name, "exec")
+        elif name.endswith(".json"):
+            json.loads(data.decode("utf-8"))
+        return True
+    except Exception as e:
+        log("Skipped a broken %s from GitHub: %s" % (name, e))
+        return False
+
+
+def write_if_changed(dest, data):
+    try:
+        with open(dest, "rb") as f:
+            if f.read() == data:
+                return False
+    except FileNotFoundError:
+        pass
+    tmp = dest + ".new"
+    with open(tmp, "wb") as f:
+        f.write(data)
+    os.replace(tmp, dest)
+    return True
+
+
+def brain_path():
+    try:
+        b = find_button(load_buttons(), "cb-start")
+        if b:
+            return resolve_path(b["target"])
+    except Exception:
+        pass
+    return None
+
+
+def brain_running():
+    # is Clipboard Brain open right now (so it can be reloaded after an update)
+    ps = ("$p='wre-clipboard'+'-brain'; Get-CimInstance Win32_Process | "
+          "Where-Object { $_.Name -like 'AutoHotkey*' -and $_.CommandLine -like \"*$p*\" } | "
+          "Select-Object -First 1 -ExpandProperty ProcessId")
+    try:
+        out = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                             capture_output=True, text=True, timeout=30,
+                             creationflags=0x08000000)
+        return out.stdout.strip() != ""
+    except Exception:
+        return False
+
+
+def check_updates():
+    if os.path.exists(os.path.join(HERE, "no_auto_update.txt")):
+        return "Auto update is turned off (no_auto_update.txt)"
+    if not update_lock.acquire(blocking=False):
+        return "Already checking"
+    try:
+        changed, restart = [], False
+        for name in PANEL_FILES:
+            try:
+                data = fetch("panel/" + name)
+            except Exception as e:
+                raise RuntimeError("Can't reach GitHub (%s)" % e)
+            if looks_ok(name, data) and write_if_changed(os.path.join(HERE, name), data):
+                changed.append(name)
+                if name == "panel.py":
+                    restart = True
+        bp = brain_path()
+        if bp:
+            data = fetch("wre-clipboard-brain.ahk")
+            if looks_ok("brain.ahk", data) and write_if_changed(bp, data):
+                changed.append("Clipboard Brain")
+                if brain_running():
+                    os.startfile(bp)  # SingleInstance Force swaps in the new one
+        result = ("Updated " + ", ".join(changed)) if changed else "Up to date"
+        last_check["when"] = time.strftime("%d/%m %H:%M")
+        last_check["result"] = result
+        if changed:
+            log(result)
+        if restart:
+            restart_soon()
+            result += ", restarting"
+        return result
+    finally:
+        update_lock.release()
+
+
+def restart_soon():
+    def go():
+        global RESTARTING
+        time.sleep(1.5)
+        RESTARTING = True
+        log("Restarting on the new version")
+        SRV.shutdown()
+    threading.Thread(target=go, daemon=True).start()
+
+
+def updater_loop():
+    time.sleep(5)
+    while True:
+        try:
+            check_updates()
+        except Exception as e:
+            last_check["result"] = str(e)
+            log("Update check failed: %s" % e)
+        time.sleep(CHECK_EVERY)
+
+
+# ---------- web server ----------
+
+KEY = None
+
+
+def private_client(addr):
+    try:
+        ip = ipaddress.ip_address(addr)
+        return ip.is_private or ip.is_loopback
+    except ValueError:
+        return False
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "WREPanel"
+
+    def log_message(self, *a):
+        pass
+
+    def send(self, code, body, ctype="application/json"):
+        if isinstance(body, (dict, list)):
+            body = json.dumps(body).encode()
+        elif isinstance(body, str):
+            body = body.encode()
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def key_ok(self, given):
+        return given and secrets.compare_digest(given, KEY)
+
+    def do_GET(self):
+        if not private_client(self.client_address[0]):
+            return self.send(403, {"error": "home network only"})
+        u = urllib.parse.urlparse(self.path)
+        q = urllib.parse.parse_qs(u.query)
+        if u.path in ("/", "/index.html"):
+            html = open(os.path.join(HERE, "index.html"), "rb").read()
+            return self.send(200, html, "text/html; charset=utf-8")
+        if u.path in ("/icon.png", "/apple-touch-icon.png"):
+            p = os.path.join(HERE, "icon.png")
+            if os.path.exists(p):
+                return self.send(200, open(p, "rb").read(), "image/png")
+            return self.send(404, {"error": "no icon"})
+        if u.path == "/api/buttons":
+            if not self.key_ok(q.get("k", [""])[0]):
+                return self.send(401, {"error": "bad key"})
+            try:
+                return self.send(200, public_view(load_buttons()))
+            except Exception as e:
+                log("buttons.json problem: %s" % e)
+                return self.send(500, {"error": "buttons.json has a problem: %s" % e})
+        if u.path == "/api/ping":
+            return self.send(200, {"ok": True, "version": VERSION})
+        if u.path == "/api/version":
+            return self.send(200, {"version": VERSION, "last_check": last_check})
+        self.send(404, {"error": "not found"})
+
+    def do_POST(self):
+        if not private_client(self.client_address[0]):
+            return self.send(403, {"error": "home network only"})
+        if self.path != "/api/run":
+            return self.send(404, {"error": "not found"})
+        try:
+            n = int(self.headers.get("Content-Length", "0"))
+            data = json.loads(self.rfile.read(min(n, 10_000)) or b"{}")
+        except Exception:
+            return self.send(400, {"error": "bad request"})
+        if not self.key_ok(data.get("k", "")):
+            return self.send(401, {"error": "bad key"})
+        try:
+            cfg = load_buttons()
+            btn = find_button(cfg, data.get("id", ""))
+            if not btn:
+                return self.send(404, {"error": "no button with that id"})
+            msg = run_button(btn, cfg)
+            log("ran %s (%s)" % (btn["id"], btn["label"]))
+            return self.send(200, {"ok": True, "msg": msg or ""})
+        except Exception as e:
+            log("failed %s: %s" % (data.get("id"), e))
+            return self.send(500, {"error": str(e)})
+
+
+# ---------- startup ----------
+
+def set_startup(on):
+    if on:
+        pyw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+        if not os.path.exists(pyw):
+            pyw = sys.executable
+        script = os.path.abspath(__file__)
+        vbs = ('CreateObject("WScript.Shell").Run """%s"" ""%s""", 0, False\r\n'
+               % (pyw, script))
+        with open(STARTUP_VBS, "w", encoding="utf-8") as f:
+            f.write(vbs)
+        print("Done. WRE Panel will start hidden every time Windows starts.")
+    else:
+        if os.path.exists(STARTUP_VBS):
+            os.remove(STARTUP_VBS)
+        print("Done. WRE Panel won't start with Windows any more.")
+
+
+def main():
+    global KEY
+    if "--startup" in sys.argv:
+        return set_startup(True)
+    if "--nostartup" in sys.argv:
+        return set_startup(False)
+
+    global SRV
+    KEY = get_key()
+    load_buttons()  # fail early if the json is broken
+    srv = None
+    for _ in range(15):  # after a restart the old one can take a sec to let go
+        try:
+            srv = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+            break
+        except OSError:
+            time.sleep(1)
+    if not srv:
+        log("Port %d is already in use, the panel is probably already running." % PORT)
+        return
+    SRV = srv
+    addr = "http://%s:%d/?k=%s" % (local_ip(), PORT, KEY)
+    with open(ADDRFILE, "w", encoding="utf-8") as f:
+        f.write(addr + "\n")
+    log("WRE Panel %s running. Open this on the iPad:" % VERSION)
+    log("  " + addr)
+    threading.Thread(target=updater_loop, daemon=True).start()
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    srv.server_close()
+    if RESTARTING:
+        flags = 0x10 if os.path.basename(sys.executable).lower() == "python.exe" else 0
+        subprocess.Popen([sys.executable, os.path.abspath(__file__)], cwd=HERE,
+                         creationflags=flags)
+
+
+if __name__ == "__main__":
+    main()
