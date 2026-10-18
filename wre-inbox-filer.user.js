@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.17
+// @version      0.9.18
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -562,7 +562,7 @@ if (ON_AF) {
   async function opCreate(op) {
     if (op.fired) { // the new task page sets its title (JN 9466 - ...) a moment after it loads
       await waitFor(() => /JN \d+/.test(document.title), 15000); const m = document.title.match(/JN (\d+)/);
-      return opDone(op, m ? { jn: m[1] } : { createErr: 'clicked Create Task but landed on "' + document.title + '" instead of a new task' + (pageSays() ? '. Page says: ' + pageSays() : '') }); }
+      return opDone(op, m ? { jn: m[1], otherLoc: op.otherLoc || '', newLoc: !!op.newLoc } : { createErr: 'clicked Create Task but landed on "' + document.title + '" instead of a new task' + (pageSays() ? '. Page says: ' + pageSays() : '') }); }
     if (!document.forms.newwr) return opDone(op, { createErr: 'create page didn\'t open' });
     const $ = jq(); const v = n => (document.querySelector('[name=' + n + ']') || {}).value || '';
     const pickFrom = async (name, term, test) => { const el = document.querySelector('[name=' + name + ']'); el.focus(); el.value = term; $(el).autocomplete('search', term);
@@ -570,9 +570,14 @@ if (ON_AF) {
       const li = [...document.querySelectorAll('ul.ui-autocomplete li')].filter(l => l.offsetParent).find(l => test(l.innerText.replace(/\s+/g, ' '))); if (!li) return false;
       const a = li.querySelector('a,div') || li; $(a).trigger('mouseenter'); $(a).trigger('click'); await sleep(1500); return true; };
     const a = op.address; const st = norm(a.street), sub = norm(a.suburb);
-    // 1. existing location under the builder's client
-    let got = await pickFrom('clientName', a.street, t => hasAddr(t, a.street) && (!sub || norm(t).includes(sub)));
-    if (got && op.client && !v('clientName').toLowerCase().includes(op.client.toLowerCase().split(' ')[0])) { return opDone(op, { createErr: 'found ' + a.street + ' but under client ' + v('clientName') + ', not ' + op.client + '. Left it.' }); }
+    // 1. existing location under the builder's client. The same house under another client (an old private job) doesn't count:
+    // the builder's job gets its own location, like Lisa does, and the check item mentions the other one (18/10)
+    const cw = (op.client || '').toLowerCase().split(' ')[0];
+    const atAddr = t => hasAddr(t, a.street) && (!sub || norm(t).includes(sub));
+    let got = await pickFrom('clientName', a.street, t => atAddr(t) && (!cw || t.toLowerCase().includes(cw)));
+    if (!got) { const others = [...document.querySelectorAll('ul.ui-autocomplete li')].filter(l => l.offsetParent).map(l => l.innerText.replace(/\s+/g, ' ').trim()).filter(atAddr);
+      if (others.length) { op.otherLoc = others.slice(0, 3).join(' / '); ss('wfOp', op); } }
+    if (got && op.client && !v('clientName').toLowerCase().includes(cw)) { return opDone(op, { createErr: 'picked ' + a.street + ' but the client came up as ' + v('clientName') + ', not ' + op.client + '. Left it.' }); }
     if (!got) {
       // 2. new location: client first, then the + box
       if (!(await pickFrom('clientName', op.client, t => t.toLowerCase().startsWith(op.client.toLowerCase().slice(0, 20)) && /:/.test(t)))) return opDone(op, { createErr: 'client ' + op.client + ' not found' });
@@ -587,7 +592,7 @@ if (ON_AF) {
       const set = (n, val) => { const e = document.querySelector('.ui-dialog [name=' + n + ']'); if (e && val) setv(e, val); };
       set('SiteContact', (op.contact || {}).name); set('SitePhone', (op.contact || {}).phone); set('Location', a.street); set('suburb', a.suburb); set('postcode', a.postcode);
       const stSel = document.querySelector('.ui-dialog [name=state_id]'); if (stSel) { const o = [...stSel.options].find(x => x.text.trim().toUpperCase() == (a.state || 'QLD').toUpperCase()); if (o) { stSel.value = o.value; $(stSel).trigger('change'); } }
-      document.getElementById('btnOptSaveLocation').click();
+      document.getElementById('btnOptSaveLocation').click(); op.newLoc = true;
       if (!(await waitFor(() => !document.getElementById('btnOptSaveLocation') && !!v('location_id'), 12000))) return opDone(op, { createErr: 'new location didn\'t save' });
     }
     if (!v('client_id') || !v('location_id')) return opDone(op, { createErr: 'client or location didn\'t set' });
@@ -826,6 +831,7 @@ if (ON_AF) {
     if ((x.vague || []).length) issues.push('Lines I wasn\'t sure about:\n' + x.vague.map(v => '- PO said: ' + v.po_said + '\n  I wrote: ' + v.wrote).join('\n'));
     if (x.cov && (x.cov.none || x.cov.missing.length || x.cov.leftOut.length)) issues.push('PO line check: ' + covText(x.cov) + '. Add anything missing to the description.');
     if (x.overhead_power) issues.push('Overhead power on this PO. Needs an ESA lodged if there isn\'t one.');
+    if (isNew && R.otherLoc) issues.push('Made a new location under ' + job.builder + '. The address is also in AroFlo under another client: ' + R.otherLoc);
     if (issues.length || trialOn()) await safeFu({ sec: 'check', key: 'chk-' + x.po_full, p1: !!(R.upErr || R.descErr || (x.cov && x.cov.missing.length)), due: ymd(new Date()), title: (issues.length ? 'Check ' : 'Check the description on ') + 'JN ' + jn + ', ' + st + (isNew ? ' (new task)' : ' (PO -' + x.po_full.split('-')[1] + ' added)'), desc: (issues.join('\n\n') || 'Trial run: eyeball what the filer wrote.') + '\nEmail: ' + job.info.subject });
     const b = gget('wfBases', {}); b[jobKey(x) || x.po_full] = now(); gset('wfBases', b);
   }
