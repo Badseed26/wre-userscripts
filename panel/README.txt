@@ -34,6 +34,7 @@ LADS (NOTES, PHOTOS, TIMESHEETS)
 The Lads tab and the bar on Favourites show what's still owed, from the WRE Calendar NPT issues in Todoist.
 First time: tap Connect Todoist and paste your API token (Todoist: Settings, Integrations, Developer).
 It's saved in todoist_token.txt in this folder and never leaves the PC.
+Tap a job on the Lads tab to OK an item (same as OK on the calendar or dashboard) or tick the issue off.
 
 YOUR OWN ICONS
 Two ways, use whichever is easier:

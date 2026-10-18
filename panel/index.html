@@ -108,6 +108,11 @@
   .job .jt { font-size: 17px; font-weight: 600; }
   .job .js { font-size: 13px; color: var(--muted); margin-top: 3px; }
   .job .js .late { color: var(--bad); font-weight: 600; }
+  .job { -webkit-flex-wrap: wrap; flex-wrap: wrap; cursor: pointer; }
+  .job.open { border-color: #3A4250; }
+  .jacts { width: 100%; display: -webkit-flex; display: flex; -webkit-flex-wrap: wrap; flex-wrap: wrap; margin-top: 12px; }
+  .jacts .btn { margin: 0 8px 0 0; }
+  .jacts .btn.arm { background: var(--bad); color: #1A0D0B; }
   .npt { display: -webkit-flex; display: flex; margin-left: 12px; }
   .npt span { width: 34px; height: 34px; border-radius: 10px; margin-left: 6px; font-size: 15px; font-weight: 700; display: -webkit-flex; display: flex;
     -webkit-align-items: center; align-items: center; -webkit-justify-content: center; justify-content: center; }
@@ -374,7 +379,7 @@
   }
 
   // ---------- NPT: notes, photos, timesheets still owed (WRE Calendar NPT issues in Todoist) ----------
-  var npt = null;
+  var npt = null, openJob = null, busyJob = null;
   var WDS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
   function dayLbl(v) { var p = v.split("-"), d = new Date(+p[0], +p[1] - 1, +p[2]); return WDS[d.getDay()] + " " + d.getDate() + "/" + (d.getMonth() + 1); }
   function daysAgo(v) { var p = v.split("-"), d = new Date(+p[0], +p[1] - 1, +p[2]), n = new Date(); n = new Date(n.getFullYear(), n.getMonth(), n.getDate()); return Math.round((n - d) / 864e5); }
@@ -419,11 +424,17 @@
       h += '<div class="ladhead">' + esc(n) + "</div>";
       w.g[n].forEach(function (x) {
         var a = daysAgo(x.visit), age = a <= 0 ? "today" : a === 1 ? "yesterday" : a + " days ago";
-        h += '<div class="job"><div class="jm"><div class="jt">' + esc(x.place) + '</div><div class="js">' + esc(dayLbl(x.visit)) +
-          ' &middot; <span class="' + (a >= 2 ? "late" : "") + '">' + esc(age) + "</span>" + (x.jn ? " &middot; JN " + esc(x.jn) : "") + "</div></div>" + nptBadges(x) + "</div>";
+        var open = openJob === x.id, acts = "";
+        if (open) {
+          acts = '<div class="jacts">';
+          x.missing.forEach(function (it) { if (x.ok.indexOf(it) < 0) acts += '<button class="btn dark" data-nok="' + esc(x.id) + "|" + esc(it) + '"' + (busyJob ? " disabled" : "") + ">OK " + esc(it) + "</button>"; });
+          acts += '<button class="btn light" data-ndone="' + esc(x.id) + '"' + (busyJob ? " disabled" : "") + ">Tick off</button></div>";
+        }
+        h += '<div class="job' + (open ? " open" : "") + '" data-npt="' + esc(x.id) + '"><div class="jm"><div class="jt">' + esc(x.place) + '</div><div class="js">' + esc(dayLbl(x.visit)) +
+          ' &middot; <span class="' + (a >= 2 ? "late" : "") + '">' + esc(age) + "</span>" + (x.jn ? " &middot; JN " + esc(x.jn) : "") + "</div></div>" + nptBadges(x) + acts + "</div>";
       });
     });
-    return h + '<div class="sub" style="text-align:center;margin-top:14px">Red = missing, green = in, blue = OK\'d by you. From Todoist ' + esc(npt.at || "") + "</div>";
+    return h + '<div class="sub" style="text-align:center;margin-top:14px">Tap a job to OK an item or tick it off. Red = missing, green = in, blue = OK\'d by you. From Todoist ' + esc(npt.at || "") + "</div>";
   }
   function openTok() { $("tokIn").value = ""; $("tokBg").className = "sheet-bg show"; }
   function closeTok() { $("tokBg").className = "sheet-bg"; $("tokIn").blur(); }
@@ -544,7 +555,37 @@
     if (tab === "Lads") loadNpt(true);
   });
 
+  // Lads tab: tap a job for its actions, OK an item, or tick the issue off (two taps)
+  function nptAct(path, body, label) {
+    busyJob = body.id; render();
+    body.k = key;
+    req("POST", path, body, function (ok, j) {
+      busyJob = null;
+      if (ok) { toast((j && j.msg) || label); openJob = null; loadNpt(true); }
+      else { toast((j && j.error) || "Didn't work", true); render(); }
+    });
+  }
   $("main").addEventListener("click", function (e) {
+    if (tab === "Lads") {
+      var t = e.target;
+      while (t && t !== this && !(t.getAttribute && (t.getAttribute("data-nok") || t.getAttribute("data-ndone") || t.getAttribute("data-npt")))) t = t.parentNode;
+      if (!t || t === this || busyJob) return;
+      if (t.getAttribute("data-nok")) {
+        var p = t.getAttribute("data-nok").split("|");
+        nptAct("/api/npt/ok", { id: p[0], item: p[1] }, "OK'd");
+      } else if (t.getAttribute("data-ndone")) {
+        if (t.className.indexOf("arm") < 0) {
+          t.className = "btn arm"; t.textContent = "Tap again to tick off";
+          setTimeout(function () { if (t.className.indexOf("arm") >= 0) { t.className = "btn light"; t.textContent = "Tick off"; } }, 3000);
+          return;
+        }
+        nptAct("/api/npt/done", { id: t.getAttribute("data-ndone") }, "Ticked off");
+      } else {
+        var id = t.getAttribute("data-npt");
+        openJob = openJob === id ? null : id; render();
+      }
+      return;
+    }
     var el = e.target;
     while (el && el !== this && !(el.getAttribute && el.getAttribute("data-id"))) el = el.parentNode;
     if (!el || el === this) return;

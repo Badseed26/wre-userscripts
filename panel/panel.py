@@ -25,7 +25,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "2.3"
+VERSION = "2.4"
 HERE = os.path.dirname(os.path.abspath(__file__))
 RAW = "https://raw.githubusercontent.com/Badseed26/wre-userscripts/%s/"
 LATEST = "https://api.github.com/repos/Badseed26/wre-userscripts/commits/main"
@@ -591,6 +591,72 @@ def npt_list(force=False):
     return data
 
 
+def todoist_post(path, body, token):
+    req = urllib.request.Request(TODOIST + path, data=json.dumps(body or {}).encode(), method="POST",
+                                 headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        raw = r.read()
+        return json.loads(raw.decode("utf-8")) if raw else None
+
+
+def npt_listed(items):
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
+
+
+def npt_today():
+    t = time.localtime()
+    return "%d/%d" % (t.tm_mday, t.tm_mon)
+
+
+def npt_task(task_id, token):
+    t = todoist_get("tasks/" + urllib.parse.quote(str(task_id)), token)
+    if not t or t.get("project_id") not in NPT_PROJECTS or not NPT_DESC.search(t.get("description") or ""):
+        raise ValueError("That's not one of the NPT issues")
+    return t
+
+
+def npt_ok(task_id, item):
+    # Same as OK on the dashboard and the calendar: the item moves to the ok line, the title drops it,
+    # a comment says so, and once nothing's left the issue is ticked off.
+    token = todoist_token()
+    if not token:
+        raise ValueError("Connect Todoist first")
+    t = npt_task(task_id, token)
+    desc = t.get("description") or ""
+    head = re.search(r"^(.*\| missing: )(.+)$", desc, re.M)
+    okm = NPT_OK.search(desc)
+    miss, ok = npt_split(head.group(2)), npt_split(okm.group(1) if okm else "")
+    if item not in miss:
+        raise ValueError("%s isn't missing on that one" % item.capitalize())
+    ok = ok + ([item] if item not in ok else [])
+    left = [x for x in miss if x != item]
+    last = not left
+    upd = {"description": head.group(1) + ", ".join(miss if last else left) + "\nok: " + ", ".join(ok)}
+    if not last:
+        content = t.get("content", "")
+        if NPT_PROJECTS[t["project_id"]] == "you":
+            upd["content"] = re.sub(r"^Put in .*? for ", "Put in " + npt_listed(left) + " for ", content)
+        else:
+            upd["content"] = re.sub(r":\s*[^:]+$", ": " + ", ".join(left), content)
+    todoist_post("tasks/" + str(task_id), upd, token)
+    todoist_post("comments", {"task_id": str(task_id), "content": "%s: %s OK'd by Ethan without them (desk panel)" % (npt_today(), item)}, token)
+    if last:
+        todoist_post("tasks/" + str(task_id) + "/close", {}, token)
+    NPT_CACHE.update(at=0.0, data=None)
+    return "All OK'd, ticked off" if last else "%s OK'd" % item.capitalize()
+
+
+def npt_done(task_id):
+    # Sorted: tick the issue off, same as the tick on the dashboard
+    token = todoist_token()
+    if not token:
+        raise ValueError("Connect Todoist first")
+    npt_task(task_id, token)
+    todoist_post("tasks/" + str(task_id) + "/close", {}, token)
+    NPT_CACHE.update(at=0.0, data=None)
+    return "Ticked off"
+
+
 def save_todoist_token(token):
     token = str(token or "").strip()
     if not re.fullmatch(r"[A-Za-z0-9]{20,80}", token):
@@ -692,7 +758,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not private_client(self.client_address[0]):
             return self.send(403, {"error": "home network only"})
-        if self.path not in ("/api/run", "/api/icon", "/api/todoist-token"):
+        if self.path not in ("/api/run", "/api/icon", "/api/todoist-token", "/api/npt/ok", "/api/npt/done"):
             return self.send(404, {"error": "not found"})
         try:
             n = int(self.headers.get("Content-Length", "0"))
@@ -703,6 +769,24 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(400, {"error": "bad request"})
         if not self.key_ok(data.get("k", "")):
             return self.send(401, {"error": "bad key"})
+        if self.path in ("/api/npt/ok", "/api/npt/done"):
+            try:
+                tid = str(data.get("id", ""))
+                if not re.fullmatch(r"[A-Za-z0-9]{1,40}", tid):
+                    raise ValueError("Bad issue id")
+                if self.path == "/api/npt/ok":
+                    item = str(data.get("item", ""))
+                    if item not in ("notes", "photos", "timesheet"):
+                        raise ValueError("Bad item")
+                    msg = npt_ok(tid, item)
+                else:
+                    msg = npt_done(tid)
+                log("NPT %s %s: %s" % (self.path[9:], tid, msg))
+                return self.send(200, {"ok": True, "msg": msg})
+            except urllib.error.HTTPError as e:
+                return self.send(502, {"error": "Todoist said %s" % e.code})
+            except Exception as e:
+                return self.send(400, {"error": str(e)})
         if self.path == "/api/todoist-token":
             try:
                 save_todoist_token(data.get("token"))
