@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.12
+// @version      0.9.13
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -465,6 +465,8 @@ if (ON_AF) {
   // "Upcoming Schedules: Lachlan Buckley: Mon, November 09, 2026 @ 7:30 AM View Schedule ..."
   const upcomingOf = d => { const t = d.body.textContent.replace(/\s+/g, ' '); const i = t.indexOf('Upcoming Schedules'); if (i < 0) return []; const s = t.slice(i + 19, i + 3000).split('All Task Schedules')[0]; const out = []; s.split('View Schedule').forEach(c => { const m = c.trim().match(/^([A-Z][a-z']+(?: [A-Z][a-z']+){1,2}): \w{3}, (\w+ \d{1,2}, \d{4}) @ (\d{1,2}:\d{2} [AP]M)/); if (!m) return; const dt = new Date(m[2] + ' ' + m[3]); if (!isNaN(dt)) out.push({ staff: m[1], day: ymd(dt), t: m[3] }); }); return out; };
   const findJn = async jn => (await search(String(jn), 'JobNo')).find(x => x.jn == String(jn));
+  // A task made a second ago isn't always in the search yet (JN 9467, 18/10), so give it half a minute.
+  const findJnSoon = async jn => { for (let i = 0; i < 6; i++) { const r = await findJn(jn); if (r) return r; await sleep(5000); } return null; };
 
   // ---------- description HTML (same template as the PO setup skill, Lisa's layout) ----------
   const P = x => '<p>' + x + '</p>', B = x => '<strong>' + x + '</strong>', BU = x => '<strong><u>' + x + '</u></strong>', A = (u, t) => '<a href="' + esc(u) + '">' + esc(t) + '</a>';
@@ -761,6 +763,15 @@ if (ON_AF) {
       // existing task
       if (job.target) {
         const d = await descOf(job.target.href); const has = plain(d.html).includes(x.po_full) || (job.target.name || '').includes(x.po_full);
+        // Task for this ref that's still just TBC: a create that never finished, so fill it like a new one rather than adding under TBC.
+        if (!job.fillNew && x.kind == 'po' && /^(TBC)?$/i.test(plain(d.html))) { job.fillNew = true; saveJob(job); }
+        if (job.fillNew) {
+          const jn = job.target.jn;
+          if (job.dry) return fin(['JN ' + jn + ' is open for ' + jobKey(x) + ' but only says TBC (a create that never finished). Would write the full description and attach ' + fileName(job)]);
+          if (!R.desc && !R.descErr) return startOp({ op: 'desc', jobId: job.id, mode: 'set', html: fullDesc(job), jn }, d.hh);
+          if (!R.up && !R.upErr) return startOp({ op: 'upload', jobId: job.id, pdfKey: job.pdfKey, name: fileName(job) }, job.target.href);
+          await afterWrite(job, jn, true); return fin(['Finished JN ' + jn + ' for PO ' + x.po_full + ': ' + (R.descErr ? 'description FAILED (' + R.descErr + ')' : 'description on') + ', ' + (R.upErr ? 'upload FAILED (' + R.upErr + ')' : 'PDF attached')]);
+        }
         if (x.kind == 'updated_po' || has) {
           if (job.dry) return fin(['PO ' + x.po_full + ' is already on JN ' + job.target.jn + '. ' + (x.kind == 'updated_po' ? 'Would attach ' + fileName(job) + ' and flag it to check: ' + (x.changes || x.summary || 'updated PO') : 'Would skip it, already set up')]);
           if (x.kind != 'updated_po') return fin(['PO ' + x.po_full + ' already on JN ' + job.target.jn + ', skipped']);
@@ -784,7 +795,7 @@ if (ON_AF) {
         if (job.dry) return fin(['New PO ' + x.po_full + ': no open task, would create one', 'Create page check: ' + (R.createDry || R.createErr), 'Task name: ' + name, 'Description: ' + plain(fullDesc(job)).split(poLine(job))[0] + poLine(job) + scopeText(x), 'Vague lines: ' + ((x.vague || []).map(v => v.po_said).join(' / ') || 'none'), 'Would attach ' + fileName(job)]);
         if (!R.jn && !R.createErr) return startOp({ op: 'create', jobId: job.id, address: x.address, client: job.builder, contact: (x.site_contacts || [])[0], name, custON: amb ? x.po_base : (x.ref || x.po_full), taskType: amb ? 'Ambrose Construct Services' : 'General Electrical' }, '/ims/Site/Service/workrequest/index.cfm?new=1&tid=IMS.CRT.TSK');
         if (R.createErr) return errFu('New PO ' + x.po_full + ', couldn\'t create the task: ' + R.createErr);
-        const r = await findJn(R.jn); if (!r) return errFu('Created JN ' + R.jn + ' but can\'t find it');
+        const r = await findJnSoon(R.jn); if (!r) return errFu('Created JN ' + R.jn + ' but can\'t find it');
         if (!R.desc && !R.descErr) { const d = await getDoc(r.href); return startOp({ op: 'desc', jobId: job.id, mode: 'set', html: fullDesc(job), jn: R.jn }, headerHref(d)); }
         if (!R.up && !R.upErr) return startOp({ op: 'upload', jobId: job.id, pdfKey: job.pdfKey, name: fileName(job) }, r.href);
         await afterWrite(job, R.jn, true); return fin(['New task JN ' + R.jn + ' for PO ' + x.po_full + ': ' + (R.descErr ? 'description FAILED (' + R.descErr + ')' : 'description on') + ', ' + (R.upErr ? 'upload FAILED (' + R.upErr + ')' : 'PDF attached')]);
