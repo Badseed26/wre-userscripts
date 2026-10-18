@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.8
+// @version      0.9.9
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -31,7 +31,7 @@ const HOST = location.hostname;
 const ON_MAIL = /outlook/.test(HOST), ON_AF = HOST === 'office.aroflo.com';
 
 // ---------- fixed bits ----------
-const VER = '0.9.8';
+const VER = '0.9.9';
 const MAX_READS_DAY = 80; // Haiku reads a day before it stops itself (a runaway loop can't burn the budget)
 const PAGE = 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); // this page load
 const MODEL = 'claude-haiku-5-5';
@@ -205,7 +205,7 @@ Do change:
 - Where the PO hides a risk (e.g. an AC system that might not be reusable), add one stop and call line: "If either AC system isn't suitable to reinstate, don't go ahead. Take photos and call Ethan".
 - If a line doesn't make sense, keep the builder's wording as is and also list it in "vague".
 - No dates, no who-did-what, no PO commentary in the dot points.
-- Builder boilerplate is not work and not a warning: the standard safety and compliance paragraphs (asbestos, SWMS, risk assessment, AS/NZS 3000, test and tag, insurances, "a variation will be sought", invoice and photo instructions, terms). Don't turn them into dot points or CAPITAL warnings. warn is only for site hazards the PO calls out for this job (dog, tenant, asbestos found on this site, no power).
+- Builder boilerplate is not work and not a warning: the standard safety and compliance paragraphs (asbestos, SWMS, risk assessment, AS/NZS 3000, test and tag, insurances, "a variation will be sought", invoice and photo instructions, terms). Don't turn them into dot points or CAPITAL warnings, even when the builder prints them as numbered scope lines (Responsive puts "Refer to the Electrical Safety Management Procedure" and "confirm no asbestos or lead paint with the supervisor" on every PO). warn is only for site hazards the PO calls out for this job (dog, tenant, asbestos found on this site, no power).
 - A "Comments" or "Notes" line that tells WRE how or when to attend is a plain dot point at the end of the block ("Call the tenant before attending"). One that is just admin (invoice to, photos required) is boilerplate.
 - Unit columns are not part of the line: "1 lm", "1 ea", "1 item" mean the price is per metre or per item, so don't write "1 x lm" or copy the unit into the dot point. Use the real quantity the line describes.
 
@@ -344,7 +344,7 @@ if (ON_MAIL) {
     x.address = x.address || {}; x.dates = x.dates || []; x.blocks = x.blocks || []; x.vague = x.vague || []; x.site_contacts = x.site_contacts || []; x.warn = x.warn || [];
     const job = { id: P.id + Math.random().toString(36).slice(2, 6), at: now(), emailAt: P.emailAt, dry: R.dry || !!P.test, test: !!P.test, key: P.key, builder: P.builder || x.builder || '', info: { from: P.info.from, date: P.info.date, subject: P.info.subject, rs: P.info.rs, rec: P.info.rec, img: P.info.img, pdfName: P.pdfName || '' }, pdfKey: P.pdfKey || '', x, status: 'new' };
     if (x.kind == 'skip' || !x.kind) { log('Skip: ' + P.info.subject.slice(0, 70) + ' (' + (x.why || '') + ')'); if (P.pdfKey) gdel(P.pdfKey); if (job.test) await dryNote(job, ['Would skip it: ' + (x.why || '')]); }
-    else { const q = gget('wfJobs', []); if (q.some(j => j.key == job.key && now() - j.at < 30 * 60e3)) log('Already queued, not doubling up: ' + P.info.subject.slice(0, 70)); else { q.push(job); gset('wfJobs', q); log('Queued ' + x.kind + ': ' + P.info.subject.slice(0, 70)); } }
+    else { const q = gget('wfJobs', []); if (!job.test && q.some(j => j.key == job.key && now() - j.at < 30 * 60e3)) log('Already queued, not doubling up: ' + P.info.subject.slice(0, 70)); else { q.push(job); gset('wfJobs', q); log('Queued ' + x.kind + ': ' + P.info.subject.slice(0, 70)); } }
     if (!P.test) markSeen(P.key); gdel('wfPending'); status('idle'); return true;
   }
 
@@ -455,7 +455,8 @@ if (ON_AF) {
     const d = new DOMParser().parseFromString(h, 'text/html');
     return [...d.querySelectorAll('tr')].filter(tr => tr.querySelectorAll('td').length >= 6).map(tr => { const c = [...tr.querySelectorAll('td')].map(x => x.innerText.replace(/\s+/g, ' ').trim()).filter(Boolean); const a = [...tr.querySelectorAll('a')].find(a => /workrequest/.test(a.getAttribute('href') || '') && !/printview/.test(a.getAttribute('href'))); return { ref: c[0], jn: c[1], type: c[3], name: c[4] || '', client: c[5] || '', status: c[c.length - 1], href: a ? a.getAttribute('href') : '' }; });
   };
-  const isOpenTask = r => !/Completed|Archived|Cancel|Invoic/i.test(r.status || '');
+  // A quote task isn't the job, so a PO never lands on one.
+  const isOpenTask = r => !/Completed|Archived|Cancel|Invoic|^Quote/i.test(r.status || '');
   const getDoc = async href => new DOMParser().parseFromString(await (await fetch(href, { credentials: 'include' })).text(), 'text/html');
   const headerHref = d => { const a = [...d.querySelectorAll('a')].find(e => /^\s*Edit Task Header\s*$/i.test(e.textContent || '')); return a ? a.getAttribute('href') : ''; };
   const descOf = async href => { const d = await getDoc(href); const hh = headerHref(d); if (!hh) return { html: '', upcoming: [] }; const d2 = await getDoc(hh); return { html: ((d2.querySelector('textarea[name=description]') || {}).value) || '', upcoming: upcomingOf(d), hh }; };
@@ -731,7 +732,9 @@ if (ON_AF) {
       if (!x.po_full && !x.ref) return errFu('PO email but I couldn\'t read a PO number');
       if (!job.target && !job.creating) {
         const all = await tasksFor(x); const k = jobKey(x); const open = all.filter(isOpenTask).filter(r => k ? (r.name.toUpperCase().startsWith(k.toUpperCase()) || (r.ref || '').toUpperCase().includes(k.toUpperCase())) : hasAddr(r.name, x.address.street));
-        if (open.length > 1) return errFu('PO ' + x.po_full + ': ' + open.length + ' open tasks for ' + (k || 'that address') + ' (JN ' + open.map(r => r.jn).join(', ') + ')');
+        if (open.length > 1) { // two open tasks for the ref: fine if exactly one already carries this PO number
+          const withPo = []; for (const r of open) { if ((r.name || '').includes(x.po_full) || plain((await descOf(r.href)).html).includes(x.po_full)) withPo.push(r); }
+          if (withPo.length == 1) open.splice(0, open.length, withPo[0]); else return errFu('PO ' + x.po_full + ': ' + open.length + ' open tasks for ' + (k || 'that address') + ' (JN ' + open.map(r => r.jn).join(', ') + ')'); }
         if (open.length == 1) { job.target = { jn: open[0].jn, href: open[0].href, name: open[0].name }; saveJob(job); }
         else {
           if (x.kind == 'updated_po') return errFu('Updated PO ' + x.po_full + ' but no open task has it');
