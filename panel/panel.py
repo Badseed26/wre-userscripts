@@ -24,7 +24,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.5"
+VERSION = "1.6"
 HERE = os.path.dirname(os.path.abspath(__file__))
 RAW = "https://raw.githubusercontent.com/Badseed26/wre-userscripts/main/"
 CHECK_EVERY = 15 * 60
@@ -204,7 +204,10 @@ def run_button(btn, cfg):
         # desktop apps, first one that's installed wins (e.g. classic Outlook then new Outlook)
         for name in btn["targets"]:
             try:
-                os.startfile(os.path.expandvars(name))
+                if "://" in name or not ("\\" in name or "/" in name):
+                    os.startfile(os.path.expandvars(name))  # app name or link
+                else:
+                    os.startfile(resolve_path(name))  # a file or shortcut, %DESKTOP% works
                 return
             except OSError:
                 continue
