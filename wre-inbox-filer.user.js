@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.7
+// @version      0.9.8
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -31,7 +31,7 @@ const HOST = location.hostname;
 const ON_MAIL = /outlook/.test(HOST), ON_AF = HOST === 'office.aroflo.com';
 
 // ---------- fixed bits ----------
-const VER = '0.9.7';
+const VER = '0.9.8';
 const MAX_READS_DAY = 80; // Haiku reads a day before it stops itself (a runaway loop can't burn the budget)
 const PAGE = 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); // this page load
 const MODEL = 'claude-haiku-5-5';
@@ -138,7 +138,12 @@ function coverage(x) {
   const items = []; (x.blocks || []).forEach(b => { (b.rooms || []).forEach(r => (r.items || []).forEach(i => items.push(n(typeof i == 'string' ? i : i.t)))); (b.items || []).forEach(i => items.push(n(typeof i == 'string' ? i : i.t))); });
   const missing = [], leftOut = [];
   (x.po_lines || []).forEach(l => { const w = String(l.went || '');
-    if (/^left out/i.test(w)) { const sd = l.said || ''; const charge = /\b(minimum charge|call ?out|labour rate|hourly rate|attendance fee)\b/i.test(sd) ? !/\b(safety advice|shroud|overhead)/i.test(sd) : (/\b(travel|allowance for (a |the )?(double|second|return|extra)|double (site )?visit)\b/i.test(sd) && !/\b(disconnect|reconnect|install|supply|remove|replace|inspect|test|report|photo|isolat|make safe|rewire|repair|safety advice|shroud|overhead)/i.test(sd)); if (!charge) leftOut.push(sd + ' (' + w + ')'); }
+    if (/^left out/i.test(w)) { const sd = l.said || '';
+      const work = /\b(disconnect|reconnect|install|supply|remove|replace|inspect|test|report|photo|isolat|make safe|rewire|repair|safety advice|shroud|overhead)/i;
+      const charge = /\b(minimum charge|call ?out|labour rate|hourly rate|attendance fee)\b/i.test(sd) ? !/\b(safety advice|shroud|overhead)/i.test(sd) : (/\b(travel|allowance for (a |the )?(double|second|return|extra)|double (site )?visit)\b/i.test(sd) && !work.test(sd));
+      // builder boilerplate and admin comments can go too, as long as there's no work verb hiding in them
+      const boiler = /boilerplate|admin|comment|terms|invoice/i.test(w) && (/\b(asbestos|swms|risk assessment|as\/nzs|as ?3000|insurance|variation|invoice|terms|conditions|photos? (must|required|to be)|licen[cs]e|compliance|test and tag|report)\b/i.test(sd) || !work.test(sd));
+      if (!charge && !boiler) leftOut.push(sd + ' (' + w + ')'); }
     else if (!w || !items.some(i => i && (i == n(w) || (n(w).length >= 12 && (i.includes(n(w)) || n(w).includes(i)))))) missing.push(l.said); });
   return { lines: (x.po_lines || []).length, items: items.length, missing, leftOut, none: !(x.po_lines || []).length && items.length > 0 };
 }
@@ -181,7 +186,7 @@ Reply with ONLY one JSON object:
  "dates":[{"what":"isolation","start":"2026-11-09T07:00","end":"2026-11-09T10:00"}],
  "summary":"one short line in plain words, e.g. New PO, isolation and fit off for 2 ACs"}
 Leave a field empty ("" or []) when the email doesn't say. Dates only for WRE's own work, local Brisbane time.
-Numbers: po_full is the purchase or work order number as printed (Ambrose 20305368-07, NthStar LNG40018493, ARC PO117723-BU01-001, Responsive RB-8504-301, Reconstruct JB04574-7483, Bentino 17473-30152). po_base is Ambrose only: the 8 digits before the dash. ref is the builder's own job reference for everyone but Ambrose, the thing their job is known by: NthStar GC3712 or RES4637, Responsive RB-8504, Reconstruct JB04574, Bentino 17473, ARC 118964-BU01 (the "ARC Ref"). Leave ref empty for Ambrose.`;
+Numbers: po_full is the purchase or work order number as printed (Ambrose 20305368-07, NthStar LNG40018493, ARC PO117723-BU01-001, Responsive RB-8504-301, Reconstruct JB04574-7483, Bentino 17473-30152). po_base: Ambrose, the 8 digits before the dash (20305368). ARC, the PO number without its last -NNN part (PO117723-BU01). Empty for everyone else. ref is the builder's own job reference for everyone but Ambrose and ARC, the thing their job is known by: NthStar GC3712 or RES4637, Responsive RB-8504, Reconstruct JB04574, Bentino 17473. Leave ref empty for Ambrose and ARC (ARC jobs are known by the PO itself).`;
 
 const SCOPE_RULES = `Also write the job up for WRE's field staff ("the boys") the way Ethan wants it in AroFlo. The goal: a lad reads it on site and knows exactly what to do on each visit. Keep the content, change the wording.
 
@@ -200,6 +205,9 @@ Do change:
 - Where the PO hides a risk (e.g. an AC system that might not be reusable), add one stop and call line: "If either AC system isn't suitable to reinstate, don't go ahead. Take photos and call Ethan".
 - If a line doesn't make sense, keep the builder's wording as is and also list it in "vague".
 - No dates, no who-did-what, no PO commentary in the dot points.
+- Builder boilerplate is not work and not a warning: the standard safety and compliance paragraphs (asbestos, SWMS, risk assessment, AS/NZS 3000, test and tag, insurances, "a variation will be sought", invoice and photo instructions, terms). Don't turn them into dot points or CAPITAL warnings. warn is only for site hazards the PO calls out for this job (dog, tenant, asbestos found on this site, no power).
+- A "Comments" or "Notes" line that tells WRE how or when to attend is a plain dot point at the end of the block ("Call the tenant before attending"). One that is just admin (invoice to, photos required) is boilerplate.
+- Unit columns are not part of the line: "1 lm", "1 ea", "1 item" mean the price is per metre or per item, so don't write "1 x lm" or copy the unit into the dot point. Use the real quantity the line describes.
 
 Add these fields to the same JSON object:
  "site_contacts":[{"name":"","phone":""}],"supervisor":{"name":"","phone":""},
@@ -210,7 +218,7 @@ Add these fields to the same JSON object:
  "changes":"for updated_po only: what's different on this version, if you can tell",
  "po_lines":[{"said":"one PO line item, copied word for word with its quantity","went":"the dot point it became, copied exactly as you wrote it in blocks, or 'left out: <reason>'"}]
 
-po_lines is a check on your own work. List EVERY line item on the PO scope, in order, including charges. For each, "went" is the exact dot point text from blocks (if one PO line became two dot points, e.g. disconnect in visit 1 and reconnect in visit 2, give the first one). Only charge lines (minimum call out, labour rate, allowance for a double visit, attendance fee) may be "left out: charge only". Never leave out a work line or an instruction to the contractor.`;
+po_lines is a check on your own work. List EVERY line item on the PO scope, in order, including charges. For each, "went" is the exact dot point text from blocks (if one PO line became two dot points, e.g. disconnect in visit 1 and reconnect in visit 2, give the first one). Only these may be left out: charge lines (minimum call out, labour rate, allowance for a double visit, attendance fee) as "left out: charge only", the builder's standard paragraphs as "left out: builder boilerplate", and admin comments as "left out: admin comment". Never leave out a work line or an instruction about doing the work.`;
 
 // ---------- small UI chip ----------
 let chip = null;
@@ -331,6 +339,8 @@ if (ON_MAIL) {
     if (pdfB64) content.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdfB64 } });
     let x; try { x = await ai(content, pdfB64 ? 48000 : 1200, !!pdfB64, pdfB64 ? 'xhigh' : 'low'); } catch (e) { log('Haiku failed: ' + e.message); status('Haiku: ' + e.message, true); return true; }
     x.po_lines = x.po_lines || []; if (/^(po|updated_po)$/.test(x.kind)) x.cov = coverage(x);
+    // ARC jobs go by the PO itself (PO118964-BU01-009, base PO118964-BU01), whatever Haiku made of the "ARC Ref" in the subject
+    if (/\barc\b/i.test(P.builder || x.builder || '') && /^PO\d/i.test(x.po_full || '')) { x.ref = ''; x.po_base = x.po_full.replace(/-\d+$/, ''); }
     x.address = x.address || {}; x.dates = x.dates || []; x.blocks = x.blocks || []; x.vague = x.vague || []; x.site_contacts = x.site_contacts || []; x.warn = x.warn || [];
     const job = { id: P.id + Math.random().toString(36).slice(2, 6), at: now(), emailAt: P.emailAt, dry: R.dry || !!P.test, test: !!P.test, key: P.key, builder: P.builder || x.builder || '', info: { from: P.info.from, date: P.info.date, subject: P.info.subject, rs: P.info.rs, rec: P.info.rec, img: P.info.img, pdfName: P.pdfName || '' }, pdfKey: P.pdfKey || '', x, status: 'new' };
     if (x.kind == 'skip' || !x.kind) { log('Skip: ' + P.info.subject.slice(0, 70) + ' (' + (x.why || '') + ')'); if (P.pdfKey) gdel(P.pdfKey); if (job.test) await dryNote(job, ['Would skip it: ' + (x.why || '')]); }
@@ -347,8 +357,9 @@ if (ON_MAIL) {
     const info = readPane(); const id = 'j' + now().toString(36);
     if (/wired ?rite/i.test(info.from)) { log('Own email, skipped: ' + p.head.slice(0, 60)); if (wasUnread) { await park(); await markUnread(key); } markSeen(key + '|' + ymd(new Date())); return test ? 'own email, skipped' : false; }
     const fullKey = (info.date || ymd(new Date())) + '|' + p.head.slice(0, 120);
-    const okPdf = info.pdfs.filter(n => !/repair.?schedule|schedule|invoice|statement|remittance/i.test(n));
-    const pick = okPdf.find(n => /purchase order|work order|\bpo\b|safety advice|variation/i.test(n)) || (okPdf.length == 1 ? okPdf[0] : '');
+    // Which PDF is the PO: skip schedules, reports and photos, then look for a PO looking name (ARC's are "PO128170-BU01-002.pdf").
+    const okPdf = info.pdfs.filter(n => !/repair.?schedule|schedule|invoice|statement|remittance|assessment|report|photo|scope of works/i.test(n));
+    const pick = okPdf.find(n => /purchase order|work order|\bpo\b|\bpo[\s_-]?\d|safety advice|variation|\bwo\b/i.test(n)) || (okPdf.length == 1 ? okPdf[0] : okPdf.find(n => /\d{4,}/.test(n)) || '');
     let pdfKey = '';
     if (pick) { const b64 = await grabPdf(pick); if (b64) { pdfKey = 'wfPdf_' + id; gset(pdfKey, b64); } else log('Couldn\'t grab the PDF on ' + p.head.slice(0, 60)); }
     if (wasUnread) { await park(); const ok = await markUnread(key); if (!ok) log('!! couldn\'t put back to unread: ' + p.head.slice(0, 60)); }
@@ -662,7 +673,7 @@ if (ON_AF) {
   }
 
   // ---------- the job runner ----------
-  const fileName = job => { const x = job.x; if (x.kind == 'esa') return 'ESA ' + shortStreet(x.address.street) + '.pdf'; const b = /ambrose/i.test(job.builder) ? ' Ambrose' : job.builder ? ' ' + job.builder.split(' ')[0] : ''; return 'PO ' + (x.po_full || x.ref) + b + (x.kind == 'updated_po' ? ' updated ' + dmy(new Date()).slice(0, 5).replace('/', '-') : '') + '.pdf'; };
+  const fileName = job => { const x = job.x; if (x.kind == 'esa') return 'ESA ' + shortStreet(x.address.street) + '.pdf'; const b = /ambrose/i.test(job.builder) ? ' Ambrose' : job.builder ? ' ' + job.builder.split(' ')[0] : ''; return 'PO ' + String(x.po_full || x.ref).replace(/^PO\s*/i, '') + b + (x.kind == 'updated_po' ? ' updated ' + dmy(new Date()).slice(0, 5).replace('/', '-') : '') + '.pdf'; };
   const trialOn = () => { const s = gget('wfLiveAt', 0); return !s || now() - s < TRIAL_DAYS * 864e5; };
   const jobKey = x => x.po_base || x.ref || '';
   const tasksFor = async x => { const out = new Map(); if (jobKey(x)) (await search(jobKey(x), 'CustOn')).forEach(r => out.set(r.jn, r)); if (jobKey(x)) (await search(jobKey(x), 'RefNo')).forEach(r => out.set(r.jn, r)); if (x.address && x.address.street) (await search(x.address.street.replace(/^\S+\s+/, ''), 'Location')).filter(r => hasAddr(r.name, x.address.street)).forEach(r => out.set(r.jn, r)); return [...out.values()]; };
@@ -724,6 +735,9 @@ if (ON_AF) {
         if (open.length == 1) { job.target = { jn: open[0].jn, href: open[0].href, name: open[0].name }; saveJob(job); }
         else {
           if (x.kind == 'updated_po') return errFu('Updated PO ' + x.po_full + ' but no open task has it');
+          // Nothing has the ref, but an open task sits at that address (Lisa set it up without the PO number): don't double up, ask Ethan.
+          const there = k && x.address && x.address.street ? all.filter(isOpenTask).filter(r => hasAddr(r.name, x.address.street)) : [];
+          if (there.length) { const who = there.map(r => 'JN ' + r.jn + ' ' + r.name.slice(0, 40)).join(', '); return job.dry ? fin(['New PO ' + x.po_full + ': no task has ' + k + ' but ' + who + ' is open at that address. Would flag it to Errors / to check instead of creating a task']) : errFu('PO ' + x.po_full + ' (' + k + ') looks new but ' + who + ' is already open at ' + shortStreet(x.address.street) + '. Same job? Add the PO to it by hand'); }
           if (now() - job.emailAt < NEW_PO_WAIT) { job.notBefore = job.emailAt + NEW_PO_WAIT; saveJob(job); return; }
           if (!job.waited) { job.waited = true; job.notBefore = now() + 20e3; saveJob(job); return; } // one more look right before creating
           job.creating = true; saveJob(job);
@@ -749,10 +763,11 @@ if (ON_AF) {
       // new task
       if (job.creating) {
         const amb = /ambrose/i.test(job.builder);
+        // Lisa names them: Ambrose by the 8 digit base, ARC by the full PO (PO118551-BU01-001), everyone else by their job ref.
         const name = (amb ? x.po_base : (x.ref || x.po_full)) + ' - ' + addrLine(x.address);
-        if (job.dry && !R.createDry && !R.createErr) return startOp({ op: 'create', jobId: job.id, dry: true, address: x.address, client: job.builder, contact: (x.site_contacts || [])[0], name, custON: jobKey(x) || x.po_full, taskType: amb ? 'Ambrose Construct Services' : 'General Electrical' }, '/ims/Site/Service/workrequest/index.cfm?new=1&tid=IMS.CRT.TSK');
+        if (job.dry && !R.createDry && !R.createErr) return startOp({ op: 'create', jobId: job.id, dry: true, address: x.address, client: job.builder, contact: (x.site_contacts || [])[0], name, custON: amb ? x.po_base : (x.ref || x.po_full), taskType: amb ? 'Ambrose Construct Services' : 'General Electrical' }, '/ims/Site/Service/workrequest/index.cfm?new=1&tid=IMS.CRT.TSK');
         if (job.dry) return fin(['New PO ' + x.po_full + ': no open task, would create one', 'Create page check: ' + (R.createDry || R.createErr), 'Task name: ' + name, 'Description: ' + plain(fullDesc(job)).split(poLine(job))[0] + poLine(job) + scopeText(x), 'Vague lines: ' + ((x.vague || []).map(v => v.po_said).join(' / ') || 'none'), 'Would attach ' + fileName(job)]);
-        if (!R.jn && !R.createErr) return startOp({ op: 'create', jobId: job.id, address: x.address, client: job.builder, contact: (x.site_contacts || [])[0], name, custON: jobKey(x) || x.po_full, taskType: amb ? 'Ambrose Construct Services' : 'General Electrical' }, '/ims/Site/Service/workrequest/index.cfm?new=1&tid=IMS.CRT.TSK');
+        if (!R.jn && !R.createErr) return startOp({ op: 'create', jobId: job.id, address: x.address, client: job.builder, contact: (x.site_contacts || [])[0], name, custON: amb ? x.po_base : (x.ref || x.po_full), taskType: amb ? 'Ambrose Construct Services' : 'General Electrical' }, '/ims/Site/Service/workrequest/index.cfm?new=1&tid=IMS.CRT.TSK');
         if (R.createErr) return errFu('New PO ' + x.po_full + ', couldn\'t create the task: ' + R.createErr);
         const r = await findJn(R.jn); if (!r) return errFu('Created JN ' + R.jn + ' but can\'t find it');
         if (!R.desc && !R.descErr) { const d = await getDoc(r.href); return startOp({ op: 'desc', jobId: job.id, mode: 'set', html: fullDesc(job), jn: R.jn }, headerHref(d)); }
