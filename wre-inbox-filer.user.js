@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.11
+// @version      0.9.12
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -31,7 +31,7 @@ const HOST = location.hostname;
 const ON_MAIL = /outlook/.test(HOST), ON_AF = HOST === 'office.aroflo.com';
 
 // ---------- fixed bits ----------
-const VER = '0.9.11';
+const VER = '0.9.12';
 const MAX_READS_DAY = 80; // Haiku reads a day before it stops itself (a runaway loop can't burn the budget)
 const PAGE = 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); // this page load
 const MODEL = 'claude-haiku-5-5';
@@ -547,7 +547,9 @@ if (ON_AF) {
 
   // Op: create a new task from the PO. Location picked off the client autocomplete; a new one made through the + box if there isn't one.
   async function opCreate(op) {
-    if (op.fired) { const m = document.title.match(/JN (\d+)/); return opDone(op, m ? { jn: m[1] } : { createErr: 'clicked Create Task but no new task page' }); }
+    if (op.fired) { // the new task page sets its title (JN 9466 - ...) a moment after it loads
+      await waitFor(() => /JN \d+/.test(document.title), 15000); const m = document.title.match(/JN (\d+)/);
+      return opDone(op, m ? { jn: m[1] } : { createErr: 'clicked Create Task but landed on "' + document.title + '" instead of a new task' + (pageSays() ? '. Page says: ' + pageSays() : '') }); }
     if (!document.forms.newwr) return opDone(op, { createErr: 'create page didn\'t open' });
     const $ = jq(); const v = n => (document.querySelector('[name=' + n + ']') || {}).value || '';
     const pickFrom = async (name, term, test) => { const el = document.querySelector('[name=' + name + ']'); el.focus(); el.value = term; $(el).autocomplete('search', term);
@@ -584,6 +586,10 @@ if (ON_AF) {
     const btn = document.getElementById('addrequest__submit') || document.querySelector('#btnAddRequest button[type=submit]');
     if (!btn) return opDone(op, { createErr: 'no Create Task button' });
     if (op.dry) return opDone(op, { createDry: 'filled: ' + v('clientName') + ' | ' + v('locationName') + ' | ' + v('serviceName') + ' | ' + v('wrname') });
+    // let the editor and autocompletes settle, then make sure what we typed is really in the form before submitting
+    await sleep(1500); if (W.CKEDITOR && W.CKEDITOR.instances.myeditor) W.CKEDITOR.instances.myeditor.updateElement();
+    const bad = [v('wrname') == op.name ? '' : 'task name', v('custON') == op.custON ? '' : 'customer order no', v('client_id') ? '' : 'client', v('location_id') ? '' : 'location', document.forms.newwr.checkValidity() ? '' : 'a required field'].filter(Boolean);
+    if (bad.length) return opDone(op, { createErr: 'form not right before create (' + bad.join(', ') + '), nothing created' });
     op.fired = true; ss('wfOp', op); btn.click(); firedWatch(op, 'createErr');
   }
 
