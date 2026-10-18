@@ -1,4 +1,4 @@
-WRE PANEL - SETUP
+DESK PANEL - SETUP
 
 1. Python
    If it's not on the PC already, get it from python.org and tick "Add python.exe to PATH" when installing.
@@ -29,6 +29,14 @@ The panel updates itself from the wre-userscripts repo every 15 minutes (or tap 
 That covers the panel, the buttons and Clipboard Brain. If Clipboard Brain is running it reloads itself.
 The iPad page reloads on its own when the PC updates.
 To turn auto updates off, put an empty file called no_auto_update.txt in this folder.
+
+YOUR OWN ICONS
+Two ways, use whichever is easier:
+- On the iPad: tap the pencil (top right), tap a tile, Choose image. It gets cropped square and saved on the PC.
+  Same place has "Back to the default icon".
+- On the PC: drop an image in the icons folder named after the tile, like AroFlo.png or Daily check.png
+  (png, jpg, webp, gif or svg). Square images look best.
+The icons folder is yours, updates never touch it.
 
 ADDING OR CHANGING BUTTONS
 Ask Claude to change them in the repo, they'll land on the PC within 15 minutes.

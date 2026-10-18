@@ -1,54 +1,57 @@
 {
-  "title": "WRE Panel",
+  "title": "Desk Panel",
+  "name": "Ethan",
   "browser": "chrome",
+  "favourites": ["dashboard", "aroflo", "outlook", "todoist", "c-daily", "c-inbox", "cb-start", "lock"],
   "groups": [
     {
       "name": "Work",
       "buttons": [
-        { "id": "dashboard", "label": "WRE Dashboard", "sub": "Follow ups and tracker", "type": "url", "target": "https://claude.ai/artifact/Ah1oAv4j9heVqWdqPRNYAx" },
-        { "id": "aroflo", "label": "AroFlo", "sub": "Home", "type": "url", "target": "https://office.aroflo.com/ims/Site/Home/index.cfm" },
-        { "id": "outlook", "label": "Outlook", "sub": "Shared inbox", "type": "url", "target": "https://outlook.cloud.microsoft/mail/" },
-        { "id": "filer", "label": "Inbox Filer tabs", "sub": "Opens both, pin them", "type": "urls", "targets": ["https://outlook.cloud.microsoft/mail/#wre-filer", "https://office.aroflo.com/ims/Site/Home/index.cfm#wre-filer"] },
-        { "id": "todoist", "label": "Todoist", "sub": "WRE follow ups", "type": "url", "target": "https://app.todoist.com/app/" },
-        { "id": "tradies", "label": "Tradies Web", "sub": "Ambrose reports", "type": "url", "target": "https://tradies.ambrosebuilding.com.au/" },
-        { "id": "ambroseadmin", "label": "Ambrose admin", "sub": "POs", "type": "url", "target": "https://tradiesadmin.ambroseconstruct.com.au/" }
+        {"id": "dashboard", "label": "WRE Dashboard", "sub": "Follow ups and tracker", "type": "url", "target": "https://claude.ai/artifact/Ah1oAv4j9heVqWdqPRNYAx", "icon": "dash", "color": "blue"},
+        {"id": "aroflo", "label": "AroFlo", "sub": "Home", "type": "url", "target": "https://office.aroflo.com/ims/Site/Home/index.cfm", "icon": "brief", "color": "teal"},
+        {"id": "outlook", "label": "Outlook", "sub": "Shared inbox", "type": "url", "target": "https://outlook.cloud.microsoft/mail/", "icon": "mail", "color": "blue"},
+        {"id": "filer", "label": "Inbox Filer tabs", "sub": "Opens both, pin them", "type": "urls", "targets": ["https://outlook.cloud.microsoft/mail/#wre-filer", "https://office.aroflo.com/ims/Site/Home/index.cfm#wre-filer"], "icon": "inbox", "color": "violet"},
+        {"id": "todoist", "label": "Todoist", "sub": "WRE follow ups", "type": "url", "target": "https://app.todoist.com/app/", "icon": "todo", "color": "coral"},
+        {"id": "tradies", "label": "Tradies Web", "sub": "Ambrose reports", "type": "url", "target": "https://tradies.ambrosebuilding.com.au/", "icon": "house", "color": "amber"},
+        {"id": "ambroseadmin", "label": "Ambrose admin", "sub": "POs", "type": "url", "target": "https://tradiesadmin.ambroseconstruct.com.au/", "icon": "file", "color": "amber"}
       ]
     },
     {
       "name": "Claude",
       "buttons": [
-        { "id": "c-daily", "label": "Daily check", "sub": "Notes, photos, timesheets", "type": "claude", "prompt": "Run my AroFlo daily check" },
-        { "id": "c-inbox", "label": "Inbox check", "sub": "Pull first on the dashboard", "type": "claude", "prompt": "Run my daily inbox check" },
-        { "id": "c-week", "label": "Week scope check", "sub": "Next week's tasks", "type": "claude", "prompt": "Run my AroFlo week ahead scope check" },
-        { "id": "c-trades", "label": "Trade attendance", "sub": "2 working days ahead", "type": "claude", "prompt": "Run the trade attendance check" },
-        { "id": "c-esa", "label": "Energex ESA check", "sub": "Safety advice inbox", "type": "claude", "prompt": "Run the Energex safety advice check" },
-        { "id": "c-tidy", "label": "Job tracker tidy", "sub": "Weekly", "type": "claude", "prompt": "Run the weekly job tracker tidy" },
-        { "id": "c-timesheet", "label": "Do my timesheet", "sub": "After hours time", "type": "claude", "prompt": "Do my timesheet" },
-        { "id": "c-lisa", "label": "Lisa handoff", "sub": "Flag what Lisa can do", "type": "claude", "prompt": "Run the Lisa handoff check" }
+        {"id": "c-daily", "label": "Daily check", "sub": "Notes, photos, timesheets", "type": "claude", "prompt": "Run my AroFlo daily check", "icon": "check", "color": "violet"},
+        {"id": "c-inbox", "label": "Inbox check", "sub": "Pull first on the dashboard", "type": "claude", "prompt": "Run my daily inbox check", "icon": "mailopen", "color": "violet"},
+        {"id": "c-week", "label": "Week scope check", "sub": "Next week's tasks", "type": "claude", "prompt": "Run my AroFlo week ahead scope check", "icon": "cal", "color": "violet"},
+        {"id": "c-trades", "label": "Trade attendance", "sub": "2 working days ahead", "type": "claude", "prompt": "Run the trade attendance check", "icon": "users", "color": "violet"},
+        {"id": "c-esa", "label": "Energex ESA", "sub": "Safety advice", "type": "claude", "prompt": "Run the Energex safety advice check", "icon": "zap", "color": "violet"},
+        {"id": "c-tidy", "label": "Job tracker tidy", "sub": "Weekly", "type": "claude", "prompt": "Run the weekly job tracker tidy", "icon": "spark", "color": "violet"},
+        {"id": "c-timesheet", "label": "Do my timesheet", "sub": "After hours time", "type": "claude", "prompt": "Do my timesheet", "icon": "clock", "color": "violet"},
+        {"id": "c-lisa", "label": "Lisa handoff", "sub": "Flag what Lisa can do", "type": "claude", "prompt": "Run the Lisa handoff check", "icon": "handoff", "color": "violet"}
       ]
     },
     {
-      "name": "Clipboard Brain",
+      "name": "Clipboard",
       "buttons": [
-        { "id": "cb-start", "label": "Start Clipboard Brain", "sub": "Run this first", "type": "ahk", "target": "%DOCUMENTS%\\WRE\\wre-clipboard-brain.ahk" },
-        { "id": "cb-boys", "label": "PO lines for the boys", "sub": "Select text on PC first", "type": "keys", "keys": "ctrl+alt+1" },
-        { "id": "cb-cust", "label": "Customer text", "sub": "Select text on PC first", "type": "keys", "keys": "ctrl+alt+2" },
-        { "id": "cb-promise", "label": "Promise check", "sub": "Select text on PC first", "type": "keys", "keys": "ctrl+alt+3" }
+        {"id": "cb-start", "label": "Clipboard Brain", "sub": "Start it up", "type": "ahk", "target": "%DOCUMENTS%\\WRE\\wre-clipboard-brain.ahk", "icon": "power", "color": "green"},
+        {"id": "cb-boys", "label": "PO lines", "sub": "For the boys", "type": "keys", "keys": "ctrl+alt+1", "icon": "list", "color": "green"},
+        {"id": "cb-cust", "label": "Customer text", "sub": "In your style", "type": "keys", "keys": "ctrl+alt+2", "icon": "chat", "color": "green"},
+        {"id": "cb-promise", "label": "Promise check", "sub": "Before you send", "type": "keys", "keys": "ctrl+alt+3", "icon": "shield", "color": "green"}
       ]
     },
     {
       "name": "Gaming",
       "buttons": [
-        { "id": "sotf", "label": "SOTF Nucleus Pause", "sub": "AHK", "type": "ahk", "target": "%DOCUMENTS%\\SOTF_Nucleus_Pause.ahk" }
+        {"id": "sotf", "label": "SOTF pause", "sub": "Nucleus", "type": "ahk", "target": "%DOCUMENTS%\\SOTF_Nucleus_Pause.ahk", "icon": "pad", "color": "pink"}
       ]
     },
     {
       "name": "PC",
       "buttons": [
-        { "id": "lock", "label": "Lock PC", "sub": "", "type": "lock", "confirm": true },
-        { "id": "update", "label": "Check for updates", "sub": "Runs every 15 min anyway", "type": "update" },
-        { "id": "repo", "label": "Scripts repo", "sub": "wre-userscripts", "type": "url", "target": "https://github.com/Badseed26/wre-userscripts" },
-        { "id": "panelfolder", "label": "Panel folder", "sub": "Edit buttons.json", "type": "file", "target": "." }
+        {"id": "lock", "label": "Lock PC", "sub": "Tap twice", "type": "lock", "confirm": true, "icon": "lock", "color": "slate"},
+        {"id": "update", "label": "Check for updates", "sub": "Runs every 15 min anyway", "type": "update", "icon": "refresh", "color": "slate"},
+        {"id": "repo", "label": "Scripts repo", "sub": "wre-userscripts", "type": "url", "target": "https://github.com/Badseed26/wre-userscripts", "icon": "branch", "color": "slate"},
+        {"id": "panelfolder", "label": "Panel folder", "sub": "On the PC", "type": "file", "target": ".", "icon": "folder", "color": "slate"},
+        {"id": "iconsfolder", "label": "Icons folder", "sub": "Drop your own icons in", "type": "file", "target": "icons", "icon": "image", "color": "slate"}
       ]
     }
   ]

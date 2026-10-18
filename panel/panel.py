@@ -1,4 +1,4 @@
-# WRE Panel
+# Desk Panel
 # Little server on the PC that the iPad talks to over home wifi.
 # Only runs the buttons in buttons.json, nothing else. Home network only.
 #
@@ -24,7 +24,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.1"
+VERSION = "1.2"
 HERE = os.path.dirname(os.path.abspath(__file__))
 RAW = "https://raw.githubusercontent.com/Badseed26/wre-userscripts/main/"
 CHECK_EVERY = 15 * 60
@@ -34,6 +34,9 @@ BUTTONS = os.path.join(HERE, "buttons.json")
 KEYFILE = os.path.join(HERE, "panel_key.txt")
 ADDRFILE = os.path.join(HERE, "ipad_address.txt")
 LOGFILE = os.path.join(HERE, "panel.log")
+ICONS = os.path.join(HERE, "icons")  # your own tile icons, updates never touch this
+ICON_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+              ".webp": "image/webp", ".gif": "image/gif", ".svg": "image/svg+xml"}
 STARTUP_VBS = os.path.join(
     os.environ.get("APPDATA", ""),
     r"Microsoft\Windows\Start Menu\Programs\Startup\WRE Panel.vbs",
@@ -213,21 +216,71 @@ def find_button(cfg, bid):
     return None
 
 
+def squash(text):
+    return "".join(c for c in text.lower() if c.isalnum())
+
+
+def icon_files(btn):
+    # an icon named after the button id wins, then one named after its label
+    # e.g. icons/aroflo.png or icons/AroFlo.png
+    if not os.path.isdir(ICONS):
+        return []
+    by_id, by_label = [], []
+    for f in os.listdir(ICONS):
+        stem, ext = os.path.splitext(f)
+        if ext.lower() not in ICON_TYPES:
+            continue
+        if squash(stem) == squash(btn["id"]):
+            by_id.append(f)
+        elif squash(stem) == squash(btn["label"]):
+            by_label.append(f)
+    return sorted(by_id) + sorted(by_label)
+
+
 def public_view(cfg):
     # what the iPad gets: labels and layout, not file paths
-    out = {"title": cfg.get("title", "WRE Panel"), "groups": []}
+    out = {"title": cfg.get("title", "Desk Panel"), "name": cfg.get("name", ""),
+           "groups": [], "favourites": []}
+    ids = set()
     for g in cfg.get("groups", []):
         gb = []
         for b in g.get("buttons", []):
             item = {"id": b["id"], "label": b["label"], "sub": b.get("sub", ""),
-                    "type": b["type"]}
+                    "type": b["type"], "icon": b.get("icon", ""),
+                    "color": b.get("color", "slate")}
             if b["type"] == "ipad":
                 item["href"] = b["target"]
             if b.get("confirm"):
                 item["confirm"] = True
+            files = icon_files(b)
+            if files:
+                f = files[0]
+                v = int(os.path.getmtime(os.path.join(ICONS, f)))
+                item["img"] = "/icons/%s?v=%d" % (urllib.parse.quote(f), v)
+            ids.add(b["id"])
             gb.append(item)
         out["groups"].append({"name": g["name"], "buttons": gb})
+    out["favourites"] = [i for i in cfg.get("favourites", []) if i in ids]
     return out
+
+
+def save_icon(btn, b64):
+    import base64
+    data = base64.b64decode(b64.split(",")[-1])
+    if len(data) > 2_000_000:
+        raise ValueError("That image is too big")
+    if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise ValueError("Expected a PNG from the iPad")
+    os.makedirs(ICONS, exist_ok=True)
+    for f in icon_files(btn):
+        os.remove(os.path.join(ICONS, f))
+    with open(os.path.join(ICONS, btn["id"] + ".png"), "wb") as f:
+        f.write(data)
+
+
+def reset_icon(btn):
+    for f in icon_files(btn):
+        os.remove(os.path.join(ICONS, f))
 
 
 # ---------- auto updates ----------
@@ -374,7 +427,7 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
-    def send(self, code, body, ctype="application/json"):
+    def send(self, code, body, ctype="application/json", extra=None):
         if isinstance(body, (dict, list)):
             body = json.dumps(body).encode()
         elif isinstance(body, str):
@@ -382,6 +435,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        for k, v in (extra or {}).items():
+            self.send_header(k, v)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -402,6 +458,14 @@ class Handler(BaseHTTPRequestHandler):
             if os.path.exists(p):
                 return self.send(200, open(p, "rb").read(), "image/png")
             return self.send(404, {"error": "no icon"})
+        if u.path.startswith("/icons/"):
+            name = os.path.basename(urllib.parse.unquote(u.path[7:]))
+            ext = os.path.splitext(name)[1].lower()
+            p = os.path.join(ICONS, name)
+            if ext in ICON_TYPES and os.path.isfile(p):
+                extra = {"Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; sandbox"}
+                return self.send(200, open(p, "rb").read(), ICON_TYPES[ext], extra)
+            return self.send(404, {"error": "no icon"})
         if u.path == "/api/buttons":
             if not self.key_ok(q.get("k", [""])[0]):
                 return self.send(401, {"error": "bad key"})
@@ -419,11 +483,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not private_client(self.client_address[0]):
             return self.send(403, {"error": "home network only"})
-        if self.path != "/api/run":
+        if self.path not in ("/api/run", "/api/icon"):
             return self.send(404, {"error": "not found"})
         try:
             n = int(self.headers.get("Content-Length", "0"))
-            data = json.loads(self.rfile.read(min(n, 10_000)) or b"{}")
+            if n > 3_000_000:
+                return self.send(413, {"error": "too big"})
+            data = json.loads(self.rfile.read(n) or b"{}")
         except Exception:
             return self.send(400, {"error": "bad request"})
         if not self.key_ok(data.get("k", "")):
@@ -433,6 +499,14 @@ class Handler(BaseHTTPRequestHandler):
             btn = find_button(cfg, data.get("id", ""))
             if not btn:
                 return self.send(404, {"error": "no button with that id"})
+            if self.path == "/api/icon":
+                if data.get("reset"):
+                    reset_icon(btn)
+                    log("icon reset for %s" % btn["id"])
+                    return self.send(200, {"ok": True, "msg": "Icon reset"})
+                save_icon(btn, data.get("png", ""))
+                log("new icon for %s" % btn["id"])
+                return self.send(200, {"ok": True, "msg": "Icon saved"})
             msg = run_button(btn, cfg)
             log("ran %s (%s)" % (btn["id"], btn["label"]))
             return self.send(200, {"ok": True, "msg": msg or ""})
@@ -453,11 +527,11 @@ def set_startup(on):
                % (pyw, script))
         with open(STARTUP_VBS, "w", encoding="utf-8") as f:
             f.write(vbs)
-        print("Done. WRE Panel will start hidden every time Windows starts.")
+        print("Done. Desk Panel will start hidden every time Windows starts.")
     else:
         if os.path.exists(STARTUP_VBS):
             os.remove(STARTUP_VBS)
-        print("Done. WRE Panel won't start with Windows any more.")
+        print("Done. Desk Panel won't start with Windows any more.")
 
 
 def main():
@@ -470,6 +544,7 @@ def main():
     global SRV
     KEY = get_key()
     load_buttons()  # fail early if the json is broken
+    os.makedirs(ICONS, exist_ok=True)
     srv = None
     for _ in range(15):  # after a restart the old one can take a sec to let go
         try:
@@ -484,7 +559,7 @@ def main():
     addr = "http://%s:%d/?k=%s" % (local_ip(), PORT, KEY)
     with open(ADDRFILE, "w", encoding="utf-8") as f:
         f.write(addr + "\n")
-    log("WRE Panel %s running. Open this on the iPad:" % VERSION)
+    log("Desk Panel %s running. Open this on the iPad:" % VERSION)
     log("  " + addr)
     threading.Thread(target=updater_loop, daemon=True).start()
     try:
