@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Pull
 // @namespace    wre
-// @version      1.3.1
+// @version      1.4
 // @description  Reads a day's Inbox and Sent Items in the shared Outlook (read only, unread emails go back to unread) and hands one compact bundle to the WRE Dashboard's inbox check. The Pull button on the dashboard starts it.
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -13,6 +13,8 @@
 // @grant        GM_addValueChangeListener
 // @grant        GM_openInTab
 // @grant        GM.getValue
+// @grant        GM_xmlhttpRequest
+// @connect      127.0.0.1
 // @run-at       document-start
 // @updateURL    https://raw.githubusercontent.com/Badseed26/wre-userscripts/main/wre-inbox-pull.user.js
 // @downloadURL  https://raw.githubusercontent.com/Badseed26/wre-userscripts/main/wre-inbox-pull.user.js
@@ -56,6 +58,19 @@ if (/\.frame\.claudeusercontent\.com$/.test(location.hostname)) {
     lastSt = st.at; pollUntil = Date.now() + 8 * 60e3; setTimeout(poll, 3000);
     try { tab = GM_openInTab(OUTLOOK_URL, { active: true, insert: true, setParent: true }); } catch (x) { window.open(OUTLOOK_URL, '_blank'); }
   }, true);
+  // Desk Panel: the iPad panel on this PC queues check runs (Daily check etc). Only the WRE Dashboard (it marks itself
+  // data-wre-runs) collects them and starts them like its own Run buttons. Panel not running: check again every 15 sec.
+  const PANEL = 'http://127.0.0.1:8765/api/dash/next';
+  const panelPoll = () => {
+    if (!document.documentElement.hasAttribute('data-wre-runs')) { setTimeout(panelPoll, 5000); return; }
+    const again = ms => setTimeout(panelPoll, ms);
+    try {
+      GM_xmlhttpRequest({ method: 'GET', url: PANEL + '?t=' + Date.now(), timeout: 4000,
+        onload: r => { try { const j = JSON.parse(r.responseText); (j.reqs || []).forEach(q => send('wre-run-request', q)); } catch (e) {} again(3000); },
+        onerror: () => again(15000), ontimeout: () => again(15000) });
+    } catch (e) { again(15000); }
+  };
+  setTimeout(panelPoll, 2000);
   return;
 }
 if (window.top !== window.self) return; // Outlook: top page only

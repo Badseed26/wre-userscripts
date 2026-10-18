@@ -19,14 +19,14 @@
     {
       "name": "Claude",
       "buttons": [
-        {"id": "c-daily", "label": "Daily check", "sub": "Notes, photos, timesheets", "type": "claude", "prompt": "Run my AroFlo daily check", "icon": "check", "color": "violet"},
-        {"id": "c-inbox", "label": "Inbox check", "sub": "Pull first on the dashboard", "type": "claude", "prompt": "Run my daily inbox check", "icon": "mailopen", "color": "violet"},
-        {"id": "c-week", "label": "Week scope check", "sub": "Next week's tasks", "type": "claude", "prompt": "Run my AroFlo week ahead scope check", "icon": "cal", "color": "violet"},
-        {"id": "c-trades", "label": "Trade attendance", "sub": "2 working days ahead", "type": "claude", "prompt": "Run the trade attendance check", "icon": "users", "color": "violet"},
-        {"id": "c-esa", "label": "Energex ESA", "sub": "Safety advice", "type": "claude", "prompt": "Run the Energex safety advice check", "icon": "zap", "color": "violet"},
-        {"id": "c-tidy", "label": "Job tracker tidy", "sub": "Weekly", "type": "claude", "prompt": "Run the weekly job tracker tidy", "icon": "spark", "color": "violet"},
-        {"id": "c-timesheet", "label": "Do my timesheet", "sub": "After hours time", "type": "claude", "prompt": "Do my timesheet", "icon": "clock", "color": "violet"},
-        {"id": "c-lisa", "label": "Lisa handoff", "sub": "Flag what Lisa can do", "type": "claude", "prompt": "Run the Lisa handoff check", "icon": "handoff", "color": "violet"}
+        {"id": "c-daily", "label": "Daily check", "sub": "Notes, photos, timesheets", "type": "dashrun", "icon": "check", "color": "violet", "key": "daily"},
+        {"id": "c-inbox", "label": "Inbox check", "sub": "Pulls today first", "type": "dashrun", "icon": "mailopen", "color": "violet", "key": "inbox"},
+        {"id": "c-week", "label": "Week scope check", "sub": "Next week's tasks", "type": "dashrun", "icon": "cal", "color": "violet", "key": "week"},
+        {"id": "c-trades", "label": "Trade attendance", "sub": "2 working days ahead", "type": "dashrun", "icon": "users", "color": "violet", "key": "trades"},
+        {"id": "c-esa", "label": "Energex ESA", "sub": "Safety advice", "type": "dashrun", "icon": "zap", "color": "violet", "key": "esa"},
+        {"id": "c-tidy", "label": "Job tracker tidy", "sub": "Weekly", "type": "dashrun", "icon": "spark", "color": "violet", "key": "tidy"},
+        {"id": "c-timesheet", "label": "Do my timesheet", "sub": "After hours time", "type": "dashrun", "icon": "clock", "color": "violet", "key": "timesheet"},
+        {"id": "c-lisa", "label": "Lisa handoff", "sub": "Flag what Lisa can do", "type": "dashrun", "icon": "handoff", "color": "violet", "key": "lisa"}
       ]
     },
     {

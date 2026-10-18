@@ -46,6 +46,7 @@ Button types:
   urls     opens a few links at once
   app      opens a desktop app, like Outlook
   claude   opens a new Claude chat on the PC with the prompt filled in
+  dashrun  runs a check through the WRE Dashboard, same as its Run button
   ahk      runs an AutoHotkey file
   file     opens a file or folder
   keys     presses a hotkey on the PC, like ctrl+alt+1

@@ -24,7 +24,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.9"
+VERSION = "2.0"
 HERE = os.path.dirname(os.path.abspath(__file__))
 RAW = "https://raw.githubusercontent.com/Badseed26/wre-userscripts/%s/"
 LATEST = "https://api.github.com/repos/Badseed26/wre-userscripts/commits/main"
@@ -199,6 +199,47 @@ def open_start_menu_app(name):
     os.startfile("shell:AppsFolder\\" + app_id)
 
 
+# ---------- runs on the WRE Dashboard ----------
+# The dashboard starts checks itself (scheduled tasks, the same as its Run buttons). The panel queues a request here,
+# the WRE Inbox Pull script in the dashboard window collects it from /api/dash/next, and the dashboard runs it.
+
+DASH = {"q": [], "last_poll": 0.0}
+DASH_LOCK = threading.Lock()
+PULL_URL = "https://outlook.cloud.microsoft/mail/#wre-inbox-run"
+
+
+def dash_open():
+    return time.time() - DASH["last_poll"] < 12
+
+
+def dash_run(btn, cfg):
+    key = btn["key"]
+    was_open = dash_open()
+    if key == "inbox":
+        open_url(PULL_URL, cfg)  # reads today's inbox and hands the bundle to the dashboard
+    if not was_open:
+        dash = find_button(cfg, "dashboard")
+        if dash:
+            run_button(dash, cfg)
+    with DASH_LOCK:
+        now = time.time()
+        DASH["q"] = [r for r in DASH["q"] if now - r["at"] < 300 and key not in r["keys"]]
+        DASH["q"].append({"id": "p%d" % int(now * 1000), "keys": [key], "at": now})
+    name = btn["label"]
+    if key == "inbox":
+        return "Pulling today's inbox, %s starts once it lands" % name
+    return ("%s sent to the dashboard" % name) if was_open else ("Opening the dashboard, %s starts once it's up" % name)
+
+
+def dash_next():
+    with DASH_LOCK:
+        DASH["last_poll"] = time.time()
+        now = time.time()
+        out = [{"id": r["id"], "keys": r["keys"]} for r in DASH["q"] if now - r["at"] < 300]
+        DASH["q"] = []
+    return out
+
+
 # ---------- running a button ----------
 
 def run_button(btn, cfg):
@@ -234,6 +275,8 @@ def run_button(btn, cfg):
         ctypes.windll.user32.LockWorkStation()
     elif t == "update":
         return check_updates()
+    elif t == "dashrun":
+        return dash_run(btn, cfg)
     else:
         raise ValueError("Unknown button type: " + t)
 
@@ -520,6 +563,11 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 log("buttons.json problem: %s" % e)
                 return self.send(500, {"error": "buttons.json has a problem: %s" % e})
+        if u.path == "/api/dash/next":
+            # only the browser on this PC (the dashboard window), no key needed
+            if self.client_address[0] not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
+                return self.send(403, {"error": "this PC only"})
+            return self.send(200, {"reqs": dash_next()})
         if u.path == "/api/ping":
             return self.send(200, {"ok": True, "version": VERSION})
         if u.path == "/api/version":
