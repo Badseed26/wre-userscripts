@@ -35,7 +35,8 @@
         {"id": "cb-start", "label": "Clipboard Brain", "sub": "Start it up", "type": "ahk", "target": "%DOCUMENTS%\\WRE\\wre-clipboard-brain.ahk", "icon": "power", "color": "green"},
         {"id": "cb-boys", "label": "PO lines", "sub": "For the boys", "type": "keys", "keys": "ctrl+alt+1", "icon": "list", "color": "green"},
         {"id": "cb-cust", "label": "Customer text", "sub": "In your style", "type": "keys", "keys": "ctrl+alt+2", "icon": "chat", "color": "green"},
-        {"id": "cb-promise", "label": "Promise check", "sub": "Before you send", "type": "keys", "keys": "ctrl+alt+3", "icon": "shield", "color": "green"}
+        {"id": "cb-promise", "label": "Promise check", "sub": "Before you send", "type": "keys", "keys": "ctrl+alt+3", "icon": "shield", "color": "green"},
+        {"id": "cb-inv", "label": "Invoice tidy", "sub": "Select it on PC first", "type": "keys", "keys": "ctrl+alt+4", "icon": "file", "color": "green"}
       ]
     },
     {

@@ -25,7 +25,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "2.4"
+VERSION = "2.5"
 HERE = os.path.dirname(os.path.abspath(__file__))
 RAW = "https://raw.githubusercontent.com/Badseed26/wre-userscripts/%s/"
 LATEST = "https://api.github.com/repos/Badseed26/wre-userscripts/commits/main"
