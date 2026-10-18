@@ -24,9 +24,10 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.6"
+VERSION = "1.7"
 HERE = os.path.dirname(os.path.abspath(__file__))
-RAW = "https://raw.githubusercontent.com/Badseed26/wre-userscripts/main/"
+RAW = "https://raw.githubusercontent.com/Badseed26/wre-userscripts/%s/"
+LATEST = "https://api.github.com/repos/Badseed26/wre-userscripts/commits/main"
 CHECK_EVERY = 15 * 60
 PANEL_FILES = ["panel.py", "index.html", "buttons.json", "icon.png", "README.txt"]
 PORT = 8765
@@ -303,8 +304,23 @@ update_lock = threading.Lock()
 last_check = {"when": "", "result": "Not checked yet"}
 
 
-def fetch(path):
-    url = RAW + urllib.parse.quote(path) + "?t=%d" % int(time.time())
+def latest_ref():
+    # the newest commit on main, so every file comes from the same commit and GitHub's
+    # 5 minute cache on main can't hand back old files. Falls back to main if the API's busy.
+    try:
+        req = urllib.request.Request(LATEST, headers={"Accept": "application/vnd.github.sha",
+                                                      "User-Agent": "desk-panel"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            sha = r.read().decode().strip()
+        if len(sha) == 40 and all(c in "0123456789abcdef" for c in sha):
+            return sha
+    except Exception as e:
+        log("Couldn't get the latest commit, using main: %s" % e)
+    return "main"
+
+
+def fetch(path, ref="main"):
+    url = (RAW % ref) + urllib.parse.quote(path) + "?t=%d" % int(time.time())
     req = urllib.request.Request(url, headers={"Cache-Control": "no-cache"})
     with urllib.request.urlopen(req, timeout=15) as r:
         return r.read()
@@ -370,9 +386,10 @@ def check_updates():
         return "Already checking"
     try:
         changed, restart = [], False
+        ref = latest_ref()
         for name in PANEL_FILES:
             try:
-                data = fetch("panel/" + name)
+                data = fetch("panel/" + name, ref)
             except Exception as e:
                 raise RuntimeError("Can't reach GitHub (%s)" % e)
             if looks_ok(name, data) and write_if_changed(os.path.join(HERE, name), data):
@@ -381,7 +398,7 @@ def check_updates():
                     restart = True
         bp = brain_path()
         if bp:
-            data = fetch("wre-clipboard-brain.ahk")
+            data = fetch("wre-clipboard-brain.ahk", ref)
             if looks_ok("brain.ahk", data) and write_if_changed(bp, data):
                 changed.append("Clipboard Brain")
                 if brain_running():
