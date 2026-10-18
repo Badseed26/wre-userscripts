@@ -86,7 +86,8 @@
   .top { display: -webkit-flex; display: flex; -webkit-justify-content: space-between; justify-content: space-between; -webkit-align-items: flex-start; align-items: flex-start; }
   .badge { width: 48px; height: 48px; border-radius: 14px; display: -webkit-flex; display: flex; -webkit-align-items: center; align-items: center;
     -webkit-justify-content: center; justify-content: center; overflow: hidden; -webkit-flex-shrink: 0; flex-shrink: 0; }
-  .badge img { width: 48px; height: 48px; object-fit: cover; display: block; }
+  .badge img { width: 48px; height: 48px; object-fit: contain; display: block; }
+  .badge.own { background: transparent; border-radius: 0; }
   .chip { font-size: 11px; font-weight: 600; letter-spacing: .6px; text-transform: uppercase; color: var(--muted); background: var(--chip);
     border-radius: 999px; padding: 5px 9px; }
   .lbl { display: block; font-size: 17px; font-weight: 600; line-height: 1.25; margin-top: 18px; }
@@ -266,7 +267,8 @@
 
   function badgeHtml(b) {
     var col = COLORS[b.color] || COLORS.slate;
-    if (b.img) return '<div class="badge" style="background:' + tint(col, 0.14) + '"><img src="' + esc(b.img) + '" alt=""></div>';
+    // your own icon sits on its own, no coloured square behind it (round logos stay round)
+    if (b.img) return '<div class="badge own"><img src="' + esc(b.img) + '" alt=""></div>';
     return '<div class="badge" style="color:' + col + ';background:' + tint(col, 0.14) + '">' +
       '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="' +
       esc(ICONS[b.icon] || ICONS.link) + '"></path></svg></div>';
