@@ -24,7 +24,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "2.1"
+VERSION = "2.2"
 HERE = os.path.dirname(os.path.abspath(__file__))
 RAW = "https://raw.githubusercontent.com/Badseed26/wre-userscripts/%s/"
 LATEST = "https://api.github.com/repos/Badseed26/wre-userscripts/commits/main"
@@ -270,6 +270,9 @@ def run_button(btn, cfg, opts=None):
         open_url("https://claude.ai/new?q=" + urllib.parse.quote(btn["prompt"]), cfg)
     elif t in ("ahk", "file"):
         path = resolve_path(btn["target"])
+        # an AHK script that's already open stays as it is (SingleInstance Force would restart it)
+        if t == "ahk" and ahk_running(os.path.basename(path)):
+            return "%s is already running" % btn["label"]
         os.startfile(path)
     elif t == "keys":
         send_keys(btn["keys"])
@@ -443,18 +446,21 @@ def brain_path():
     return None
 
 
-def brain_running():
-    # is Clipboard Brain open right now (so it can be reloaded after an update)
-    ps = ("$p='wre-clipboard'+'-brain'; Get-CimInstance Win32_Process | "
-          "Where-Object { $_.Name -like 'AutoHotkey*' -and $_.CommandLine -like \"*$p*\" } | "
-          "Select-Object -First 1 -ExpandProperty ProcessId")
+def ahk_running(script_name):
+    # is this AutoHotkey script open right now (matched on its file name)
+    ps = ("Get-CimInstance Win32_Process | Where-Object { $_.Name -like 'AutoHotkey*' -and "
+          "$_.CommandLine -like ('*' + $env:DP_AHK + '*') } | Select-Object -First 1 -ExpandProperty ProcessId")
     try:
-        out = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
-                             capture_output=True, text=True, timeout=30,
-                             creationflags=0x08000000)
+        out = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True, text=True,
+                             timeout=30, env=dict(os.environ, DP_AHK=script_name), creationflags=0x08000000)
         return out.stdout.strip() != ""
     except Exception:
         return False
+
+
+def brain_running():
+    # is Clipboard Brain open right now (so it can be reloaded after an update)
+    return ahk_running("wre-clipboard-brain.ahk")
 
 
 def check_updates():
