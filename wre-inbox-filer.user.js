@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.14
+// @version      0.9.15
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -769,7 +769,9 @@ if (ON_AF) {
       }
       // existing task
       if (job.target) {
-        const d = await descOf(job.target.href); const has = plain(d.html).includes(x.po_full) || (job.target.name || '').includes(x.po_full);
+        const d = await descOf(job.target.href);
+        // once this run has uploaded or added the block, the PO being on the task is our own doing, so carry on to the finish rather than calling it a skip (18/10)
+        const has = !R.up && !R.desc && !R.upErr && !R.descErr && (plain(d.html).includes(x.po_full) || (job.target.name || '').includes(x.po_full));
         // Task for this ref that's still just TBC: a create that never finished, so fill it like a new one rather than adding under TBC.
         if (!job.fillNew && x.kind == 'po' && /^(TBC)?$/i.test(plain(d.html))) { job.fillNew = true; saveJob(job); }
         if (job.fillNew) {
