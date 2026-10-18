@@ -24,7 +24,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.8"
+VERSION = "1.9"
 HERE = os.path.dirname(os.path.abspath(__file__))
 RAW = "https://raw.githubusercontent.com/Badseed26/wre-userscripts/%s/"
 LATEST = "https://api.github.com/repos/Badseed26/wre-userscripts/commits/main"
@@ -188,7 +188,7 @@ def resolve_path(target):
 
 def open_start_menu_app(name):
     # finds the app the same way the Start menu does, so it doesn't matter how it was installed
-    ps = ("Get-StartApps | Where-Object { $_.Name -like '*' + $env:DP_APP + '*' } | "
+    ps = ("Get-StartApps | Where-Object { $_.Name -like ('*' + $env:DP_APP + '*') } | "
           "Select-Object -First 1 -ExpandProperty AppID")
     env = dict(os.environ, DP_APP=name)
     out = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True,
