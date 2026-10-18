@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.13
+// @version      0.9.14
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -31,7 +31,7 @@ const HOST = location.hostname;
 const ON_MAIL = /outlook/.test(HOST), ON_AF = HOST === 'office.aroflo.com';
 
 // ---------- fixed bits ----------
-const VER = '0.9.12';
+const VER = (typeof GM_info != 'undefined' && GM_info.script && GM_info.script.version) || '?'; // read off the header so it never goes stale
 const MAX_READS_DAY = 80; // Haiku reads a day before it stops itself (a runaway loop can't burn the budget)
 const PAGE = 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); // this page load
 const MODEL = 'claude-haiku-5-5';
@@ -356,6 +356,8 @@ if (ON_MAIL) {
     const b0 = bodyOf(); el.click();
     await waitFor(() => bodyOf().length > 0 && bodyOf() != b0, 8000); await quiet(300, 3000);
     const info = readPane(); const id = 'j' + now().toString(36);
+    // Nothing in the reading pane (the click didn't open it, or the list moved under us): leave it for the next scan rather than reading a blank.
+    if (!info.subject.trim() && !info.body) { log('Reading pane came up empty, left it: ' + p.head.slice(0, 60)); return test ? 'reading pane came up empty, try again' : false; }
     if (/wired ?rite/i.test(info.from)) { log('Own email, skipped: ' + p.head.slice(0, 60)); if (wasUnread) { await park(); await markUnread(key); } markSeen(key + '|' + ymd(new Date())); return test ? 'own email, skipped' : false; }
     const fullKey = (info.date || ymd(new Date())) + '|' + p.head.slice(0, 120);
     // Which PDF is the PO: skip schedules, reports and photos, then look for a PO looking name (ARC's are "PO128170-BU01-002.pdf").
@@ -405,20 +407,25 @@ if (ON_MAIL) {
   W.wreFilerTest = async (q, n, opt) => {
     if (!IS_FILER) return 'open Outlook with #wre-filer first';
     if (gget('wfPending', null)) return 'still reading the last one, try again in a minute';
+    // hold the scan off for the whole test, or it clears the search and clicks back to the Inbox under us (18/10)
+    for (let i = 0; busy && i < 30; i++) await sleep(1000);
+    if (busy) return 'the scan is busy, try again in a minute';
+    busy = true;
     const inp = document.querySelector('input[aria-label="Search"],#topSearchInput'); inp.focus(); inp.click();
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(inp, q); inp.dispatchEvent(new Event('input', { bubbles: true }));
     inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
     await waitFor(() => rowsNow().length > 0, 12000); await sleep(2500);
     const list = rowsNow().map(o => o.getAttribute('aria-label')).filter(l => !/^Unread/.test(l)).slice(0, n || 1);
-    gset('wfTestQ', list); gset('wfTestQuery', q); gset('wfTestOpt', opt || null); W.wreFilerTestNext(); return 'testing ' + list.length + (opt && opt.live ? ' LIVE' : '');
+    gset('wfTestQ', list); gset('wfTestQuery', q); gset('wfTestOpt', opt || null); if (!list.length) busy = false; W.wreFilerTestNext(); return 'testing ' + list.length + (opt && opt.live ? ' LIVE' : '');
   };
-  W.wreFilerTestNext = async () => {
+  W.wreFilerTestNext = async () => { busy = true; try { return await testNext(); } finally { busy = false; } };
+  const testNext = async () => {
     const list = gget('wfTestQ', []); if (!list.length) return 'test queue empty';
     const lab = list.shift(); gset('wfTestQ', list);
     let el = rowsNow().find(o => o.getAttribute('aria-label') == lab);
     if (!el) { const inp = document.querySelector('input[aria-label="Search"],#topSearchInput'); inp.focus(); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(inp, gget('wfTestQuery', '')); inp.dispatchEvent(new Event('input', { bubbles: true })); inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true })); await waitFor(() => rowsNow().some(o => o.getAttribute('aria-label') == lab), 12000); el = rowsNow().find(o => o.getAttribute('aria-label') == lab); }
     if (!el) return 'row gone: ' + lab.slice(0, 60);
-    busy = true; try { return await takeOne(el, await rules(), gget('wfTestOpt', null) || true); } finally { busy = false; }
+    return await takeOne(el, await rules(), gget('wfTestOpt', null) || true);
   };
 
   W.wreFilerPeek = () => JSON.stringify({ ver: VER, pending: (gget('wfPending', null) || {}).key || '', jobs: gget('wfJobs', []).slice(-8).map(j => j.status + ' | ' + j.info.subject.slice(0, 50) + (j.notBefore && j.notBefore > now() ? ' | waits ' + Math.round((j.notBefore - now()) / 1000) + 's' : '')), log: gget('wfLog', []).slice(-12) });
