@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.15
+// @version      0.9.16
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -855,7 +855,9 @@ if (ON_AF) {
         if (now() - gget('wfBookAt', 0) > 60 * 60e3 && !R.dry) { gset('wfBookAt', now()); await checkToBook(); }
         if (!R.dry) await doubleUps();
         // tidy: finished jobs older than 7 days
-        const keep = jobs().filter(j => j.status == 'new' || now() - j.at < 7 * 864e5); jobs().filter(j => !keep.includes(j) && j.pdfKey).forEach(j => gdel(j.pdfKey)); gset('wfJobs', keep);
+        // matched by id: two jobs() calls give different copies, so includes() never matched and every PDF got wiped while a job waited (18/10)
+        const all = jobs(), keep = all.filter(j => j.status == 'new' || now() - j.at < 7 * 864e5), ids = new Set(keep.map(j => j.id));
+        all.filter(j => !ids.has(j.id) && j.pdfKey).forEach(j => gdel(j.pdfKey)); if (keep.length != all.length) gset('wfJobs', keep);
       }
     } catch (e) { log('AroFlo side error: ' + e.message); status(e.message, true); }
     finally { running = false; }
