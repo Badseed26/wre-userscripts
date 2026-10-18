@@ -44,6 +44,7 @@ Editing buttons.json here works too, but the next update will put it back to the
 Button types:
   url      opens a link on the PC (in Chrome)
   urls     opens a few links at once
+  app      opens a desktop app, like Outlook
   claude   opens a new Claude chat on the PC with the prompt filled in
   ahk      runs an AutoHotkey file
   file     opens a file or folder

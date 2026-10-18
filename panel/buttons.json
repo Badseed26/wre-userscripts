@@ -9,7 +9,7 @@
       "buttons": [
         {"id": "dashboard", "label": "WRE Dashboard", "sub": "Follow ups and tracker", "type": "url", "target": "https://claude.ai/artifact/Ah1oAv4j9heVqWdqPRNYAx", "icon": "dash", "color": "blue"},
         {"id": "aroflo", "label": "AroFlo", "sub": "Home", "type": "url", "target": "https://office.aroflo.com/ims/Site/Home/index.cfm?view=1&tid=IMS.HME", "icon": "brief", "color": "teal"},
-        {"id": "outlook", "label": "Outlook", "sub": "Shared inbox", "type": "url", "target": "https://outlook.cloud.microsoft/mail/", "icon": "mail", "color": "blue"},
+        {"id": "outlook", "label": "Outlook", "sub": "Desktop app", "type": "app", "icon": "mail", "color": "blue", "targets": ["outlook.exe", "olk.exe"]},
         {"id": "filer", "label": "Inbox Filer tabs", "sub": "Opens both, pin them", "type": "urls", "targets": ["https://outlook.cloud.microsoft/mail/#wre-filer", "https://office.aroflo.com/ims/Site/Home/index.cfm#wre-filer"], "icon": "inbox", "color": "violet"},
         {"id": "todoist", "label": "Todoist", "sub": "WRE follow ups", "type": "url", "target": "https://app.todoist.com/app/", "icon": "todo", "color": "coral"},
         {"id": "tradies", "label": "Tradies Web", "sub": "Ambrose reports", "type": "url", "target": "https://tradies.ambrosebuilding.com.au/", "icon": "house", "color": "amber"},

@@ -24,7 +24,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.3"
+VERSION = "1.4"
 HERE = os.path.dirname(os.path.abspath(__file__))
 RAW = "https://raw.githubusercontent.com/Badseed26/wre-userscripts/main/"
 CHECK_EVERY = 15 * 60
@@ -200,6 +200,15 @@ def run_button(btn, cfg):
         os.startfile(path)
     elif t == "keys":
         send_keys(btn["keys"])
+    elif t == "app":
+        # desktop apps, first one that's installed wins (e.g. classic Outlook then new Outlook)
+        for name in btn["targets"]:
+            try:
+                os.startfile(os.path.expandvars(name))
+                return
+            except OSError:
+                continue
+        raise FileNotFoundError("Couldn't find %s on this PC" % btn["label"])
     elif t == "lock":
         ctypes.windll.user32.LockWorkStation()
     elif t == "update":
