@@ -24,7 +24,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "1.7"
+VERSION = "1.8"
 HERE = os.path.dirname(os.path.abspath(__file__))
 RAW = "https://raw.githubusercontent.com/Badseed26/wre-userscripts/%s/"
 LATEST = "https://api.github.com/repos/Badseed26/wre-userscripts/commits/main"
@@ -184,6 +184,21 @@ def resolve_path(target):
     raise FileNotFoundError("Can't find " + t)
 
 
+# ---------- start menu apps ----------
+
+def open_start_menu_app(name):
+    # finds the app the same way the Start menu does, so it doesn't matter how it was installed
+    ps = ("Get-StartApps | Where-Object { $_.Name -like '*' + $env:DP_APP + '*' } | "
+          "Select-Object -First 1 -ExpandProperty AppID")
+    env = dict(os.environ, DP_APP=name)
+    out = subprocess.run(["powershell", "-NoProfile", "-Command", ps], capture_output=True,
+                         text=True, timeout=30, env=env, creationflags=0x08000000)
+    app_id = out.stdout.strip()
+    if not app_id:
+        raise FileNotFoundError("%s isn't in the Start menu" % name)
+    os.startfile("shell:AppsFolder\\" + app_id)
+
+
 # ---------- running a button ----------
 
 def run_button(btn, cfg):
@@ -205,7 +220,9 @@ def run_button(btn, cfg):
         # desktop apps, first one that's installed wins (e.g. classic Outlook then new Outlook)
         for name in btn["targets"]:
             try:
-                if "://" in name or not ("\\" in name or "/" in name):
+                if name.startswith("startmenu:"):
+                    open_start_menu_app(name[10:])  # works for Store and normal installs
+                elif "://" in name or not ("\\" in name or "/" in name):
                     os.startfile(os.path.expandvars(name))  # app name or link
                 else:
                     os.startfile(resolve_path(name))  # a file or shortcut, %DESKTOP% works
