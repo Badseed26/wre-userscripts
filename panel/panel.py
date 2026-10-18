@@ -24,7 +24,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "2.0"
+VERSION = "2.1"
 HERE = os.path.dirname(os.path.abspath(__file__))
 RAW = "https://raw.githubusercontent.com/Badseed26/wre-userscripts/%s/"
 LATEST = "https://api.github.com/repos/Badseed26/wre-userscripts/commits/main"
@@ -212,11 +212,26 @@ def dash_open():
     return time.time() - DASH["last_poll"] < 12
 
 
-def dash_run(btn, cfg):
+def pick_day(day):
+    # a day from the last week (YYYY-MM-DD), anything else means today
+    import datetime
+    try:
+        d = datetime.date.fromisoformat(str(day))
+        back = (datetime.date.today() - d).days
+        if 1 <= back <= 6:
+            return d
+    except (TypeError, ValueError):
+        pass
+    return None
+
+
+def dash_run(btn, cfg, opts=None):
     key = btn["key"]
     was_open = dash_open()
+    day = pick_day((opts or {}).get("day")) if key == "inbox" else None
     if key == "inbox":
-        open_url(PULL_URL, cfg)  # reads today's inbox and hands the bundle to the dashboard
+        # reads that day's inbox and hands the bundle to the dashboard
+        open_url(PULL_URL + ("=" + day.isoformat() if day else ""), cfg)
     if not was_open:
         dash = find_button(cfg, "dashboard")
         if dash:
@@ -227,7 +242,8 @@ def dash_run(btn, cfg):
         DASH["q"].append({"id": "p%d" % int(now * 1000), "keys": [key], "at": now})
     name = btn["label"]
     if key == "inbox":
-        return "Pulling today's inbox, %s starts once it lands" % name
+        when = "%s %d/%d's" % (day.strftime("%a"), day.day, day.month) if day else "today's"
+        return "Pulling %s inbox, %s starts once it lands" % (when, name)
     return ("%s sent to the dashboard" % name) if was_open else ("Opening the dashboard, %s starts once it's up" % name)
 
 
@@ -242,7 +258,7 @@ def dash_next():
 
 # ---------- running a button ----------
 
-def run_button(btn, cfg):
+def run_button(btn, cfg, opts=None):
     t = btn["type"]
     if t == "url":
         open_url(btn["target"], cfg)
@@ -276,7 +292,7 @@ def run_button(btn, cfg):
     elif t == "update":
         return check_updates()
     elif t == "dashrun":
-        return dash_run(btn, cfg)
+        return dash_run(btn, cfg, opts)
     else:
         raise ValueError("Unknown button type: " + t)
 
@@ -325,6 +341,8 @@ def public_view(cfg):
                 item["href"] = b["target"]
             if b.get("confirm"):
                 item["confirm"] = True
+            if b.get("pickday"):
+                item["pickday"] = True
             files = icon_files(b)
             if files:
                 f = files[0]
@@ -601,7 +619,7 @@ class Handler(BaseHTTPRequestHandler):
                 save_icon(btn, data.get("png", ""))
                 log("new icon for %s" % btn["id"])
                 return self.send(200, {"ok": True, "msg": "Icon saved"})
-            msg = run_button(btn, cfg)
+            msg = run_button(btn, cfg, {"day": data.get("day")})
             log("ran %s (%s)" % (btn["id"], btn["label"]))
             return self.send(200, {"ok": True, "msg": msg or ""})
         except Exception as e:

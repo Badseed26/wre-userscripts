@@ -110,6 +110,9 @@
   .sheet h2 { margin: 0; font-size: 19px; font-weight: 600; }
   .sheet p { margin: 6px 0 20px; font-size: 14px; color: var(--muted); line-height: 1.45; }
   .sheet .btn { display: block; width: 100%; margin-top: 10px; }
+  .days { display: -webkit-flex; display: flex; -webkit-flex-wrap: wrap; flex-wrap: wrap; margin: 0 -5px; }
+  .days .btn { width: calc(50% - 10px); margin: 5px; display: inline-block; }
+  .days .btn.today { width: calc(100% - 10px); }
   .file-btn { position: relative; overflow: hidden; }
   .file-btn input { position: absolute; left: 0; top: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
 </style>
@@ -151,6 +154,15 @@
     <label class="btn light file-btn">Choose image<input type="file" accept="image/*" id="fileIn"></label>
     <button class="btn dark" id="resetBtn">Back to the default icon</button>
     <button class="btn dark" id="cancelBtn">Cancel</button>
+  </div>
+</div>
+
+<div class="sheet-bg" id="dayBg">
+  <div class="sheet" role="dialog" aria-modal="true" aria-labelledby="dayTitle">
+    <h2 id="dayTitle">Which day?</h2>
+    <p>Pulls that day's inbox from Outlook, then the check runs on the dashboard.</p>
+    <div class="days" id="dayList"></div>
+    <button class="btn dark" id="dayCancel">Cancel</button>
   </div>
 </div>
 
@@ -309,17 +321,48 @@
       return;
     }
     if (b.confirm) sub.textContent = b.sub || "";
+    if (b.pickday) { openDays(el, b); return; }
     el.className = "tile busy";
     runId(b.id, b.label, el);
   }
 
-  function runId(id, label, el) {
-    req("POST", "/api/run", { k: key, id: id }, function (ok, j, status) {
+  function runId(id, label, el, day) {
+    var body = { k: key, id: id };
+    if (day) body.day = day;
+    req("POST", "/api/run", body, function (ok, j, status) {
       if (ok) { if (el) flash(el, "ok"); toast((j && j.msg) || (label + " done")); }
       else if (!status) { if (el) flash(el, "err"); toast("Can't reach the PC", true); setStatus(false, "PC not reachable"); }
       else { if (el) flash(el, "err"); toast((j && j.error) || "Didn't work", true); }
     });
   }
+
+  // ---------- day picker (inbox check), today and the 6 days before, same as the dashboard ----------
+  var dayFor = null;
+  function ymd(d) { var m = d.getMonth() + 1, dd = d.getDate(); return d.getFullYear() + "-" + (m < 10 ? "0" : "") + m + "-" + (dd < 10 ? "0" : "") + dd; }
+  function openDays(el, b) {
+    dayFor = { el: el, b: b };
+    var wd = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"], h = "", now = new Date();
+    for (var i = 0; i < 7; i++) {
+      var d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i);
+      var lbl = i === 0 ? "Today, " + wd[d.getDay()] + " " + d.getDate() + "/" + (d.getMonth() + 1) : wd[d.getDay()] + " " + d.getDate() + "/" + (d.getMonth() + 1);
+      h += '<button class="btn ' + (i === 0 ? "light today" : "dark") + '" data-day="' + (i === 0 ? "" : ymd(d)) + '">' + lbl + "</button>";
+    }
+    $("dayList").innerHTML = h;
+    $("dayTitle").textContent = b.label + ": which day?";
+    $("dayBg").className = "sheet-bg show";
+  }
+  function closeDays() { $("dayBg").className = "sheet-bg"; dayFor = null; }
+  $("dayList").addEventListener("click", function (e) {
+    var t = e.target;
+    while (t && t !== this && t.getAttribute("data-day") === null) t = t.parentNode;
+    if (!t || t === this || !dayFor) return;
+    var f = dayFor, day = t.getAttribute("data-day");
+    closeDays();
+    f.el.className = "tile busy";
+    runId(f.b.id, f.b.label, f.el, day);
+  });
+  $("dayCancel").addEventListener("click", closeDays);
+  $("dayBg").addEventListener("click", function (e) { if (e.target === this) closeDays(); });
 
   // ---------- icon picker ----------
   function openSheet(b) {
