@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.10
+// @version      0.9.11
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -31,7 +31,7 @@ const HOST = location.hostname;
 const ON_MAIL = /outlook/.test(HOST), ON_AF = HOST === 'office.aroflo.com';
 
 // ---------- fixed bits ----------
-const VER = '0.9.10';
+const VER = '0.9.11';
 const MAX_READS_DAY = 80; // Haiku reads a day before it stops itself (a runaway loop can't burn the budget)
 const PAGE = 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); // this page load
 const MODEL = 'claude-haiku-5-5';
@@ -505,8 +505,8 @@ if (ON_AF) {
       await setData(ed, want);
       const ok = plain(ed.getData()) == plain(want) && hdrFields() == f0 && (op.mode == 'set' || plain(ed.getData()).startsWith(plain(old).slice(0, 200)));
       if (!ok) { await setData(ed, old); ed.resetDirty(); return opDone(op, { descErr: 'check failed before save, nothing saved' }); }
-      op.saved = true; op.want = plain(want); op.f0 = f0; ss('wfOp', op); ed.updateElement();
-      setTimeout(() => jq()(document.getElementById('updateheader__btn')).trigger('click'), 50); return;
+      op.saved = true; op.fired = true; op.want = plain(want); op.f0 = f0; ss('wfOp', op); ed.updateElement();
+      setTimeout(() => jq()(document.getElementById('updateheader__btn')).trigger('click'), 50); firedWatch(op, 'descErr'); return;
     }
     // after the save: re-read it
     const r = await findJn(op.jn); const d = r && await descOf(r.href);
@@ -580,10 +580,11 @@ if (ON_AF) {
     setv(document.querySelector('[name=wrname]'), op.name); setv(document.querySelector('[name=custON]'), op.custON); setv(document.querySelector('[name=RequiredBy]'), dmy(new Date()));
     const rich = document.querySelector('[name=descriptionType][value=rich]'); if (rich && !rich.checked) rich.click();
     if (W.CKEDITOR && W.CKEDITOR.instances.myeditor) W.CKEDITOR.instances.myeditor.setData('<p>TBC</p>'); else setv(document.querySelector('[name=description]'), 'TBC');
-    const btn = document.getElementById('btnAddRequest'); // the green Create Task box at the bottom (a div, checked 18/10)
+    // the green Create Task box is a div, the real submit button sits inside it (clicking the div does nothing, found 18/10)
+    const btn = document.getElementById('addrequest__submit') || document.querySelector('#btnAddRequest button[type=submit]');
     if (!btn) return opDone(op, { createErr: 'no Create Task button' });
     if (op.dry) return opDone(op, { createDry: 'filled: ' + v('clientName') + ' | ' + v('locationName') + ' | ' + v('serviceName') + ' | ' + v('wrname') });
-    op.fired = true; ss('wfOp', op); if ($) $(btn).trigger('click'); else btn.click();
+    op.fired = true; ss('wfOp', op); btn.click(); firedWatch(op, 'createErr');
   }
 
   async function resumeOp() {
@@ -596,6 +597,9 @@ if (ON_AF) {
     return true;
   }
   const startOp = (op, href) => { ss('wfOp', op); go(href); };
+  // After an op clicks save or create, the page should move on. If it hasn't in 40s (validation message, confirm box, slow save), report what the page says and go home.
+  const pageSays = () => { const e = [...document.querySelectorAll('.ui-dialog:not([style*="display: none"]), .error, .alert, .afError, [class*="error"], [class*="validation"]')].filter(x => x.offsetParent).map(x => x.innerText.replace(/\s+/g, ' ').trim()).filter(Boolean); return e.join(' / ').slice(0, 300); };
+  const firedWatch = (op, what) => setTimeout(() => { const cur = ss('wfOp'); if (cur && cur.jobId == op.jobId && cur.op == op.op && cur.fired) opDone(op, { [what]: 'clicked but the page didn\'t move on. ' + (pageSays() ? 'Page says: ' + pageSays() : 'No message on the page') + '. Check it by hand' }); }, 40000);
 
   // ---------- builder dates ----------
   async function ambroseDates(rec, base) {
