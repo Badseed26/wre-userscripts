@@ -93,6 +93,29 @@
   .lbl { display: block; font-size: 17px; font-weight: 600; line-height: 1.25; margin-top: 18px; }
   .sub { display: block; font-size: 13px; color: var(--muted); line-height: 1.35; margin-top: 4px; }
 
+  /* NPT: what the lads still owe */
+  .glance { display: -webkit-flex; display: flex; -webkit-align-items: center; align-items: center; -webkit-flex-wrap: wrap; flex-wrap: wrap;
+    background: var(--card); border: 1px solid var(--line); border-radius: 18px; padding: 12px 14px 6px; margin-bottom: 16px; width: 100%; text-align: left; color: var(--text); cursor: pointer; }
+  .glance .gt { font-size: 14px; font-weight: 600; color: var(--soft); margin: 0 12px 6px 4px; }
+  .glance .who { background: var(--chip); border-radius: 999px; padding: 7px 12px; font-size: 14px; font-weight: 600; margin: 0 8px 6px 0; }
+  .glance .who b { color: var(--bad); margin-left: 6px; }
+  .glance.clear .gt { color: var(--good); }
+  .ladhead { font-size: 13px; font-weight: 700; letter-spacing: .6px; text-transform: uppercase; color: var(--muted); margin: 18px 4px 8px; }
+  .ladhead:first-child { margin-top: 0; }
+  .job { display: -webkit-flex; display: flex; -webkit-align-items: center; align-items: center; background: var(--card); border: 1px solid var(--line);
+    border-radius: 18px; padding: 14px 16px; margin-bottom: 10px; }
+  .job .jm { -webkit-flex: 1; flex: 1; min-width: 0; }
+  .job .jt { font-size: 17px; font-weight: 600; }
+  .job .js { font-size: 13px; color: var(--muted); margin-top: 3px; }
+  .job .js .late { color: var(--bad); font-weight: 600; }
+  .npt { display: -webkit-flex; display: flex; margin-left: 12px; }
+  .npt span { width: 34px; height: 34px; border-radius: 10px; margin-left: 6px; font-size: 15px; font-weight: 700; display: -webkit-flex; display: flex;
+    -webkit-align-items: center; align-items: center; -webkit-justify-content: center; justify-content: center; }
+  .npt .miss { background: rgba(255,122,107,.16); color: #FF8E80; }
+  .npt .in { background: rgba(94,214,138,.12); color: var(--good); }
+  .npt .okd { background: rgba(90,169,255,.16); color: #7DB9FF; }
+  .setup input { width: 100%; margin: 4px 0 6px; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line); background: var(--bg);
+    color: var(--text); font: inherit; font-size: 15px; -webkit-user-select: text; user-select: text; }
   .msg { text-align: center; color: var(--muted); padding: 60px 24px; font-size: 16px; line-height: 1.5; }
 
   .toast { position: fixed; left: 50%; bottom: 28px; -webkit-transform: translateX(-50%); transform: translateX(-50%);
@@ -163,6 +186,17 @@
     <p>Pulls that day's inbox from Outlook, then the check runs on the dashboard.</p>
     <div class="days" id="dayList"></div>
     <button class="btn dark" id="dayCancel">Cancel</button>
+  </div>
+</div>
+
+<div class="sheet-bg" id="tokBg">
+  <div class="sheet setup" role="dialog" aria-modal="true" aria-labelledby="tokTitle">
+    <h2 id="tokTitle">Connect Todoist</h2>
+    <p>The lads' notes, photos and timesheets come from the WRE Calendar NPT issues in Todoist. Paste your API token from Todoist: Settings, Integrations, Developer. It's only saved on the PC.</p>
+    <label for="tokIn" class="sub" style="text-align:left">API token</label>
+    <input id="tokIn" type="password" autocomplete="off" autocapitalize="off" spellcheck="false">
+    <button class="btn light" id="tokSave">Save</button>
+    <button class="btn dark" id="tokCancel">Cancel</button>
   </div>
 </div>
 
@@ -263,6 +297,7 @@
   function tabNames() {
     var n = [];
     if (data.favourites && data.favourites.length) n.push("Favourites");
+    n.push("Lads");
     for (var i = 0; i < data.groups.length; i++) n.push(data.groups[i].name);
     return n;
   }
@@ -291,11 +326,13 @@
     if (names.indexOf(tab) < 0) tab = names[0];
     var h = "";
     for (var i = 0; i < names.length; i++)
-      h += '<button data-tab="' + esc(names[i]) + '" class="' + (names[i] === tab ? "on" : "") + '">' + esc(names[i]) + "</button>";
+      h += '<button data-tab="' + esc(names[i]) + '" class="' + (names[i] === tab ? "on" : "") + '">' + esc(names[i]) +
+        (names[i] === "Lads" && npt && npt.items && npt.items.length ? ' <span style="color:var(--bad)">' + npt.items.length + "</span>" : "") + "</button>";
     $("tabs").innerHTML = h;
+    if (tab === "Lads") { $("main").innerHTML = ladsHtml(); return; }
 
     var list = tabButtons(tab);
-    h = '<div class="grid">';
+    h = (tab === "Favourites" ? glanceHtml() : "") + '<div class="grid">';
     for (var j = 0; j < list.length; j++) {
       var b = list[j];
       h += '<div class="cell"><button class="tile" data-id="' + esc(b.id) + '">' +
@@ -335,6 +372,78 @@
       else { if (el) flash(el, "err"); toast((j && j.error) || "Didn't work", true); }
     });
   }
+
+  // ---------- NPT: notes, photos, timesheets still owed (WRE Calendar NPT issues in Todoist) ----------
+  var npt = null;
+  var WDS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  function dayLbl(v) { var p = v.split("-"), d = new Date(+p[0], +p[1] - 1, +p[2]); return WDS[d.getDay()] + " " + d.getDate() + "/" + (d.getMonth() + 1); }
+  function daysAgo(v) { var p = v.split("-"), d = new Date(+p[0], +p[1] - 1, +p[2]), n = new Date(); n = new Date(n.getFullYear(), n.getMonth(), n.getDate()); return Math.round((n - d) / 864e5); }
+  function loadNpt(fresh) {
+    if (!key) return;
+    req("GET", "/api/npt?k=" + encodeURIComponent(key) + (fresh ? "&fresh=1" : "") + "&t=" + Date.now(), null, function (ok, j) {
+      npt = ok ? j : { error: (j && j.error) || "Couldn't read Todoist" };
+      if (data && (tab === "Lads" || tab === "Favourites")) render();
+    });
+  }
+  function byWho() {
+    var g = {}, order = [];
+    (npt.items || []).forEach(function (x) { if (!g[x.who]) { g[x.who] = []; order.push(x.who); } g[x.who].push(x); });
+    order.sort(function (a, b) { return a === "You" ? 1 : b === "You" ? -1 : 0; });
+    return { g: g, order: order };
+  }
+  function glanceHtml() {
+    if (!npt) return "";
+    if (npt.setup) return '<button class="glance" data-act="tok"><span class="gt">Connect Todoist to see what the lads still owe</span></button>';
+    if (npt.error) return "";
+    if (!npt.items.length) return '<button class="glance clear" data-act="lads"><span class="gt">All notes, photos and timesheets are in</span></button>';
+    var w = byWho(), h = '<button class="glance" data-act="lads"><span class="gt">Still owed</span>';
+    w.order.forEach(function (n) { h += '<span class="who">' + esc(n) + "<b>" + w.g[n].length + "</b></span>"; });
+    return h + "</button>";
+  }
+  function nptBadges(x) {
+    var h = '<span class="npt">';
+    [["notes", "N"], ["photos", "P"], ["timesheet", "T"]].forEach(function (k) {
+      var miss = x.missing.indexOf(k[0]) >= 0, okd = x.ok.indexOf(k[0]) >= 0;
+      var cls = okd ? "okd" : miss ? "miss" : "in", what = okd ? "OK'd" : miss ? "missing" : "in";
+      h += '<span class="' + cls + '" title="' + k[0] + " " + what + '" aria-label="' + k[0] + " " + what + '">' + k[1] + "</span>";
+    });
+    return h + "</span>";
+  }
+  function ladsHtml() {
+    if (!npt) return '<div class="msg">Loading from Todoist</div>';
+    if (npt.setup) return '<div class="msg">' + (npt.error ? esc(npt.error) + ". " : "") + 'Connect Todoist to see what the lads still owe.<br><br><button class="btn light" data-act="tok">Connect Todoist</button></div>';
+    if (npt.error) return '<div class="msg">' + esc(npt.error) + "</div>";
+    if (!npt.items.length) return '<div class="msg">Nobody owes notes, photos or timesheets.</div>';
+    var w = byWho(), h = "";
+    w.order.forEach(function (n) {
+      h += '<div class="ladhead">' + esc(n) + "</div>";
+      w.g[n].forEach(function (x) {
+        var a = daysAgo(x.visit), age = a <= 0 ? "today" : a === 1 ? "yesterday" : a + " days ago";
+        h += '<div class="job"><div class="jm"><div class="jt">' + esc(x.place) + '</div><div class="js">' + esc(dayLbl(x.visit)) +
+          ' &middot; <span class="' + (a >= 2 ? "late" : "") + '">' + esc(age) + "</span>" + (x.jn ? " &middot; JN " + esc(x.jn) : "") + "</div></div>" + nptBadges(x) + "</div>";
+      });
+    });
+    return h + '<div class="sub" style="text-align:center;margin-top:14px">Red = missing, green = in, blue = OK\'d by you. From Todoist ' + esc(npt.at || "") + "</div>";
+  }
+  function openTok() { $("tokIn").value = ""; $("tokBg").className = "sheet-bg show"; }
+  function closeTok() { $("tokBg").className = "sheet-bg"; $("tokIn").blur(); }
+  $("tokCancel").addEventListener("click", closeTok);
+  $("tokBg").addEventListener("click", function (e) { if (e.target === this) closeTok(); });
+  $("tokSave").addEventListener("click", function () {
+    var t = $("tokIn").value.trim(); if (!t) return;
+    req("POST", "/api/todoist-token", { k: key, token: t }, function (ok, j) {
+      if (ok) { closeTok(); toast("Todoist connected"); loadNpt(true); } else toast((j && j.error) || "Didn't save", true);
+    });
+  });
+  // the at-a-glance bar and the connect button
+  document.addEventListener("click", function (e) {
+    var t = e.target;
+    while (t && t !== document && !(t.getAttribute && t.getAttribute("data-act"))) t = t.parentNode;
+    if (!t || t === document) return;
+    var a = t.getAttribute("data-act");
+    if (a === "tok") openTok();
+    else if (a === "lads") { tab = "Lads"; store(TAB_STORE, tab); render(); loadNpt(true); }
+  });
 
   // ---------- day picker (inbox check), today and the 6 days before, same as the dashboard ----------
   var dayFor = null;
@@ -432,6 +541,7 @@
     tab = t.getAttribute("data-tab");
     store(TAB_STORE, tab);
     render();
+    if (tab === "Lads") loadNpt(true);
   });
 
   $("main").addEventListener("click", function (e) {
@@ -474,10 +584,11 @@
     });
   }
 
-  document.addEventListener("visibilitychange", function () { if (!document.hidden) { ping(); load(); } });
+  document.addEventListener("visibilitychange", function () { if (!document.hidden) { ping(); load(); loadNpt(); } });
 
   tick(); setInterval(tick, 10000);
   ping(); load(); setInterval(ping, 30000);
+  loadNpt(); setInterval(function () { if (!document.hidden) loadNpt(); }, 120000);
 })();
 </script>
 </body>

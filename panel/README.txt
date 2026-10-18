@@ -30,6 +30,11 @@ That covers the panel, the buttons and Clipboard Brain. If Clipboard Brain is ru
 The iPad page reloads on its own when the PC updates.
 To turn auto updates off, put an empty file called no_auto_update.txt in this folder.
 
+LADS (NOTES, PHOTOS, TIMESHEETS)
+The Lads tab and the bar on Favourites show what's still owed, from the WRE Calendar NPT issues in Todoist.
+First time: tap Connect Todoist and paste your API token (Todoist: Settings, Integrations, Developer).
+It's saved in todoist_token.txt in this folder and never leaves the PC.
+
 YOUR OWN ICONS
 Two ways, use whichever is easier:
 - On the iPad: tap the pencil (top right), tap a tile, Choose image. It gets cropped square and saved on the PC.

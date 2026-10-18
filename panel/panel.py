@@ -12,6 +12,7 @@
 
 import ctypes
 import ipaddress
+import re
 import json
 import os
 import secrets
@@ -24,7 +25,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "2.2"
+VERSION = "2.3"
 HERE = os.path.dirname(os.path.abspath(__file__))
 RAW = "https://raw.githubusercontent.com/Badseed26/wre-userscripts/%s/"
 LATEST = "https://api.github.com/repos/Badseed26/wre-userscripts/commits/main"
@@ -521,6 +522,88 @@ def updater_loop():
         time.sleep(CHECK_EVERY)
 
 
+# ---------- NPT: what the lads (and you) still owe, from the WRE Calendar NPT script's issues in Todoist ----------
+# The calendar script keeps one Todoist task per visit that's missing notes, photos or a timesheet:
+#   title: Lachie, 98 Trudy Cres (14/10): notes, photos, timesheet
+#   desc:  JN 9251 | wrid 795229 | visit 2026-10-14 | Lachlan Buckley | missing: notes, photos, timesheet
+# Lads' ones sit in the WRE daily check project, yours in WRE follow ups. The token stays in this folder only.
+
+TODOIST = "https://api.todoist.com/api/v1/"
+NPT_PROJECTS = {"6hgGFjPF6mWJGvf6": "lads", "6hfHcM9Gf74fgcJw": "you"}
+TOKENFILE = os.path.join(HERE, "todoist_token.txt")
+NPT_DESC = re.compile(r"^JN (\S*) \| wrid (\d+) \| visit (\d{4}-\d\d-\d\d) \| ([^|]+?) \| missing: (.+)$", re.M)
+NPT_OK = re.compile(r"^ok: (.+)$", re.M)
+NPT_CACHE = {"at": 0.0, "data": None}
+
+
+def todoist_token():
+    try:
+        with open(TOKENFILE, encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def todoist_get(path, token):
+    req = urllib.request.Request(TODOIST + path, headers={"Authorization": "Bearer " + token})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+def npt_split(text):
+    return [x.strip() for x in str(text or "").split(",") if x.strip()]
+
+
+def npt_list(force=False):
+    token = todoist_token()
+    if not token:
+        return {"setup": True}
+    if not force and NPT_CACHE["data"] is not None and time.time() - NPT_CACHE["at"] < 60:
+        return NPT_CACHE["data"]
+    items = []
+    for pid, who_kind in NPT_PROJECTS.items():
+        cursor = None
+        for _ in range(5):
+            q = "tasks?project_id=%s&limit=200" % pid + ("&cursor=" + urllib.parse.quote(cursor) if cursor else "")
+            try:
+                j = todoist_get(q, token)
+            except urllib.error.HTTPError as e:
+                if e.code in (401, 403):
+                    return {"setup": True, "error": "Todoist didn't accept that token"}
+                raise
+            for t in j.get("results", []):
+                m = NPT_DESC.search(t.get("description") or "")
+                if not m:
+                    continue
+                title = t.get("content", "")
+                who = "You" if who_kind == "you" else title.split(",")[0].strip()
+                place = re.sub(r"\s*\(\d{1,2}/\d{1,2}\).*$", "", title.split(",", 1)[1] if who_kind == "lads" and "," in title else title)
+                place = re.sub(r"^Put in .*? for ", "", place).strip()
+                ok = NPT_OK.search(t.get("description") or "")
+                items.append({"id": t.get("id"), "who": who, "place": place, "visit": m.group(3), "jn": m.group(1),
+                              "missing": npt_split(m.group(5)), "ok": npt_split(ok.group(1) if ok else "")})
+            cursor = j.get("next_cursor")
+            if not cursor:
+                break
+    items.sort(key=lambda x: (x["visit"], x["who"]))
+    data = {"items": items, "at": time.strftime("%H:%M")}
+    NPT_CACHE.update(at=time.time(), data=data)
+    return data
+
+
+def save_todoist_token(token):
+    token = str(token or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9]{20,80}", token):
+        raise ValueError("That doesn't look like a Todoist token")
+    try:
+        todoist_get("projects?limit=1", token)
+    except Exception:
+        raise ValueError("Todoist didn't accept that token")
+    with open(TOKENFILE, "w", encoding="utf-8") as f:
+        f.write(token)
+    NPT_CACHE.update(at=0.0, data=None)
+
+
 # ---------- web server ----------
 
 KEY = None
@@ -592,6 +675,14 @@ class Handler(BaseHTTPRequestHandler):
             if self.client_address[0] not in ("127.0.0.1", "::1", "::ffff:127.0.0.1"):
                 return self.send(403, {"error": "this PC only"})
             return self.send(200, {"reqs": dash_next()})
+        if u.path == "/api/npt":
+            if not self.key_ok(q.get("k", [""])[0]):
+                return self.send(401, {"error": "bad key"})
+            try:
+                return self.send(200, npt_list(force=q.get("fresh", [""])[0] == "1"))
+            except Exception as e:
+                log("NPT read failed: %s" % e)
+                return self.send(502, {"error": "Couldn't read Todoist (%s)" % e})
         if u.path == "/api/ping":
             return self.send(200, {"ok": True, "version": VERSION})
         if u.path == "/api/version":
@@ -601,7 +692,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not private_client(self.client_address[0]):
             return self.send(403, {"error": "home network only"})
-        if self.path not in ("/api/run", "/api/icon"):
+        if self.path not in ("/api/run", "/api/icon", "/api/todoist-token"):
             return self.send(404, {"error": "not found"})
         try:
             n = int(self.headers.get("Content-Length", "0"))
@@ -612,6 +703,13 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(400, {"error": "bad request"})
         if not self.key_ok(data.get("k", "")):
             return self.send(401, {"error": "bad key"})
+        if self.path == "/api/todoist-token":
+            try:
+                save_todoist_token(data.get("token"))
+                log("Todoist token saved")
+                return self.send(200, {"ok": True, "msg": "Todoist connected"})
+            except Exception as e:
+                return self.send(400, {"error": str(e)})
         try:
             cfg = load_buttons()
             btn = find_button(cfg, data.get("id", ""))
