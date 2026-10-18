@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.9
+// @version      0.9.10
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -31,7 +31,7 @@ const HOST = location.hostname;
 const ON_MAIL = /outlook/.test(HOST), ON_AF = HOST === 'office.aroflo.com';
 
 // ---------- fixed bits ----------
-const VER = '0.9.9';
+const VER = '0.9.10';
 const MAX_READS_DAY = 80; // Haiku reads a day before it stops itself (a runaway loop can't burn the budget)
 const PAGE = 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); // this page load
 const MODEL = 'claude-haiku-5-5';
@@ -338,11 +338,12 @@ if (ON_MAIL) {
     const content = [{ type: 'text', text: READ_RULES + (pdfB64 ? '\n\n' + SCOPE_RULES : '') + '\n\nEMAIL\nFrom: ' + P.info.from + '\nDate: ' + P.info.date + '\nSubject: ' + P.info.subject + '\nAttachments: ' + (P.info.pdfs.join(', ') || 'none') + '\n\n' + P.info.body }];
     if (pdfB64) content.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdfB64 } });
     let x; try { x = await ai(content, pdfB64 ? 48000 : 1200, !!pdfB64, pdfB64 ? 'xhigh' : 'low'); } catch (e) { log('Haiku failed: ' + e.message); status('Haiku: ' + e.message, true); return true; }
+    if (P.as) Object.assign(x, P.as); // test only: pretend it was for another job
     x.po_lines = x.po_lines || []; if (/^(po|updated_po)$/.test(x.kind)) x.cov = coverage(x);
     // ARC jobs go by the PO itself (PO118964-BU01-009, base PO118964-BU01), whatever Haiku made of the "ARC Ref" in the subject
     if (/\barc\b/i.test(P.builder || x.builder || '') && /^PO\d/i.test(x.po_full || '')) { x.ref = ''; x.po_base = x.po_full.replace(/-\d+$/, ''); }
     x.address = x.address || {}; x.dates = x.dates || []; x.blocks = x.blocks || []; x.vague = x.vague || []; x.site_contacts = x.site_contacts || []; x.warn = x.warn || [];
-    const job = { id: P.id + Math.random().toString(36).slice(2, 6), at: now(), emailAt: P.emailAt, dry: R.dry || !!P.test, test: !!P.test, key: P.key, builder: P.builder || x.builder || '', info: { from: P.info.from, date: P.info.date, subject: P.info.subject, rs: P.info.rs, rec: P.info.rec, img: P.info.img, pdfName: P.pdfName || '' }, pdfKey: P.pdfKey || '', x, status: 'new' };
+    const job = { id: P.id + Math.random().toString(36).slice(2, 6), at: now(), emailAt: P.emailAt, dry: P.live ? false : (R.dry || !!P.test), test: !!P.test, key: P.key, builder: P.builder || x.builder || '', info: { from: P.info.from, date: P.info.date, subject: P.info.subject, rs: P.info.rs, rec: P.info.rec, img: P.info.img, pdfName: P.pdfName || '' }, pdfKey: P.pdfKey || '', x, status: 'new' };
     if (x.kind == 'skip' || !x.kind) { log('Skip: ' + P.info.subject.slice(0, 70) + ' (' + (x.why || '') + ')'); if (P.pdfKey) gdel(P.pdfKey); if (job.test) await dryNote(job, ['Would skip it: ' + (x.why || '')]); }
     else { const q = gget('wfJobs', []); if (!job.test && q.some(j => j.key == job.key && now() - j.at < 30 * 60e3)) log('Already queued, not doubling up: ' + P.info.subject.slice(0, 70)); else { q.push(job); gset('wfJobs', q); log('Queued ' + x.kind + ': ' + P.info.subject.slice(0, 70)); } }
     if (!P.test) markSeen(P.key); gdel('wfPending'); status('idle'); return true;
@@ -363,7 +364,7 @@ if (ON_MAIL) {
     let pdfKey = '';
     if (pick) { const b64 = await grabPdf(pick); if (b64) { pdfKey = 'wfPdf_' + id; gset(pdfKey, b64); } else log('Couldn\'t grab the PDF on ' + p.head.slice(0, 60)); }
     if (wasUnread) { await park(); const ok = await markUnread(key); if (!ok) log('!! couldn\'t put back to unread: ' + p.head.slice(0, 60)); }
-    gset('wfPending', { tab: tabId(), at: now(), id, key: test ? 'test|' + fullKey : fullKey, rowKey: key, emailAt: test ? 0 : (rowTime(p.when) || new Date()).getTime(), builder: sd.builder, info, pdfKey, pdfName: pick, test: !!test });
+    gset('wfPending', { tab: tabId(), at: now(), id, key: test ? 'test|' + fullKey : fullKey, rowKey: key, emailAt: test ? 0 : (rowTime(p.when) || new Date()).getTime(), builder: sd.builder, info, pdfKey, pdfName: pick, test: !!test, live: !!(test && test.live), as: (test && test.as) || null });
     markSeen(key + '|' + ymd(new Date()));
     if (pdfKey) { reloading = true; status('reloading after the preview'); await sleep(500); location.reload(); return true; }
     return await finishPending();
@@ -400,7 +401,8 @@ if (ON_MAIL) {
   }
 
   // Test run: search Outlook and run each hit through Haiku in dry run (nothing written anywhere but the test log).
-  W.wreFilerTest = async (q, n) => {
+  // opt (testing only): {live:true} really writes to AroFlo and Todoist, {as:{po_base,po_full,address}} overrides what Haiku read, to fake a revised PO on another job.
+  W.wreFilerTest = async (q, n, opt) => {
     if (!IS_FILER) return 'open Outlook with #wre-filer first';
     if (gget('wfPending', null)) return 'still reading the last one, try again in a minute';
     const inp = document.querySelector('input[aria-label="Search"],#topSearchInput'); inp.focus(); inp.click();
@@ -408,7 +410,7 @@ if (ON_MAIL) {
     inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
     await waitFor(() => rowsNow().length > 0, 12000); await sleep(2500);
     const list = rowsNow().map(o => o.getAttribute('aria-label')).filter(l => !/^Unread/.test(l)).slice(0, n || 1);
-    gset('wfTestQ', list); gset('wfTestQuery', q); W.wreFilerTestNext(); return 'testing ' + list.length;
+    gset('wfTestQ', list); gset('wfTestQuery', q); gset('wfTestOpt', opt || null); W.wreFilerTestNext(); return 'testing ' + list.length + (opt && opt.live ? ' LIVE' : '');
   };
   W.wreFilerTestNext = async () => {
     const list = gget('wfTestQ', []); if (!list.length) return 'test queue empty';
@@ -416,7 +418,7 @@ if (ON_MAIL) {
     let el = rowsNow().find(o => o.getAttribute('aria-label') == lab);
     if (!el) { const inp = document.querySelector('input[aria-label="Search"],#topSearchInput'); inp.focus(); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(inp, gget('wfTestQuery', '')); inp.dispatchEvent(new Event('input', { bubbles: true })); inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true })); await waitFor(() => rowsNow().some(o => o.getAttribute('aria-label') == lab), 12000); el = rowsNow().find(o => o.getAttribute('aria-label') == lab); }
     if (!el) return 'row gone: ' + lab.slice(0, 60);
-    busy = true; try { return await takeOne(el, await rules(), true); } finally { busy = false; }
+    busy = true; try { return await takeOne(el, await rules(), gget('wfTestOpt', null) || true); } finally { busy = false; }
   };
 
   W.wreFilerPeek = () => JSON.stringify({ ver: VER, pending: (gget('wfPending', null) || {}).key || '', jobs: gget('wfJobs', []).slice(-8).map(j => j.status + ' | ' + j.info.subject.slice(0, 50) + (j.notBefore && j.notBefore > now() ? ' | waits ' + Math.round((j.notBefore - now()) / 1000) + 's' : '')), log: gget('wfLog', []).slice(-12) });
