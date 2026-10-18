@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.16
+// @version      0.9.17
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -137,7 +137,11 @@ function coverage(x) {
   const n = t => String(t || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
   const items = []; (x.blocks || []).forEach(b => { (b.rooms || []).forEach(r => (r.items || []).forEach(i => items.push(n(typeof i == 'string' ? i : i.t)))); (b.items || []).forEach(i => items.push(n(typeof i == 'string' ? i : i.t))); });
   const missing = [], leftOut = [];
+  // room and visit headings: a PO line like "Open Plan 8.5L x 6.38W x H" is just the room, so landing on the room name counts (18/10)
+  const heads = []; (x.blocks || []).forEach(b => { if (b.h) heads.push(n(b.h)); (b.rooms || []).forEach(r => heads.push(n(r.r))); });
+  const workVerb = /\b(disconnect|reconnect|install|supply|remove|replace|inspect|test|report|photo|isolat|make safe|rewire|repair|relocate|shroud)/i;
   (x.po_lines || []).forEach(l => { const w = String(l.went || '');
+    if (!workVerb.test(l.said || '') && (heads.includes(n(w)) || /\d\s*[lw]\s*x\s*[\d.]*\s*[lwh]\b/i.test(l.said || ''))) return;
     if (/^left out/i.test(w)) { const sd = l.said || '';
       const work = /\b(disconnect|reconnect|install|supply|remove|replace|inspect|test|report|photo|isolat|make safe|rewire|repair|safety advice|shroud|overhead)/i;
       const charge = /\b(minimum charge|call ?out|labour rate|hourly rate|attendance fee)\b/i.test(sd) ? !/\b(safety advice|shroud|overhead)/i.test(sd) : (/\b(travel|allowance for (a |the )?(double|second|return|extra)|double (site )?visit)\b/i.test(sd) && !work.test(sd));
