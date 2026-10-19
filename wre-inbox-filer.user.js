@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.39
+// @version      0.9.40
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -364,6 +364,15 @@ if (ON_MAIL) {
   // Leave any search (a test run uses the search box) so the list is the Inbox again.
   const exitSearch = async () => { const inp = document.querySelector('input[aria-label="Search"],#topSearchInput'); if (!inp || !inp.value) return; inp.focus(); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(inp, ''); inp.dispatchEvent(new Event('input', { bubbles: true })); inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true })); await sleep(1500); const ti = [...document.querySelectorAll('[role=treeitem]')].find(t => /^Inbox( - |$)/.test(t.getAttribute('title') || '')); if (ti) { ti.click(); await sleep(2500); } };
   const scrollTop = () => { let e = rowsNow()[0]; while (e && e !== document.body) { if (e.scrollHeight > e.clientHeight + 50 && /auto|scroll/.test(getComputedStyle(e).overflowY)) { if (e.scrollTop) { e.scrollTop = 0; e.dispatchEvent(new Event('scroll')); } return; } e = e.parentElement; } };
+  const listBox = () => { let e = rowsNow()[0]; while (e && e !== document.body) { if (e.scrollHeight > e.clientHeight + 50 && /auto|scroll/.test(getComputedStyle(e).overflowY)) return e; e = e.parentElement; } return null; };
+  // Outlook only draws the rows in view, so an email from a few hours back (a read-again, or the row wanted after a reload) is
+  // found by paging the list down and looking at each page, then it's back to the top (19/10: Jai's 3:26 pm PO sat under the
+  // afternoon's mail and the re-read never found it).
+  const findRowDeep = async pred => { scrollTop(); await sleep(300);
+    for (let page = 0; page < 10; page++) { const hit = rowsNow().find(o => { try { return pred(o); } catch (e) { return false; } }); if (hit) return hit;
+      const box = listBox(); if (!box) break; const was = rowsNow().map(keyOf).join('|'); box.scrollTop += Math.max(200, box.clientHeight - 80); box.dispatchEvent(new Event('scroll'));
+      if (!(await waitFor(() => rowsNow().map(keyOf).join('|') != was, 4000))) break; await sleep(300); }
+    scrollTop(); return null; };
 
   const seen = () => gget('wfSeen', {});
   const markSeen = k => { const s = seen(); s[k] = now(); const cut = now() - 40 * 864e5; Object.keys(s).forEach(x => { if (!(+s[x] > cut)) delete s[x]; }); gset('wfSeen', s); };
@@ -412,8 +421,7 @@ if (ON_MAIL) {
   // Attachments that didn't come through in the first page load: open the email again on a fresh load and grab the next one.
   async function grabMore(P) {
     P.moreTries = (P.moreTries || 0) + 1; gset('wfPending', P);
-    await goInbox(); scrollTop(); await waitFor(() => !!findRow(P.rowKey), 10000);
-    const el = findRow(P.rowKey); if (!el) { log('Couldn\'t find the email again for ' + P.more.length + ' attachment(s), left them'); P.more = []; gset('wfPending', P); return false; }
+    await goInbox(); const el = await findRowDeep(o => keyOf(o) == P.rowKey); if (!el) { log('Couldn\'t find the email again for ' + P.more.length + ' attachment(s), left them'); P.more = []; gset('wfPending', P); return false; }
     const b0 = bodyOf(); el.click(); await waitFor(() => bodyOf().length > 0 && bodyOf() != b0, 8000); await quiet(300, 3000);
     const n = P.more.shift(), atts = P.atts || [], left = []; await grabRest([n], P.id, atts, left);
     if (left.length) log('Couldn\'t grab ' + n + ', left it off');
@@ -486,12 +494,13 @@ if (ON_MAIL) {
       await exitSearch();
       if (!(await goInbox())) { status('can\'t find the Inbox', true); return; }
       scrollTop();
+      { const rr = gget('wfReread', []).filter(x => now() - x.at < 15 * 60e3), sp = v => String(v).replace(/\s+/g, ' ').toLowerCase();
+        if (rr.length) { let again = null; const el = await findRowDeep(o => { const p = parse(o.getAttribute('aria-label')); if (p.pinned) return false; again = rr.find(x => sp(p.head).includes(sp(x.head))); return !!again; });
+          if (el) { const p = parse(el.getAttribute('aria-label')); gset('wfReread', rr.filter(x => x !== again)); gset('wfRetryNext', again.task); log('Reading again: ' + p.head.slice(0, 80)); const r = await takeOne(el, R, false); if (!reloading) later(scan, r ? 1500 : 5000); return; } } }
       const s = seen(); let looked = 0, timed = 0;
       for (const el of rowsNow().slice(0, 40)) {
         const p = parse(el.getAttribute('aria-label')); if (p.pinned) continue;
         const rk = p.head + ' ' + p.when + '|' + ymd(new Date());
-        const rr = gget('wfReread', []), sp = v => String(v).replace(/\s+/g, ' ').toLowerCase(), again = rr.find(x => sp(p.head).includes(sp(x.head)) && now() - x.at < 15 * 60e3);
-        if (again) { gset('wfReread', rr.filter(x => x !== again && now() - x.at < 15 * 60e3)); gset('wfRetryNext', again.task); log('Reading again: ' + p.head.slice(0, 80)); const r = await takeOne(el, R, false); if (!reloading) later(scan, r ? 1500 : 5000); return; }
         looked++; const t = rowTime(p.when); if (t) timed++; if (!t || t.getTime() < start - 60e3) continue;
         if (s[rk] || [...Object.keys(s)].some(k => k.endsWith('|' + p.head.slice(0, 120)) && s[k] && Math.abs((+s[k] || 0) - t.getTime()) < 6 * 3600e3)) continue;
         if (!senderOf(p.head, R)) continue;
