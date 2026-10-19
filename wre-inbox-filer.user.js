@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.22
+// @version      0.9.23
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -551,7 +551,7 @@ if (ON_AF) {
   // Op: description. mode 'set' (new task with TBC) or 'append' (another PO under the existing description).
   async function opDesc(op) {
     if (!op.saved) {
-      if (!/^Edit - JN/.test(document.title)) return opDone(op, { descErr: 'header page did not open' });
+      if (!/^Edit - JN/.test(document.title) && !(await waitFor(() => /^Edit - JN/.test(document.title), 20000))) return opDone(op, { descErr: 'header page did not open' });
       if (!(await ckReady('description'))) return opDone(op, { descErr: 'editor not ready' });
       const ed = W.CKEDITOR.instances.description; const old = ed.getData(); const f0 = hdrFields();
       if (op.mode == 'set' && plain(old) && plain(old) != 'TBC') return opDone(op, { descErr: 'description already has text, left it' });
@@ -574,7 +574,7 @@ if (ON_AF) {
     const b64 = gget(op.pdfKey, ''); if (!b64) return opDone(op, { upErr: 'PDF missing from storage' });
     if (op.fired) { // after Done: the page reloaded or the box closed, check the list
       await sleep(2500); const t = document.body.innerText; return opDone(op, t.includes(op.name.replace(/\.pdf$/i, '')) ? { up: op.name } : { up: op.name, upWarn: 'uploaded, but couldn\'t see it in the list to confirm' }); }
-    if (!/Task - AroFlo/.test(document.title)) return opDone(op, { upErr: 'task page did not open' });
+    if (!/Task - AroFlo/.test(document.title) && !(await waitFor(() => /Task - AroFlo/.test(document.title), 20000))) return opDone(op, { upErr: 'task page did not open' });
     const add = document.querySelector('li.btnUploadNew'); if (!add) return opDone(op, { upErr: 'no Add Documents & Photos on the page' });
     add.click();
     if (!(await waitFor(() => !!document.getElementById('s3FileUpload'), 10000))) return opDone(op, { upErr: 'upload box didn\'t open' });
@@ -605,7 +605,7 @@ if (ON_AF) {
     if (op.fired) { // the new task page sets its title (JN 9466 - ...) a moment after it loads
       await waitFor(() => /JN \d+/.test(document.title), 15000); const m = document.title.match(/JN (\d+)/);
       return opDone(op, m ? { jn: m[1], otherLoc: op.otherLoc || '', newLoc: !!op.newLoc } : { createErr: 'clicked Create Task but landed on "' + document.title + '" instead of a new task' + (pageSays() ? '. Page says: ' + pageSays() : '') }); }
-    if (!document.forms.newwr) return opDone(op, { createErr: 'create page didn\'t open' });
+    if (!document.forms.newwr && !(await waitFor(() => !!document.forms.newwr, 20000))) return opDone(op, { createErr: 'create page didn\'t open (on "' + document.title + '")' });
     const $ = jq(); const v = n => (document.querySelector('[name=' + n + ']') || {}).value || '';
     const pickFrom = async (name, term, test) => { const el = document.querySelector('[name=' + name + ']'); el.focus(); el.value = term; $(el).autocomplete('search', term);
       await waitFor(() => [...document.querySelectorAll('ul.ui-autocomplete li')].some(l => l.offsetParent), 6000); await sleep(600);
@@ -656,7 +656,11 @@ if (ON_AF) {
   async function resumeOp() {
     const op = ss('wfOp'); if (!op) return false;
     if ((op.tries = (op.tries || 0) + 1) > 4) { opDone(op, { [op.op + 'Err']: 'gave up after 4 page loads' }); return true; }
-    ss('wfOp', op); await sleep(1500);
+    ss('wfOp', op);
+    // The script starts as the page starts loading. AroFlo's pages are big (create task is 500 KB, 59 scripts) and a background tab
+    // loads slower, so 1.5 s in the form often wasn't there yet: "create page didn't open". Wait for the page to finish first (19/10).
+    await new Promise(r => { if (document.readyState == 'complete') return r(); const done = () => { window.removeEventListener('load', done); r(); }; window.addEventListener('load', done); later(done, 60000); });
+    await sleep(1500);
     try {
       if (op.op == 'desc') await opDesc(op); else if (op.op == 'upload') await opUpload(op); else if (op.op == 'note') await opNote(op); else if (op.op == 'create') await opCreate(op); else ss('wfOp', null);
     } catch (e) { opDone(op, { [op.op + 'Err']: e.message }); }
