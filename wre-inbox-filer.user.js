@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.41
+// @version      0.9.42
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -246,6 +246,7 @@ Never change: every piece of work on the PO stays, nothing added that isn't on t
 Do change:
 - Double visit POs (isolate then reconnect): split into visits, h "VISIT 1 - ISO" then "VISIT 2 - FIT OFF". Single visit jobs: one block with h "".
 - Under each visit, rooms (the PO's room names), then one dot point per job in Ethan's words, number first: "Disconnect, label and store 3 x GPOs, junction boxes where needed".
+- A PO line that is only an area name with its dimensions and no work ("Roofing 10L x 15W x H", "Open Plan 8.5L x 6.38W x H", "Kitchen 4L x 3W x H") is the room or area heading for the lines under it, not a job. Use the name on its own as the room ("Roofing") and put those lines under it as its items. Never write the dimensions, and never make the heading a dot point.
 - A combined builder line ("Disconnect, store, label and reconnect GPO x3") splits: the disconnect goes in visit 1, the reconnect in visit 2.
 - Lines that are only charges (minimum call out, labour rate, allowance for a double visit) don't go in as work.
 - Overhead power safety advice and shroud allowances stay as a work dot point.
@@ -439,7 +440,8 @@ if (ON_MAIL) {
     status('reading ' + P.info.subject.slice(0, 40));
     const content = [{ type: 'text', text: READ_RULES + (pdfB64 ? '\n\n' + SCOPE_RULES : '') + '\n\nEMAIL\nFrom: ' + P.info.from + '\nDate: ' + P.info.date + '\nSubject: ' + P.info.subject + '\nAttachments: ' + (P.info.pdfs.join(', ') || 'none') + '\n\n' + P.info.body }];
     if (pdfB64) content.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdfB64 } });
-    let x; try { x = await ai(content, pdfB64 ? 48000 : 1200, !!pdfB64, pdfB64 ? 'xhigh' : 'low'); } catch (e) { log('Haiku failed: ' + e.message); status('Haiku: ' + e.message, true); return true; }
+    // a PO read runs at max effort: it's still about a cent on Haiku and the scope is what the boys work off (Ethan, 20/10)
+    let x; try { x = await ai(content, pdfB64 ? 64000 : 1200, !!pdfB64, pdfB64 ? 'max' : 'low'); } catch (e) { log('Haiku failed: ' + e.message); status('Haiku: ' + e.message, true); return true; }
     if (P.as) Object.assign(x, P.as); // test only: pretend it was for another job
     x.po_lines = x.po_lines || []; if (/^(po|updated_po)$/.test(x.kind)) x.cov = coverage(x);
     // ARC jobs go by the PO itself (PO118964-BU01-009, base PO118964-BU01), whatever Haiku made of the "ARC Ref" in the subject
