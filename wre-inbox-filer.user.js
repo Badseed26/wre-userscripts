@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.28
+// @version      0.9.29
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -314,13 +314,15 @@ const IS_FILER = (() => { try { return sessionStorage.getItem('wfRole') === '1';
 // =====================================================================
 if (ON_MAIL) {
   // Catch PDFs Outlook downloads for its own attachment preview (same trick the PO setup uses). Nothing is saved to the PC.
-  let lastPdf = null;
+  let lastPdf = null, catching = false;
   if (IS_FILER) {
+    // Images only count while the filer has a preview open (catching), or every avatar and icon Outlook loads would land here.
     const keep = (blob, at) => { if (blob && blob.size > 500) lastPdf = { blob, at }; };
+    const want = ct => /pdf|octet-stream/i.test(ct) || (catching && /^image\//i.test(ct));
     const of = W.fetch;
-    W.fetch = function () { const p = of.apply(this, arguments); p.then(r => { try { const ct = r.headers.get('content-type') || ''; if (/pdf|octet-stream/i.test(ct)) r.clone().blob().then(b => keep(b, now())); } catch (e) {} }).catch(() => {}); return p; };
+    W.fetch = function () { const p = of.apply(this, arguments); p.then(r => { try { const ct = r.headers.get('content-type') || ''; if (want(ct)) r.clone().blob().then(b => keep(b, now())); } catch (e) {} }).catch(() => {}); return p; };
     const os = W.XMLHttpRequest.prototype.send;
-    W.XMLHttpRequest.prototype.send = function () { this.addEventListener('load', () => { try { const ct = this.getResponseHeader('content-type') || ''; if (/pdf|octet-stream/i.test(ct) && this.response instanceof W.Blob) keep(this.response, now()); } catch (e) {} }); return os.apply(this, arguments); };
+    W.XMLHttpRequest.prototype.send = function () { this.addEventListener('load', () => { try { const ct = this.getResponseHeader('content-type') || ''; if (want(ct) && this.response instanceof W.Blob) keep(this.response, now()); } catch (e) {} }); return os.apply(this, arguments); };
   }
 
   const rowsNow = () => [...document.querySelectorAll('div[role=option][data-convid]')];
@@ -358,25 +360,48 @@ if (ON_MAIL) {
     const rs = link('Repair Schedule'); let rec = ''; try { rec = rs ? new URL(rs).searchParams.get('jobRecID') || '' : ''; } catch (e) {}
     return { from: fc ? fc.getAttribute('aria-label').replace(/^(Opens card for|From:) /, '') : '', date: (txt.match(/(Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{4}-\d{2}-\d{2} \d{1,2}:\d{2} [AP]M/) || [''])[0],
       subject: ((R && R.querySelector('[role=heading]')) || {}).innerText || '', body: bodyOf().slice(0, 9000), rs, rec, img: link('Images'),
-      pdfs: [...new Set(R ? [...R.querySelectorAll('[title]')].map(x => x.getAttribute('title')).filter(t => /\.pdf$/i.test(t || '') && !/^https?:/i.test(t)) : [])] };
+      pdfs: [...new Set(R ? [...R.querySelectorAll('[title]')].map(x => x.getAttribute('title')).filter(t => /\.pdf$/i.test(t || '') && !/^https?:/i.test(t)) : [])],
+      // photos on the email too, not signature logos (image001.png and the like)
+      imgs: [...new Set(R ? [...R.querySelectorAll('[title]')].map(x => x.getAttribute('title')).filter(t => /\.(jpe?g|png|heic|webp|gif)$/i.test(t || '') && !/^https?:/i.test(t) && !/^(image|outlook|logo|sig)[\w-]*\d*\.(png|jpe?g|gif)$/i.test(t)) : [])] };
   };
   // Open the attachment preview and keep the PDF Outlook loads for it. One preview per page load, so the page reloads after.
-  const grabPdf = async name => {
+  const grabPdf = async name => { const f = await grabFile(name); return f && f.type == 'application/pdf' ? f.b64 : null; };
+  // Any attachment: previews it, keeps what Outlook downloads, and checks it really is a PDF or a photo (19/10).
+  const grabFile = async name => {
     const R = rp(); const card = R && [...R.querySelectorAll('[title]')].find(x => x.getAttribute('title') == name); if (!card) return null;
-    lastPdf = null; const t0 = now(); (card.closest('[role=button],button,[role=option]') || card).click();
+    lastPdf = null; catching = true; const t0 = now(); (card.closest('[role=button],button,[role=option]') || card).click();
     await waitFor(() => !!(lastPdf && lastPdf.at >= t0), 20000);
-    const got = lastPdf; await sleep(800);
+    const got = lastPdf; catching = false; await sleep(800);
     const close = [...document.querySelectorAll('button')].find(b => /^Close$/i.test(b.getAttribute('aria-label') || b.title || b.innerText.trim()) && b.offsetParent);
     if (close) close.click(); await sleep(800);
     if (!got) return null;
     const b64 = await new Promise(r => { const fr = new FileReader(); fr.onload = () => r(String(fr.result).split(',')[1]); fr.readAsDataURL(got.blob); });
-    if (!b64 || !atob(b64.slice(0, 8)).startsWith('%PDF')) return null;
-    return b64;
+    if (!b64) return null; const head = atob(b64.slice(0, 12));
+    const type = head.startsWith('%PDF') ? 'application/pdf' : head.startsWith('\xFF\xD8') ? 'image/jpeg' : head.startsWith('\x89PNG') ? 'image/png' : /^image\//.test(got.blob.type || '') ? got.blob.type : '';
+    if (!type || (/^image/.test(type) && !/\.(jpe?g|png|heic|webp|gif)$/i.test(name)) || (type == 'application/pdf' && !/\.pdf$/i.test(name))) return null;
+    return { b64, type };
+  };
+  // The other attachments, grabbed after the PO. One that won't come through this page load waits for the next (grabMore).
+  const grabRest = async (names, id, atts, more) => {
+    for (const n of names) { if (atts.length + more.length >= 10) break;
+      const f = await grabFile(n);
+      if (f) { const k = 'wfAtt_' + id + '_' + atts.length; gset(k, f.b64); atts.push({ key: k, name: n, type: f.type }); } else more.push(n); }
   };
 
   // Step 2 (after the reload): Haiku reads it and the job goes in the queue for the AroFlo tab.
+  // Attachments that didn't come through in the first page load: open the email again on a fresh load and grab the next one.
+  async function grabMore(P) {
+    P.moreTries = (P.moreTries || 0) + 1; gset('wfPending', P);
+    const el = findRow(P.rowKey); if (!el) { log('Couldn\'t find the email again for ' + P.more.length + ' attachment(s), left them'); P.more = []; gset('wfPending', P); return false; }
+    const b0 = bodyOf(); el.click(); await waitFor(() => bodyOf().length > 0 && bodyOf() != b0, 8000); await quiet(300, 3000);
+    const n = P.more.shift(), atts = P.atts || [], left = []; await grabRest([n], P.id, atts, left);
+    if (left.length) log('Couldn\'t grab ' + n + ', left it off');
+    P.atts = atts; if (P.wasUnread) { await park(); await markUnread(P.rowKey); }
+    gset('wfPending', P); reloading = true; status('reloading after the preview'); await sleep(500); location.reload(); return true;
+  }
   async function finishPending() {
     const P = gget('wfPending', null); if (!P) return false;
+    if ((P.more || []).length && (P.moreTries || 0) < 12 && (!P.tab || P.tab === tabId()) && !P.run) return await grabMore(P);
     if (P.tab && P.tab !== tabId() && now() - (P.at || 0) < 5 * 60e3) return false; // another tab's, give it 5 min
     if ((P.tries || 0) >= 3) { gdel('wfPending'); markSeen(P.key); await safeFu({ sec: 'check', key: 'err-read-' + P.key.slice(0, 60), title: 'Filer couldn\'t read an email: ' + P.info.subject.slice(0, 60), desc: 'From ' + P.info.from + ', ' + P.info.date + '. Check it by hand.', p1: false, due: ymd(new Date()) }); return true; }
     if (P.run && P.run.page !== PAGE && now() - P.run.at < 3 * 60e3) return false; // already being read (this tab, before or after a reload)
@@ -391,8 +416,8 @@ if (ON_MAIL) {
     // ARC jobs go by the PO itself (PO118964-BU01-009, base PO118964-BU01), whatever Haiku made of the "ARC Ref" in the subject
     if (/\barc\b/i.test(P.builder || x.builder || '') && /^PO\d/i.test(x.po_full || '')) { x.ref = ''; x.po_base = x.po_full.replace(/-\d+$/, ''); }
     x.address = x.address || {}; x.dates = x.dates || []; x.blocks = x.blocks || []; x.vague = x.vague || []; x.site_contacts = x.site_contacts || []; x.warn = x.warn || [];
-    const job = { id: P.id + Math.random().toString(36).slice(2, 6), at: now(), emailAt: P.emailAt, dry: P.live ? false : (R.dry || !!P.test), test: !!P.test, key: P.key, builder: P.builder || x.builder || '', info: { from: P.info.from, date: P.info.date, subject: P.info.subject, rs: P.info.rs, rec: P.info.rec, img: P.info.img, pdfName: P.pdfName || '' }, pdfKey: P.pdfKey || '', x, status: 'new' };
-    if (x.kind == 'skip' || !x.kind) { if (gget('wfRetryNext', '')) { const tid = gget('wfRetryNext', ''); gdel('wfRetryNext'); closeFu(tid).catch(() => {}); } log('Skip: ' + P.info.subject.slice(0, 70) + ' (' + (x.why || '') + ')'); if (P.pdfKey) gdel(P.pdfKey); if (job.test) await dryNote(job, ['Would skip it: ' + (x.why || '')]); }
+    const job = { id: P.id + Math.random().toString(36).slice(2, 6), at: now(), emailAt: P.emailAt, dry: P.live ? false : (R.dry || !!P.test), test: !!P.test, key: P.key, builder: P.builder || x.builder || '', info: { from: P.info.from, date: P.info.date, subject: P.info.subject, rs: P.info.rs, rec: P.info.rec, img: P.info.img, pdfName: P.pdfName || '' }, pdfKey: P.pdfKey || '', atts: P.atts || [], x, status: 'new' };
+    if (x.kind == 'skip' || !x.kind) { (P.atts || []).forEach(a => gdel(a.key)); if (gget('wfRetryNext', '')) { const tid = gget('wfRetryNext', ''); gdel('wfRetryNext'); closeFu(tid).catch(() => {}); } log('Skip: ' + P.info.subject.slice(0, 70) + ' (' + (x.why || '') + ')'); if (P.pdfKey) gdel(P.pdfKey); if (job.test) await dryNote(job, ['Would skip it: ' + (x.why || '')]); }
     else { const q = gget('wfJobs', []); if (!job.test && !gget('wfRetryNext', '') && q.some(j => j.key == job.key && now() - j.at < 30 * 60e3)) log('Already queued, not doubling up: ' + P.info.subject.slice(0, 70)); else { if (!job.test && gget('wfRetryNext', '')) { job.retryTask = gget('wfRetryNext', ''); gdel('wfRetryNext'); } q.push(job); gset('wfJobs', q); log('Queued ' + x.kind + ': ' + P.info.subject.slice(0, 70)); } }
     if (!P.test) markSeen(P.key); gdel('wfPending'); status('idle'); return true;
   }
@@ -413,10 +438,12 @@ if (ON_MAIL) {
     const pick = okPdf.find(n => /purchase order|work order|\bpo\b|\bpo[\s_-]?\d|safety advice|variation|\bwo\b/i.test(n)) || (okPdf.length == 1 ? okPdf[0] : okPdf.find(n => /\d{4,}/.test(n)) || '');
     let pdfKey = '';
     if (pick) { const b64 = await grabPdf(pick); if (b64) { pdfKey = 'wfPdf_' + id; gset(pdfKey, b64); } else log('Couldn\'t grab the PDF on ' + p.head.slice(0, 60)); }
+    // every other PDF and photo on the email goes on the task too (19/10)
+    const atts = [], more = []; await grabRest(info.pdfs.filter(n => n != pick).concat(info.imgs || []), id, atts, more);
     if (wasUnread) { await park(); const ok = await markUnread(key); if (!ok) log('!! couldn\'t put back to unread: ' + p.head.slice(0, 60)); }
-    gset('wfPending', { tab: tabId(), at: now(), id, key: test ? 'test|' + fullKey : fullKey, rowKey: key, emailAt: test ? 0 : (rowTime(p.when) || new Date()).getTime(), builder: sd.builder, info, pdfKey, pdfName: pick, test: !!test, live: !!(test && test.live), as: (test && test.as) || null });
+    gset('wfPending', { tab: tabId(), at: now(), id, key: test ? 'test|' + fullKey : fullKey, rowKey: key, emailAt: test ? 0 : (rowTime(p.when) || new Date()).getTime(), builder: sd.builder, info, pdfKey, pdfName: pick, atts, more, moreTries: 0, wasUnread, test: !!test, live: !!(test && test.live), as: (test && test.as) || null });
     markSeen(key + '|' + ymd(new Date()));
-    if (pdfKey) { reloading = true; status('reloading after the preview'); await sleep(500); location.reload(); return true; }
+    if (pdfKey || atts.length || more.length) { reloading = true; status('reloading after the preview'); await sleep(500); location.reload(); return true; }
     return await finishPending();
   }
 
@@ -575,19 +602,21 @@ if (ON_AF) {
 
   // Op: upload the PDF on the task page (Documents & Photos, Add, file box, Done). Untested end to end, see README.
   async function opUpload(op) {
-    const b64 = gget(op.pdfKey, ''); if (!b64) return opDone(op, { upErr: 'PDF missing from storage' });
+    // the PO reports as up/upErr, the other attachments as x<n>/x<n>Err so each one is tracked on its own
+    const fin = (o, r) => opDone(o, o.extra == null ? r : { ['x' + o.extra + (r.upErr ? 'Err' : '')]: r.upErr || r.up });
+    const b64 = gget(op.pdfKey, ''); if (!b64) return fin(op, { upErr: 'file missing from storage' });
     if (op.fired) { // after Done: the page reloaded or the box closed, check the list
-      await sleep(2500); const t = document.body.innerText; return opDone(op, t.includes(op.name.replace(/\.pdf$/i, '')) ? { up: op.name } : { up: op.name, upWarn: 'uploaded, but couldn\'t see it in the list to confirm' }); }
-    if (!/Task - AroFlo/.test(document.title) && !(await waitFor(() => /Task - AroFlo/.test(document.title), 20000))) return opDone(op, { upErr: 'task page did not open' });
-    const add = document.querySelector('li.btnUploadNew'); if (!add) return opDone(op, { upErr: 'no Add Documents & Photos on the page' });
+      await sleep(2500); const t = document.body.innerText; return fin(op, t.includes(op.name.replace(/\.[a-z0-9]+$/i, '')) ? { up: op.name } : { up: op.name, upWarn: 'uploaded, but couldn\'t see it in the list to confirm' }); }
+    if (!/Task - AroFlo/.test(document.title) && !(await waitFor(() => /Task - AroFlo/.test(document.title), 20000))) return fin(op, { upErr: 'task page did not open' });
+    const add = document.querySelector('li.btnUploadNew'); if (!add) return fin(op, { upErr: 'no Add Documents & Photos on the page' });
     add.click();
-    if (!(await waitFor(() => !!document.getElementById('s3FileUpload'), 10000))) return opDone(op, { upErr: 'upload box didn\'t open' });
+    if (!(await waitFor(() => !!document.getElementById('s3FileUpload'), 10000))) return fin(op, { upErr: 'upload box didn\'t open' });
     const inp = document.getElementById('s3FileUpload'); const bin = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
-    const dt = new DataTransfer(); dt.items.add(new File([bin], op.name, { type: 'application/pdf' })); inp.files = dt.files; inp.dispatchEvent(new Event('change', { bubbles: true }));
+    const dt = new DataTransfer(); dt.items.add(new File([bin], op.name, { type: op.type || 'application/pdf' })); inp.files = dt.files; inp.dispatchEvent(new Event('change', { bubbles: true }));
     const box = () => inp.closest('.ui-dialog') || document.body;
     const ok = await waitFor(() => { const t = box().innerText; return t.includes(op.name) && !/PROCESSING|UPLOADING/i.test(t); }, 60000);
-    if (!ok) return opDone(op, { upErr: 'upload didn\'t finish in a minute' });
-    const done = [...box().querySelectorAll('button,a')].find(b => /^\s*Done\s*$/i.test(b.innerText || '')); if (!done) return opDone(op, { upErr: 'no Done button' });
+    if (!ok) return fin(op, { upErr: 'upload didn\'t finish in a minute' });
+    const done = [...box().querySelectorAll('button,a')].find(b => /^\s*Done\s*$/i.test(b.innerText || '')); if (!done) return fin(op, { upErr: 'no Done button' });
     op.fired = true; ss('wfOp', op); done.click(); await sleep(4000); return opUpload(op);
   }
 
@@ -784,7 +813,10 @@ if (ON_AF) {
   const scopeText = x => (x.blocks || []).map(b => (b.h ? '\n' + b.h.toUpperCase() : '') + (b.rooms || []).map(r => '\n' + r.r + (r.items || []).map(i => '\n  * ' + (typeof i == 'string' ? i : i.t)).join('')).join('') + (b.items || []).map(i => '\n  * ' + (typeof i == 'string' ? i : i.t)).join('')).join('\n').slice(0, 2500);
   async function runJob(job) {
     const x = job.x, R = job.res || {}, plan = job.plan || [];
-    const fin = async (lines, err) => { job.status = err ? 'error' : 'done'; job.plan = lines; saveJob(job); if (job.dry) await dryNote(job, job.test ? lines.concat(readOut(job, lines)) : x.cov ? lines.concat(['Line check: ' + covText(x.cov)]) : lines); if (job.pdfKey && !err) gdel(job.pdfKey); if (!err && job.retryTask) { try { await closeFu(job.retryTask); } catch (e) {} delete job.retryTask; saveJob(job); } log((err ? 'Error: ' : 'Done: ') + job.info.subject.slice(0, 60) + ' | ' + lines.join(' | ')); };
+    const fin = async (lines, err) => { job.status = err ? 'error' : 'done'; job.plan = lines; saveJob(job); if (job.dry) await dryNote(job, job.test ? lines.concat(readOut(job, lines)) : x.cov ? lines.concat(['Line check: ' + covText(x.cov)]) : lines); if (job.pdfKey && !err) gdel(job.pdfKey); if (!err) (job.atts || []).forEach(a => gdel(a.key)); if (!err && job.retryTask) { try { await closeFu(job.retryTask); } catch (e) {} delete job.retryTask; saveJob(job); } log((err ? 'Error: ' : 'Done: ') + job.info.subject.slice(0, 60) + ' | ' + lines.join(' | ')); };
+    const nextAtt = () => job.dry ? -1 : (job.atts || []).findIndex((f, i) => !R['x' + i] && !R['x' + i + 'Err']);
+    const doAtt = href => { const i = nextAtt(), f = job.atts[i]; return startOp({ op: 'upload', jobId: job.id, pdfKey: f.key, name: f.name, type: f.type, extra: i }, href); };
+    const attTxt = () => { const a = job.atts || []; if (!a.length) return ''; const bad = a.filter((f, i) => R['x' + i + 'Err']); return ', ' + (a.length - bad.length) + ' other attachment' + (a.length == 1 ? '' : 's') + ' on' + (bad.length ? ' (' + bad.map(f => f.name).join(', ') + ' FAILED)' : ''); };
     const errFu = async msg => { if (!job.dry) await safeFu({ sec: 'check', key: 'err-' + job.id, p1: true, due: ymd(new Date()), title: 'Filer: ' + msg.slice(0, 80), desc: 'Email: ' + job.info.subject + '\nFrom ' + job.info.from + ', ' + job.info.date + (job.pdfKey ? '\nPDF attached below.' : ''), pdf: job.pdfKey && gget(job.pdfKey, '') ? { name: fileName(job), b64: gget(job.pdfKey, '') } : null }); return fin([msg], true); };
 
     if (/^(po|updated_po|esa)$/.test(x.kind) && !job.pdfKey) return errFu((x.kind == 'esa' ? 'Energex safety advice' : 'PO ' + (x.po_full || '')) + ': couldn\'t grab the PDF out of the email');
@@ -800,6 +832,7 @@ if (ON_AF) {
       if (job.dry) return fin(['ESA: would attach ' + fileName(job) + ' to JN ' + job.target.jn + ' and add the note "Energex safety advice received"']);
       if (!R.up && !R.upErr) return startOp({ op: 'upload', jobId: job.id, pdfKey: job.pdfKey, name: fileName(job) }, job.target.href);
       if (R.upErr) return errFu('ESA upload on JN ' + job.target.jn + ' failed: ' + R.upErr);
+      if (nextAtt() >= 0) return doAtt(job.target.href);
       if (!R.note && !R.noteErr) return startOp({ op: 'note', jobId: job.id, text: 'Energex safety advice received' }, job.target.href);
       return fin(['ESA attached to JN ' + job.target.jn + (R.noteErr ? ', note failed: ' + R.noteErr : ', noted')]);
     }
@@ -856,20 +889,23 @@ if (ON_AF) {
           if (job.dry) return fin(['JN ' + jn + ' is open for ' + jobKey(x) + ' but only says TBC (a create that never finished). Would write the full description and attach ' + fileName(job)]);
           if (!R.desc && !R.descErr) return startOp({ op: 'desc', jobId: job.id, mode: 'set', html: fullDesc(job), jn }, d.hh);
           if (!R.up && !R.upErr) return startOp({ op: 'upload', jobId: job.id, pdfKey: job.pdfKey, name: fileName(job) }, job.target.href);
+          if (nextAtt() >= 0) return doAtt(job.target.href);
           await afterWrite(job, jn, true); return fin(['Finished JN ' + jn + ' for PO ' + x.po_full + ': ' + (R.descErr ? 'description FAILED (' + R.descErr + ')' : 'description on') + ', ' + (R.upErr ? 'upload FAILED (' + R.upErr + ')' : 'PDF attached')]);
         }
         if (x.kind == 'updated_po' || has) {
-          if (job.dry) return fin(['PO ' + x.po_full + ' is already on JN ' + job.target.jn + '. ' + (x.kind == 'updated_po' ? 'Would attach ' + fileName(job) + ' and flag it to check: ' + (x.changes || x.summary || 'updated PO') : 'Would skip it, already set up')]);
+          if (job.dry) return fin(['PO ' + x.po_full + ' is already on JN ' + job.target.jn + '. ' + (x.kind == 'updated_po' ? 'Would attach ' + fileName(job) + ((job.atts || []).length ? ' plus ' + job.atts.map(f => f.name).join(', ') : '') + ' and flag it to check: ' + (x.changes || x.summary || 'updated PO') : 'Would skip it, already set up')]);
           if (x.kind != 'updated_po') return fin(['PO ' + x.po_full + ' already on JN ' + job.target.jn + ', skipped']);
           if (!R.up && !R.upErr) return startOp({ op: 'upload', jobId: job.id, pdfKey: job.pdfKey, name: fileName(job) }, job.target.href);
+          if (nextAtt() >= 0) return doAtt(job.target.href);
           await safeFu({ sec: 'check', key: 'upd-' + x.po_full + '-' + ymd(new Date()), due: ymd(new Date()), title: 'Updated PO, check the scope: ' + shortStreet(x.address.street) + ' (JN ' + job.target.jn + ', PO -' + x.po_full.split('-')[1] + ')', desc: (x.changes || x.summary || 'Builder sent an updated PO.') + '\nThe updated PDF is on the task' + (R.upErr ? ' (upload FAILED: ' + R.upErr + ')' : '') + '. The description wasn\'t changed.' });
           return fin(['Updated PO on JN ' + job.target.jn + (R.upErr ? ', upload failed' : ', attached') + ', flagged to check']);
         }
         // revised PO: new works go under the existing description
         const block = poBlock(job);
-        if (job.dry) return fin(['Revised PO ' + x.po_full + upd + ' goes on JN ' + job.target.jn + ' (' + job.target.name.slice(0, 50) + ')', 'Would attach ' + fileName(job), 'Would add under the description: ' + poLine(job) + scopeText(x), 'Vague lines: ' + ((x.vague || []).map(v => v.po_said).join(' / ') || 'none'), 'To book: ' + ((x.dates || []).length ? 'dates in email' : 'from the live repair schedule, or a confirm dates draft')]);
+        if (job.dry) return fin(['Revised PO ' + x.po_full + upd + ' goes on JN ' + job.target.jn + ' (' + job.target.name.slice(0, 50) + ')', 'Would attach ' + fileName(job) + ((job.atts || []).length ? ' plus ' + job.atts.map(f => f.name).join(', ') : ''), 'Would add under the description: ' + poLine(job) + scopeText(x), 'Vague lines: ' + ((x.vague || []).map(v => v.po_said).join(' / ') || 'none'), 'To book: ' + ((x.dates || []).length ? 'dates in email' : 'from the live repair schedule, or a confirm dates draft')]);
         if (!R.up && !R.upErr) return startOp({ op: 'upload', jobId: job.id, pdfKey: job.pdfKey, name: fileName(job) }, job.target.href);
         if (!R.desc && !R.descErr) { const h = d.hh; return startOp({ op: 'desc', jobId: job.id, mode: 'append', html: block, mustNotHave: x.po_full, jn: job.target.jn }, h); }
+        if (nextAtt() >= 0) return doAtt(job.target.href);
         await afterWrite(job, job.target.jn); return fin(['Revised PO ' + x.po_full + ' on JN ' + job.target.jn + ': ' + (R.upErr ? 'upload FAILED (' + R.upErr + ')' : 'PDF attached') + ', ' + (R.descErr ? 'description FAILED (' + R.descErr + ')' : 'new works added')]);
       }
       // new task
@@ -878,13 +914,14 @@ if (ON_AF) {
         // Lisa names them: Ambrose by the 8 digit base, ARC by the full PO (PO118551-BU01-001), everyone else by their job ref.
         const name = (amb ? x.po_base : (x.ref || x.po_full)) + ' - ' + addrLine(x.address);
         if (job.dry && !R.createDry && !R.createErr) return startOp({ op: 'create', jobId: job.id, dry: true, address: x.address, client: job.builder, contact: (x.site_contacts || [])[0], name, custON: amb ? x.po_base : (x.ref || x.po_full), taskType: amb ? 'Ambrose Construct Services' : 'General Electrical' }, '/ims/Site/Service/workrequest/index.cfm?new=1&tid=IMS.CRT.TSK');
-        if (job.dry) return fin(['New PO ' + x.po_full + (x.wasUpdated ? ' (came in marked Updated)' : '') + ': no open task, would create one', 'Create page check: ' + (R.createDry || R.createErr), 'Task name: ' + name, 'Description: ' + plain(fullDesc(job)).split(poLine(job))[0] + poLine(job) + scopeText(x), 'Vague lines: ' + ((x.vague || []).map(v => v.po_said).join(' / ') || 'none'), 'Would attach ' + fileName(job)]);
+        if (job.dry) return fin(['New PO ' + x.po_full + (x.wasUpdated ? ' (came in marked Updated)' : '') + ': no open task, would create one', 'Create page check: ' + (R.createDry || R.createErr), 'Task name: ' + name, 'Description: ' + plain(fullDesc(job)).split(poLine(job))[0] + poLine(job) + scopeText(x), 'Vague lines: ' + ((x.vague || []).map(v => v.po_said).join(' / ') || 'none'), 'Would attach ' + fileName(job) + ((job.atts || []).length ? ' plus ' + job.atts.map(f => f.name).join(', ') : '')]);
         if (!R.jn && !R.createErr) return startOp({ op: 'create', jobId: job.id, address: x.address, client: job.builder, contact: (x.site_contacts || [])[0], name, custON: amb ? x.po_base : (x.ref || x.po_full), taskType: amb ? 'Ambrose Construct Services' : 'General Electrical' }, '/ims/Site/Service/workrequest/index.cfm?new=1&tid=IMS.CRT.TSK');
         if (R.createErr) return errFu('New PO ' + x.po_full + ', couldn\'t create the task: ' + R.createErr);
         const r = await findJnSoon(R.jn); if (!r) return errFu('Created JN ' + R.jn + ' but can\'t find it');
         if (!R.desc && !R.descErr) { const d = await getDoc(r.href); return startOp({ op: 'desc', jobId: job.id, mode: 'set', html: fullDesc(job), jn: R.jn }, headerHref(d)); }
         if (!R.up && !R.upErr) return startOp({ op: 'upload', jobId: job.id, pdfKey: job.pdfKey, name: fileName(job) }, r.href);
-        await afterWrite(job, R.jn, true); return fin(['New task JN ' + R.jn + ' for PO ' + x.po_full + ': ' + (R.descErr ? 'description FAILED (' + R.descErr + ')' : 'description on') + ', ' + (R.upErr ? 'upload FAILED (' + R.upErr + ')' : 'PDF attached')]);
+        if (nextAtt() >= 0) return doAtt(r.href);
+        await afterWrite(job, R.jn, true); return fin(['New task JN ' + R.jn + ' for PO ' + x.po_full + ': ' + (R.descErr ? 'description FAILED (' + R.descErr + ')' : 'description on') + ', ' + (R.upErr ? 'upload FAILED (' + R.upErr + ')' : 'PDF attached') + attTxt()]);
       }
     }
     return fin(['Nothing to do for kind ' + x.kind]);
@@ -973,7 +1010,7 @@ if (ON_AF) {
         // tidy: finished jobs older than 7 days
         // matched by id: two jobs() calls give different copies, so includes() never matched and every PDF got wiped while a job waited (18/10)
         const all = jobs(), keep = all.filter(j => j.status == 'new' || now() - j.at < 7 * 864e5), ids = new Set(keep.map(j => j.id));
-        all.filter(j => !ids.has(j.id) && j.pdfKey).forEach(j => gdel(j.pdfKey)); if (keep.length != all.length) gset('wfJobs', keep);
+        all.filter(j => !ids.has(j.id)).forEach(j => { if (j.pdfKey) gdel(j.pdfKey); (j.atts || []).forEach(a => gdel(a.key)); }); if (keep.length != all.length) gset('wfJobs', keep);
       }
     } catch (e) { log('AroFlo side error: ' + e.message); status(e.message, true); }
     finally { running = false; }
