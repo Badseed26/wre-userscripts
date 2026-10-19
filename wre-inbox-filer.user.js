@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.20
+// @version      0.9.21
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -424,6 +424,8 @@ if (ON_MAIL) {
         const p = parse(el.getAttribute('aria-label')); if (p.pinned) continue;
         const t = rowTime(p.when); if (!t || t.getTime() < start - 60e3) continue;
         const rk = p.head + ' ' + p.when + '|' + ymd(new Date());
+        const rr = gget('wfReread', []), again = rr.find(x => p.head.startsWith(x.head) && now() - x.at < 15 * 60e3);
+        if (again) { gset('wfReread', rr.filter(x => x !== again && now() - x.at < 15 * 60e3)); log('Reading again: ' + p.head.slice(0, 80)); const r = await takeOne(el, R, false); if (!reloading) later(scan, r ? 1500 : 5000); return; }
         if (s[rk] || [...Object.keys(s)].some(k => k.endsWith('|' + p.head.slice(0, 120)) && s[k] && Math.abs((+s[k] || 0) - t.getTime()) < 6 * 3600e3)) continue;
         if (!senderOf(p.head, R)) continue;
         if (SKIP_SUBJ.test(p.head)) { markSeen(rk); continue; }
@@ -753,7 +755,7 @@ if (ON_AF) {
   const scopeText = x => (x.blocks || []).map(b => (b.h ? '\n' + b.h.toUpperCase() : '') + (b.rooms || []).map(r => '\n' + r.r + (r.items || []).map(i => '\n  * ' + (typeof i == 'string' ? i : i.t)).join('')).join('') + (b.items || []).map(i => '\n  * ' + (typeof i == 'string' ? i : i.t)).join('')).join('\n').slice(0, 2500);
   async function runJob(job) {
     const x = job.x, R = job.res || {}, plan = job.plan || [];
-    const fin = async (lines, err) => { job.status = err ? 'error' : 'done'; job.plan = lines; saveJob(job); if (job.dry) await dryNote(job, job.test ? lines.concat(readOut(job, lines)) : x.cov ? lines.concat(['Line check: ' + covText(x.cov)]) : lines); if (job.pdfKey) gdel(job.pdfKey); log((err ? 'Error: ' : 'Done: ') + job.info.subject.slice(0, 60) + ' | ' + lines.join(' | ')); };
+    const fin = async (lines, err) => { job.status = err ? 'error' : 'done'; job.plan = lines; saveJob(job); if (job.dry) await dryNote(job, job.test ? lines.concat(readOut(job, lines)) : x.cov ? lines.concat(['Line check: ' + covText(x.cov)]) : lines); if (job.pdfKey && !err) gdel(job.pdfKey); if (!err && job.retryTask) { try { await closeFu(job.retryTask); } catch (e) {} delete job.retryTask; saveJob(job); } log((err ? 'Error: ' : 'Done: ') + job.info.subject.slice(0, 60) + ' | ' + lines.join(' | ')); };
     const errFu = async msg => { if (!job.dry) await safeFu({ sec: 'check', key: 'err-' + job.id, p1: true, due: ymd(new Date()), title: 'Filer: ' + msg.slice(0, 80), desc: 'Email: ' + job.info.subject + '\nFrom ' + job.info.from + ', ' + job.info.date + (job.pdfKey ? '\nPDF attached below.' : ''), pdf: job.pdfKey && gget(job.pdfKey, '') ? { name: fileName(job), b64: gget(job.pdfKey, '') } : null }); return fin([msg], true); };
 
     if (/^(po|updated_po|esa)$/.test(x.kind) && !job.pdfKey) return errFu((x.kind == 'esa' ? 'Energex safety advice' : 'PO ' + (x.po_full || '')) + ': couldn\'t grab the PDF out of the email');
@@ -884,6 +886,41 @@ if (ON_AF) {
     gset('wfBases', b);
   }
 
+  // Try again from the dashboard: it puts the filer-retry label on an error in Errors / to check. Plain script, no new AI:
+  // a job error goes back in the queue as it was (Haiku's read and the PDF are kept), a read error gets the email read again.
+  // If it works the error closes itself, if not the same error updates (19/10).
+  async function retries() {
+    if (now() - gget('wfRetryAt', 0) < 55e3) return; gset('wfRetryAt', now());
+    let ts; try { ts = (await sectionTasks(SEC_CHECK)).filter(t => (t.labels || []).includes('filer-retry')); } catch (e) { return; }
+    const tm = new Date().toLocaleTimeString('en-AU', { hour: 'numeric', minute: '2-digit' });
+    // read agains the Outlook tab never found (gone from the top of the inbox): say so on the error
+    const old = gget('wfReread', []).filter(x => now() - x.at >= 15 * 60e3);
+    if (old.length) { gset('wfReread', gget('wfReread', []).filter(x => now() - x.at < 15 * 60e3)); for (const x of old) await td('POST', 'tasks/' + x.task, { content: 'Filer couldn\'t find the email again, do it by hand: ' + x.head.slice(0, 50) }).catch(() => {}); }
+    for (const t of ts) {
+      const key = ((t.description || '').match(/^filer: (\S+)/m) || [])[1] || '';
+      const note = msg => td('POST', 'tasks/' + t.id, { labels: (t.labels || []).filter(l => l != 'filer-retry'), description: 'Try again (' + tm + '): ' + msg + '\n' + String(t.description || '').replace(/^Try again \(.*\n?/m, '') }).catch(e => log('Try again note failed: ' + e.message));
+      let m;
+      if ((m = key.match(/^err-read-(.*)$/))) {
+        const head = m[1].split('|').slice(1).join('|').trim();
+        if (!head) { await note('can\'t tell which email it was, do this one by hand'); continue; }
+        const r = gget('wfReread', []).filter(x => now() - x.at < 15 * 60e3 && x.task != t.id); r.push({ head, at: now(), task: t.id }); gset('wfReread', r);
+        await note('looking for the email again'); log('Try again: reading the email again: ' + head.slice(0, 50)); continue;
+      }
+      if ((m = key.match(/^err-(j[a-z0-9]+)$/))) {
+        const j = jobs().find(x => x.id == m[1]);
+        if (!j) { await note('the filer has dropped that one (over 7 days old), do it by hand'); continue; }
+        if (j.status == 'new') { await note('it\'s already in the queue'); continue; }
+        const R = j.res || {};
+        if (j.pdfKey && !gget(j.pdfKey, '') && !R.up) { await note('the PDF wasn\'t kept on this one (before 0.9.21), do it by hand'); continue; }
+        Object.keys(R).forEach(k => { if (/Err$/.test(k) || k == 'createDry') delete R[k]; }); j.res = R;
+        if (!R.jn) j.creating = false; // check AroFlo for the task again before making one
+        Object.assign(j, { status: 'new', tries: 0, notBefore: 0, waited: true, retryTask: t.id }); saveJob(j);
+        await note('back in the queue'); log('Try again: ' + j.info.subject.slice(0, 60)); continue;
+      }
+      await note('this one can\'t be tried again, do it by hand');
+    }
+  }
+
   let running = false;
   async function tick() {
     if (running || !IS_FILER) return; running = true;
@@ -902,6 +939,7 @@ if (ON_AF) {
         status('idle, ' + new Date().toLocaleTimeString('en-AU', { hour: 'numeric', minute: '2-digit' }));
         if (now() - gget('wfBookAt', 0) > 60 * 60e3 && !R.dry) { gset('wfBookAt', now()); await checkToBook(); }
         if (!R.dry) await doubleUps();
+        await retries();
         // tidy: finished jobs older than 7 days
         // matched by id: two jobs() calls give different copies, so includes() never matched and every PDF got wiped while a job waited (18/10)
         const all = jobs(), keep = all.filter(j => j.status == 'new' || now() - j.at < 7 * 864e5), ids = new Set(keep.map(j => j.id));
