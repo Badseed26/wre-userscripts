@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.35
+// @version      0.9.36
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -377,7 +377,9 @@ if (ON_MAIL) {
   const grabPdf = async name => { const f = await grabFile(name); return f && f.type == 'application/pdf' ? f.b64 : null; };
   // Any attachment: previews it, keeps what Outlook downloads, and checks it really is a PDF or a photo (19/10).
   const grabFile = async name => {
-    const R = rp(); const card = R && [...R.querySelectorAll('[title]')].find(x => x.getAttribute('title') == name); if (!card) return null;
+    const findCard = () => { const R = rp(); return R && [...R.querySelectorAll('[title]')].find(x => x.getAttribute('title') == name); };
+    // the card can be a beat behind the reading pane's text (Outlook fills the attachment well last), so give it a few seconds (19/10)
+    await waitFor(() => !!findCard(), 6000); const card = findCard(); if (!card) { log('No card for ' + name + ' in the reading pane'); return null; }
     lastPdf = null; catching = true; const t0 = now(); (card.closest('[role=button],button,[role=option]') || card).click();
     await waitFor(() => !!(lastPdf && lastPdf.at >= t0), 20000);
     const got = lastPdf; catching = false; await sleep(800);
@@ -401,6 +403,7 @@ if (ON_MAIL) {
   // Attachments that didn't come through in the first page load: open the email again on a fresh load and grab the next one.
   async function grabMore(P) {
     P.moreTries = (P.moreTries || 0) + 1; gset('wfPending', P);
+    await goInbox(); scrollTop(); await waitFor(() => !!findRow(P.rowKey), 10000);
     const el = findRow(P.rowKey); if (!el) { log('Couldn\'t find the email again for ' + P.more.length + ' attachment(s), left them'); P.more = []; gset('wfPending', P); return false; }
     const b0 = bodyOf(); el.click(); await waitFor(() => bodyOf().length > 0 && bodyOf() != b0, 8000); await quiet(300, 3000);
     const n = P.more.shift(), atts = P.atts || [], left = []; await grabRest([n], P.id, atts, left);
