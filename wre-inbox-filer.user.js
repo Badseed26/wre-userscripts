@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.42
+// @version      0.9.43
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -598,6 +598,10 @@ if (ON_AF) {
   // "Upcoming Schedules: Lachlan Buckley: Mon, November 09, 2026 @ 7:30 AM View Schedule ..."
   const upcomingOf = d => { const t = d.body.textContent.replace(/\s+/g, ' '); const i = t.indexOf('Upcoming Schedules'); if (i < 0) return []; const s = t.slice(i + 19, i + 3000).split('All Task Schedules')[0]; const out = []; s.split('View Schedule').forEach(c => { const m = c.trim().match(/^([A-Z][a-z']+(?: [A-Z][a-z']+){1,2}): \w{3}, (\w+ \d{1,2}, \d{4}) @ (\d{1,2}:\d{2} [AP]M)/); if (!m) return; const dt = new Date(m[2] + ' ' + m[3]); if (!isNaN(dt)) out.push({ staff: m[1], day: ymd(dt), t: m[3] }); }); return out; };
   const findJn = async jn => (await search(String(jn), 'JobNo')).find(x => x.jn == String(jn));
+  // The task page link for a follow up, so the dashboard can open the job in AroFlo (Ethan, 20/10). The search's own bits come off the href.
+  const afUrl = href => href ? 'https://office.aroflo.com' + String(href).replace(/[&?](searchString|searchParam|changeview|activeTab)=[^&]*/g, '').replace(/index\.cfm&/, 'index.cfm?') : '';
+  const afLine = (jn, href) => href ? '\nAroFlo: JN ' + jn + ' ' + afUrl(href) : '';
+  const afLineFor = async jn => { const r = await findJn(jn); return r ? afLine(jn, r.href) : ''; };
   // A task made a second ago isn't always in the search yet (JN 9467, 18/10), so give it half a minute.
   const findJnSoon = async jn => { for (let i = 0; i < 6; i++) { const r = await findJn(jn); if (r) return r; await sleep(5000); } return null; };
 
@@ -837,7 +841,7 @@ if (ON_AF) {
       lines: dates.length ? ['Builder dates: ' + dates.map(dShort).join(', ') + '. Clears itself once each date has a visit booked to anyone but Lisa.'] :
         ['No dates in the email or on the repair schedule yet. Draft to ' + ((x.supervisor || {}).name || 'the supervisor') + ':', '', draftAskDates(job)] };
     const soon = dates.some(d => workDaysAhead(3).includes(d));
-    return safeFu({ sec: 'book', key: 'book-' + x.po_full, title: bookTitle(o), desc: bookDesc(o) + (extra ? '\n' + extra : ''), p1: soon, due: soon ? ymd(new Date()) : nextWork(ymd(new Date())) });
+    return safeFu({ sec: 'book', key: 'book-' + x.po_full, title: bookTitle(o), desc: bookDesc(o) + (extra ? '\n' + extra : '') + await afLineFor(jn), p1: soon, due: soon ? ymd(new Date()) : nextWork(ymd(new Date())) });
   }
   const draftAskDates = job => { const x = job.x; const n = ((x.supervisor || {}).name || '').split(' ')[0]; const woman = /^(Emily|Hannah|Jasonya|Sarah|Jess|Kate|Lisa|Rachel|Amy|Chloe|Emma|Olivia)$/i.test(n);
     return (n ? 'Hey ' + (woman ? n : 'mate') + ',' : 'Hey mate,') + '\n\nJust touching base on ' + addrLine(x.address) + ' (PO ' + x.po_full + '). Have you got dates for our works yet? Happy to lock them in once we know.\n\n' + (woman ? 'Thank you,' : 'Cheers mate,'); };
@@ -853,7 +857,7 @@ if (ON_AF) {
       const ad = await ambroseDates(rec, po.split('-')[0]);
       if (ad) { const nd = [...new Set(ad.filter(d => d.po == po).map(d => d.day))].sort(); if (nd.length && nd.join(',') != dates.join(',')) {
         const was = dates; dates = nd; const o = { jn, po, rec, dates, hold: false, street: (t.content.match(/: (.*?) \(JN/) || [])[1] || '', lines: ['Builder dates: ' + dates.map(dShort).join(', ') + (was.length ? ' (moved from ' + was.map(dShort).join(', ') + ')' : '') + '. Clears itself once each date has a visit booked to anyone but Lisa.'] };
-        await td('POST', 'tasks/' + t.id, { content: bookTitle(o), description: bookDesc(o) + '\nfiler: book-' + po });
+        await td('POST', 'tasks/' + t.id, { content: bookTitle(o), description: bookDesc(o) + afLine(jn, r.href) + '\nfiler: book-' + po });
         log('Builder dates changed for JN ' + jn + ': ' + dates.join(', ')); } }
       if (hold == 'yes' || !dates.length) continue;
       const d = await descOf(r.href); const up = d.upcoming.filter(u => !/^Lisa\b/.test(u.staff));
@@ -871,9 +875,9 @@ if (ON_AF) {
       const list = await sectionTasks(SEC_BOOK); const it = list.find(t => (t.description || '').includes('BOOK | JN ' + r.jn + ' |'));
       if (job.dry) { out.push('Would put JN ' + r.jn + ' on hold' + (near.length ? ' and warn: ' + near.map(u => u.staff + ' ' + dShort(u.day) + ' ' + u.t).join(', ') : '')); continue; }
       if (it) { const m = it.description.match(BOOK_RE); await td('POST', 'tasks/' + it.id, { content: it.content.replace(/^(Book visits|Confirm dates): /, 'On hold, builder says dates not accurate: '), description: it.description.replace(/\| hold no/, '| hold yes') + '\nOn hold from ' + dShort(ymd(new Date())) + ': ' + (job.x.summary || 'builder says the dates aren\'t right') }); if (it.checked) await reopenFu(it.id); }
-      else await safeFu({ sec: 'book', key: 'book-' + (job.x.po_full || r.jn), title: 'On hold, builder says dates not accurate: ' + r.name.replace(/^\S+ - /, '').slice(0, 50) + ' (JN ' + r.jn + ')', desc: 'BOOK | JN ' + r.jn + ' | PO ' + (job.x.po_full || '?') + ' | rec ' + (job.info.rec || '') + ' | dates  | hold yes\n' + (job.x.summary || ''), due: nextWork(ymd(new Date())) });
+      else await safeFu({ sec: 'book', key: 'book-' + (job.x.po_full || r.jn), title: 'On hold, builder says dates not accurate: ' + r.name.replace(/^\S+ - /, '').slice(0, 50) + ' (JN ' + r.jn + ')', desc: 'BOOK | JN ' + r.jn + ' | PO ' + (job.x.po_full || '?') + ' | rec ' + (job.info.rec || '') + ' | dates  | hold yes\n' + (job.x.summary || '') + afLine(r.jn, r.href), due: nextWork(ymd(new Date())) });
       if (near.length) await safeFu({ sec: 'check', key: 'hold-' + r.jn + '-' + near.map(u => u.day).join(','), p1: true, due: ymd(new Date()), title: 'Confirm with the builder before going: ' + r.name.replace(/^\S+ - /, '').slice(0, 50) + ' (JN ' + r.jn + ')',
-        desc: 'Builder says the dates aren\'t accurate, but these are still booked:\n' + near.map(u => '- ' + u.staff + ', ' + dShort(u.day) + ' ' + u.t).join('\n') + '\nEmail: ' + job.info.subject });
+        desc: 'Builder says the dates aren\'t accurate, but these are still booked:\n' + near.map(u => '- ' + u.staff + ', ' + dShort(u.day) + ' ' + u.t).join('\n') + '\nEmail: ' + job.info.subject + afLine(r.jn, r.href) });
       out.push('JN ' + r.jn + ' on hold' + (near.length ? ', warned about ' + near.length + ' visit(s)' : ''));
     }
     return out;
@@ -886,7 +890,7 @@ if (ON_AF) {
       if (!it || !dates.length) continue;
       if (job.dry) { out.push('Would update JN ' + r.jn + ' To book dates to ' + dates.map(dShort).join(', ') + ' and lift any hold'); continue; }
       const m = it.description.match(BOOK_RE); const o = { jn: r.jn, po: m[2], rec: m[3], dates, hold: false, street: (it.content.match(/: (.*?) \(JN/) || [])[1] || '', lines: ['Builder dates: ' + dates.map(dShort).join(', ') + ' (from the builder\'s email ' + dShort(ymd(new Date())) + '). Clears itself once each date has a visit booked to anyone but Lisa.'] };
-      await td('POST', 'tasks/' + it.id, { content: bookTitle(o), description: bookDesc(o) + '\nfiler: book-' + m[2] }); out.push('JN ' + r.jn + ' new dates ' + dates.map(dShort).join(', '));
+      await td('POST', 'tasks/' + it.id, { content: bookTitle(o), description: bookDesc(o) + afLine(r.jn, r.href) + '\nfiler: book-' + m[2] }); out.push('JN ' + r.jn + ' new dates ' + dates.map(dShort).join(', '));
     }
     return out;
   }
@@ -917,7 +921,7 @@ if (ON_AF) {
     const nextAtt = () => job.dry ? -1 : (job.atts || []).findIndex((f, i) => !R['x' + i] && !R['x' + i + 'Err']);
     const doAtt = href => { const i = nextAtt(), f = job.atts[i]; return startOp({ op: 'upload', jobId: job.id, pdfKey: f.key, name: f.name, type: f.type, extra: i }, href); };
     const attTxt = () => { const a = job.atts || []; if (!a.length) return ''; const bad = a.filter((f, i) => R['x' + i + 'Err']); return ', ' + (a.length - bad.length) + ' other attachment' + (a.length == 1 ? '' : 's') + ' on' + (bad.length ? ' (' + bad.map(f => f.name).join(', ') + ' FAILED)' : ''); };
-    const errFu = async msg => { if (!job.dry) await safeFu({ sec: 'check', key: 'err-' + job.id, p1: true, due: ymd(new Date()), title: 'Filer: ' + msg.slice(0, 80), desc: 'Email: ' + job.info.subject + '\nFrom ' + job.info.from + ', ' + job.info.date + (job.pdfKey ? '\nPDF attached below.' : ''), pdf: job.pdfKey && gget(job.pdfKey, '') ? { name: fileName(job), b64: gget(job.pdfKey, '') } : null }); return fin([msg], true); };
+    const errFu = async msg => { if (!job.dry) await safeFu({ sec: 'check', key: 'err-' + job.id, p1: true, due: ymd(new Date()), title: 'Filer: ' + msg.slice(0, 80), desc: 'Email: ' + job.info.subject + '\nFrom ' + job.info.from + ', ' + job.info.date + (job.pdfKey ? '\nPDF attached below.' : '') + (job.target ? afLine(job.target.jn, job.target.href) : ''), pdf: job.pdfKey && gget(job.pdfKey, '') ? { name: fileName(job), b64: gget(job.pdfKey, '') } : null }); return fin([msg], true); };
 
     if (/^(po|updated_po)$/.test(x.kind) && !job.pdfKey && /^\s*(re|fw|fwd)\s*:/i.test(job.info.subject || '')) return errFu('Builder reply on PO ' + (x.po_full || '') + ' thread with no PDF, read it: ' + (x.summary || '').slice(0, 60));
     if (/^(po|updated_po|esa)$/.test(x.kind) && !job.pdfKey) return errFu((x.kind == 'esa' ? 'Energex safety advice' : 'PO ' + (x.po_full || '')) + ': couldn\'t grab the PDF out of the email');
@@ -941,7 +945,7 @@ if (ON_AF) {
     if (x.kind == 'cancelled') {
       const ts = (await tasksFor(x)).filter(isOpenTask); const who = ts.length ? ts.map(r => 'JN ' + r.jn).join(', ') : 'no open task found';
       if (job.dry) return fin(['Cancellation: would flag it (' + who + ')']);
-      await safeFu({ sec: 'check', key: 'cancel-' + (x.po_full || jobKey(x) || norm(x.address.street)), p1: true, due: ymd(new Date()), title: 'Builder cancelled: ' + (shortStreet(x.address.street) || x.po_full || 'see email') + (ts.length ? ' (' + who + ')' : ''), desc: (x.summary || 'Cancellation email from the builder.') + '\nNothing changed in AroFlo. Cancel the bookings if they\'re still there.\nEmail: ' + job.info.subject });
+      await safeFu({ sec: 'check', key: 'cancel-' + (x.po_full || jobKey(x) || norm(x.address.street)), p1: true, due: ymd(new Date()), title: 'Builder cancelled: ' + (shortStreet(x.address.street) || x.po_full || 'see email') + (ts.length ? ' (' + who + ')' : ''), desc: (x.summary || 'Cancellation email from the builder.') + '\nNothing changed in AroFlo. Cancel the bookings if they\'re still there.\nEmail: ' + job.info.subject + ts.map(r => afLine(r.jn, r.href)).join('') });
       return fin(['Cancellation flagged (' + who + ')']);
     }
     if (x.kind == 'dates_not_accurate' || x.kind == 'new_dates') {
@@ -1008,7 +1012,7 @@ if (ON_AF) {
             return fin(['PO ' + x.po_full + ' already on JN ' + job.target.jn + ': ' + (R.upErr ? 'upload FAILED (' + R.upErr + ')' : 'PDF on') + attTxt()]); }
           if (!R.up && !R.upErr) return startOp({ op: 'upload', jobId: job.id, pdfKey: job.pdfKey, name: fileName(job) }, job.target.href);
           if (nextAtt() >= 0) return doAtt(job.target.href);
-          await safeFu({ sec: 'check', key: 'upd-' + x.po_full + '-' + ymd(new Date()), due: ymd(new Date()), title: 'Updated PO, check the scope: ' + shortStreet(x.address.street) + ' (JN ' + job.target.jn + ', PO -' + x.po_full.split('-')[1] + ')', desc: (x.changes || x.summary || 'Builder sent an updated PO.') + '\nThe updated PDF is on the task' + (R.upErr ? ' (upload FAILED: ' + R.upErr + ')' : '') + '. The description wasn\'t changed.' });
+          await safeFu({ sec: 'check', key: 'upd-' + x.po_full + '-' + ymd(new Date()), due: ymd(new Date()), title: 'Updated PO, check the scope: ' + shortStreet(x.address.street) + ' (JN ' + job.target.jn + ', PO -' + x.po_full.split('-')[1] + ')', desc: (x.changes || x.summary || 'Builder sent an updated PO.') + '\nThe updated PDF is on the task' + (R.upErr ? ' (upload FAILED: ' + R.upErr + ')' : '') + '. The description wasn\'t changed.' + afLine(job.target.jn, job.target.href) });
           return fin(['Updated PO on JN ' + job.target.jn + (R.upErr ? ', upload failed' : ', attached') + ', flagged to check']);
         }
         // revised PO: new works go under the existing description
@@ -1050,7 +1054,7 @@ if (ON_AF) {
     if (job.sameSite) issues.push('No task had ' + (jobKey(x) || x.po_full) + ', so it went under the open task at that address, ' + job.sameSite + '. Make sure that\'s the same job.');
     if (x.overhead_power) issues.push('Overhead power on this PO. Needs an ESA lodged if there isn\'t one.');
     if (isNew && R.otherLoc) issues.push('Made a new location under ' + job.builder + '. The address is also in AroFlo under another client: ' + R.otherLoc);
-    if (issues.length || trialOn()) await safeFu({ sec: 'check', key: 'chk-' + x.po_full, p1: !!(R.upErr || R.descErr || (x.cov && x.cov.missing.length)), due: ymd(new Date()), title: (issues.length ? 'Check ' : 'Check the description on ') + 'JN ' + jn + ', ' + st + (isNew ? ' (new task)' : ' (PO -' + x.po_full.split('-')[1] + ' added)'), desc: (issues.join('\n\n') || 'Trial run: eyeball what the filer wrote.') + (R.upErr ? '\nTry again redoes the upload.' : '') + '\nEmail: ' + job.info.subject,
+    if (issues.length || trialOn()) await safeFu({ sec: 'check', key: 'chk-' + x.po_full, p1: !!(R.upErr || R.descErr || (x.cov && x.cov.missing.length)), due: ymd(new Date()), title: (issues.length ? 'Check ' : 'Check the description on ') + 'JN ' + jn + ', ' + st + (isNew ? ' (new task)' : ' (PO -' + x.po_full.split('-')[1] + ' added)'), desc: (issues.join('\n\n') || 'Trial run: eyeball what the filer wrote.') + (R.upErr ? '\nTry again redoes the upload.' : '') + '\nEmail: ' + job.info.subject + await afLineFor(jn),
       pdf: R.upErr && job.pdfKey && gget(job.pdfKey, '') ? { name: fileName(job), b64: gget(job.pdfKey, '') } : null });
     const b = gget('wfBases', {}); b[jobKey(x) || x.po_full] = now(); gset('wfBases', b);
   }
