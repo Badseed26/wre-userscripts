@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.31
+// @version      0.9.32
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -276,9 +276,11 @@ function paint() {
 }
 // A bad or stuck state goes in the log the first time it shows up, so a tab that's quietly going nowhere (can't find the Inbox,
 // another tab holds the lock, rows with no times) is on the dashboard, not just on its chip (19/10).
-function status(msg, bad) { const k = 'wfState_' + (ON_MAIL ? 'mail' : 'af'); const m = String(msg).slice(0, 80); const prev = gget(k, {});
+function status(msg, bad) { const k = 'wfState_' + (ON_MAIL ? 'mail' : 'af'); const m = String(msg).slice(0, 80);
   const strip = x => String(x || '').replace(/\d{1,2}:\d{2} ?[ap]m/i, '').trim();
-  if ((bad || /another .* tab|paused|can.t find|no times|stuck/i.test(m)) && strip(m) != strip(prev.msg)) log('Status: ' + m);
+  // this tab's own last status (sessionStorage), not the shared one: two tabs taking turns filled the log with the same line (19/10)
+  const last = ss('wfStatusLast') || ''; ss('wfStatusLast', m);
+  if ((bad || /another .* tab|paused|can.t find|no times|stuck/i.test(m)) && strip(m) != strip(last)) log('Status: ' + m);
   gset(k, { msg: m, bad: !!bad, at: now() }); paint(); }
 function mountChip() {
   if (chip || !document.body) return;
@@ -462,8 +464,11 @@ if (ON_MAIL) {
       const lk = gget('wfMailLock', null); const me = tabId();
       if (lk && lk.tab !== me && now() - lk.at < 90e3) { status('another Outlook filer tab is running'); return; }
       gset('wfMailLock', { tab: me, at: now() });
-      const R = await rules(); if (R.paused) { gset('wfWasPaused', 1); status(R.onLeave ? 'paused till ' + dShort(R.pauseTo) : 'paused'); return; }
-      if (gget('wfWasPaused', 0)) { gdel('wfWasPaused'); gset('wfStartAt', now()); log('Back on after a pause: only mail from now counts'); }
+      const R = await rules(); if (R.paused) { if (!gget('wfWasPaused', 0)) gset('wfWasPaused', now()); status(R.onLeave ? 'paused till ' + dShort(R.pauseTo) : 'paused'); return; }
+      // Only a long pause (leave) moves the start so weeks of backlog don't get filed. A short one (pausing to install a version,
+      // 19/10) carries on where it was, or mail that came in during the pause gets skipped for good.
+      if (gget('wfWasPaused', 0)) { const since = gget('wfWasPaused', 0); gdel('wfWasPaused');
+        if (since < 1e12 || now() - since > 3 * 3600e3) { gset('wfStartAt', now()); log('Back on after a long pause: only mail from now counts'); } else log('Back on after a short pause (' + Math.round((now() - since) / 60e3) + ' min), carrying on from where it was'); }
       if (!gget('wfStartAt', 0)) gset('wfStartAt', now());
       const start = gget('wfStartAt', now());
       await exitSearch();
@@ -732,6 +737,9 @@ if (ON_AF) {
 
   async function resumeOp() {
     const op = ss('wfOp'); if (!op) return false;
+    // mid job: keep the lock and the job claimed through each page load, or a second filer tab picks the same job up and
+    // makes a double (the lock used to lapse 90 s into a create, 19/10)
+    gset('wfAfLock', { tab: tabId(), at: now() }); { const j = getJob(op.jobId); if (j) { j.run = { tab: tabId(), at: now() }; saveJob(j); } }
     if ((op.tries = (op.tries || 0) + 1) > 4) { opDone(op, { [op.op + 'Err']: 'gave up after 4 page loads' }); return true; }
     ss('wfOp', op);
     // The script starts as the page starts loading. AroFlo's pages are big (create task is 500 KB, 59 scripts) and a background tab
@@ -1030,13 +1038,14 @@ if (ON_AF) {
     if (running || !IS_FILER) return; running = true;
     try {
       const lk = gget('wfAfLock', null); const me = tabId();
-      if (lk && lk.tab !== me && now() - lk.at < 90e3) { status('another AroFlo filer tab is running'); return; }
+      if (lk && lk.tab !== me && now() - lk.at < 180e3) { status('another AroFlo filer tab is running'); return; }
       gset('wfAfLock', { tab: me, at: now() });
       if (/login|signin/i.test(location.pathname) || !document.querySelector('a[href*="Calendar"],#topMenu,.afTopNav,nav')) { status('AroFlo looks signed out', true); await safeFu({ sec: 'check', key: 'af-signed-out-' + ymd(new Date()), p1: true, due: ymd(new Date()), title: 'Filer: AroFlo is signed out on your PC', desc: 'Sign back in on the filer tab. Nothing gets filed till then.' }); return; }
       const R = await rules(); if (R.paused) { status('paused'); return; }
       if (R.dry === false && !gget('wfLiveAt', 0)) gset('wfLiveAt', now());
-      const q = jobs().filter(j => j.status == 'new' && (!j.notBefore || j.notBefore <= now()));
-      if (q.length) { const j = q[0]; j.tries = (j.tries || 0) + 1; saveJob(j);
+      // a job another tab picked up in the last 3 min is theirs (resumeOp keeps the claim fresh while its pages load)
+      const q = jobs().filter(j => j.status == 'new' && (!j.notBefore || j.notBefore <= now()) && !(j.run && j.run.tab != me && now() - j.run.at < 3 * 60e3));
+      if (q.length) { const j = q[0]; j.tries = (j.tries || 0) + 1; j.run = { tab: me, at: now() }; saveJob(j);
         if (j.tries > 5) { j.status = 'error'; saveJob(j); log('Gave up after 5 goes: ' + j.info.subject.slice(0, 60)); if (!j.dry) await safeFu({ sec: 'check', key: 'err-' + j.id, p1: true, due: ymd(new Date()), title: 'Filer got stuck on: ' + j.info.subject.slice(0, 60), desc: 'It tried 5 times. Check it by hand.' }); }
         else { status('working: ' + j.info.subject.slice(0, 40)); await runJob(j); } }
       else {
