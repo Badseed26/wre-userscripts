@@ -303,6 +303,7 @@
     var n = [];
     if (data.favourites && data.favourites.length) n.push("Favourites");
     n.push("Lads");
+    n.push("Ambrose");
     for (var i = 0; i < data.groups.length; i++) n.push(data.groups[i].name);
     return n;
   }
@@ -332,12 +333,14 @@
     var h = "";
     for (var i = 0; i < names.length; i++)
       h += '<button data-tab="' + esc(names[i]) + '" class="' + (names[i] === tab ? "on" : "") + '">' + esc(names[i]) +
-        (names[i] === "Lads" && npt && npt.items && npt.items.length ? ' <span style="color:var(--bad)">' + npt.items.length + "</span>" : "") + "</button>";
+        (names[i] === "Lads" && npt && npt.items && npt.items.length ? ' <span style="color:var(--bad)">' + npt.items.length + "</span>" : "") +
+        (names[i] === "Ambrose" && amb && amb.items && amb.items.length ? ' <span style="color:var(--bad)">' + amb.items.length + "</span>" : "") + "</button>";
     $("tabs").innerHTML = h;
     if (tab === "Lads") { $("main").innerHTML = ladsHtml(); return; }
+    if (tab === "Ambrose") { $("main").innerHTML = ambHtml(); return; }
 
     var list = tabButtons(tab);
-    h = (tab === "Favourites" ? glanceHtml() : "") + '<div class="grid">';
+    h = (tab === "Favourites" ? glanceHtml() + ambGlanceHtml() : "") + '<div class="grid">';
     for (var j = 0; j < list.length; j++) {
       var b = list[j];
       h += '<div class="cell"><button class="tile" data-id="' + esc(b.id) + '">' +
@@ -436,6 +439,39 @@
     });
     return h + '<div class="sub" style="text-align:center;margin-top:14px">Tap a job to OK an item or tick it off. Red = missing, green = in, blue = OK\'d by you. From Todoist ' + esc(npt.at || "") + "</div>";
   }
+  // ---------- Ambrose: photos or reports still to go up (you and Lisa), from the calendar script's A letters ----------
+  var amb = null;
+  function loadAmb(fresh) {
+    if (!key) return;
+    req("GET", "/api/amb?k=" + encodeURIComponent(key) + (fresh ? "&fresh=1" : "") + "&t=" + Date.now(), null, function (ok, j) {
+      amb = ok ? j : { error: (j && j.error) || "Couldn't read Todoist" };
+      if (data && (tab === "Ambrose" || tab === "Favourites")) render();
+    });
+  }
+  function ambGlanceHtml() {
+    if (!amb || amb.setup || amb.error) return "";
+    if (!amb.items.length) return '<button class="glance clear" data-act="amb"><span class="gt">Nothing to upload to Ambrose</span></button>';
+    var ph = 0, rp = 0;
+    amb.items.forEach(function (x) { if (x.need === "report") rp++; else ph++; });
+    return '<button class="glance" data-act="amb"><span class="gt">Still to upload</span>' + (ph ? '<span class="who">Photos<b>' + ph + "</b></span>" : "") +
+      (rp ? '<span class="who">Reports<b>' + rp + "</b></span>" : "") + "</button>";
+  }
+  function ambHtml() {
+    if (!amb) return '<div class="msg">Loading from Todoist</div>';
+    if (amb.setup) return '<div class="msg">' + (amb.error ? esc(amb.error) + ". " : "") + 'Connect Todoist to see what\'s still to go up on Ambrose.<br><br><button class="btn light" data-act="tok">Connect Todoist</button></div>';
+    if (amb.error) return '<div class="msg">' + esc(amb.error) + "</div>";
+    if (!amb.items.length) return '<div class="msg">Nothing to upload to Ambrose.</div>';
+    var h = "";
+    amb.items.forEach(function (x) {
+      var a = daysAgo(x.visit), age = a <= 0 ? "today" : a === 1 ? "yesterday" : a + " days ago";
+      var open = openJob === x.id, acts = "";
+      if (open) acts = '<div class="jacts"><button class="btn dark" data-aok="' + esc(x.id) + '"' + (busyJob ? " disabled" : "") + ">OK without them</button>" +
+        '<button class="btn light" data-adone="' + esc(x.id) + '"' + (busyJob ? " disabled" : "") + ">Tick off</button></div>";
+      h += '<div class="job' + (open ? " open" : "") + '" data-amb="' + esc(x.id) + '"><div class="jm"><div class="jt">' + esc(x.place) + '</div><div class="js">' + esc(x.type) + " &middot; " + esc(dayLbl(x.visit)) +
+        ' &middot; <span class="' + (a >= 2 ? "late" : "") + '">' + esc(age) + "</span>" + (x.jn ? " &middot; JN " + esc(x.jn) : "") + '</div></div><span class="npt"><span class="miss" title="' + esc(x.need) + ' not up">' + (x.need === "report" ? "R" : "P") + "</span></span>" + acts + "</div>";
+    });
+    return h + '<div class="sub" style="text-align:center;margin-top:14px">P = photos, R = report. These tick themselves off once Ambrose shows them, at the calendar\'s next check. From Todoist ' + esc(amb.at || "") + "</div>";
+  }
   function openTok() { $("tokIn").value = ""; $("tokBg").className = "sheet-bg show"; }
   function closeTok() { $("tokBg").className = "sheet-bg"; $("tokIn").blur(); }
   $("tokCancel").addEventListener("click", closeTok);
@@ -443,7 +479,7 @@
   $("tokSave").addEventListener("click", function () {
     var t = $("tokIn").value.trim(); if (!t) return;
     req("POST", "/api/todoist-token", { k: key, token: t }, function (ok, j) {
-      if (ok) { closeTok(); toast("Todoist connected"); loadNpt(true); } else toast((j && j.error) || "Didn't save", true);
+      if (ok) { closeTok(); toast("Todoist connected"); loadNpt(true); loadAmb(true); } else toast((j && j.error) || "Didn't save", true);
     });
   });
   // the at-a-glance bar and the connect button
@@ -454,6 +490,7 @@
     var a = t.getAttribute("data-act");
     if (a === "tok") openTok();
     else if (a === "lads") { tab = "Lads"; store(TAB_STORE, tab); render(); loadNpt(true); }
+    else if (a === "amb") { tab = "Ambrose"; store(TAB_STORE, tab); render(); loadAmb(true); }
   });
 
   // ---------- day picker (inbox check), today and the 6 days before, same as the dashboard ----------
@@ -553,6 +590,7 @@
     store(TAB_STORE, tab);
     render();
     if (tab === "Lads") loadNpt(true);
+    if (tab === "Ambrose") loadAmb(true);
   });
 
   // Lads tab: tap a job for its actions, OK an item, or tick the issue off (two taps)
@@ -561,11 +599,30 @@
     body.k = key;
     req("POST", path, body, function (ok, j) {
       busyJob = null;
-      if (ok) { toast((j && j.msg) || label); openJob = null; loadNpt(true); }
+      if (ok) { toast((j && j.msg) || label); openJob = null; if (/\/api\/amb/.test(path)) loadAmb(true); else loadNpt(true); }
       else { toast((j && j.error) || "Didn't work", true); render(); }
     });
   }
   $("main").addEventListener("click", function (e) {
+    if (tab === "Ambrose") {
+      var u = e.target;
+      while (u && u !== this && !(u.getAttribute && (u.getAttribute("data-aok") || u.getAttribute("data-adone") || u.getAttribute("data-amb") || u.getAttribute("data-act")))) u = u.parentNode;
+      if (!u || u === this || busyJob || u.getAttribute("data-act")) return;
+      if (u.getAttribute("data-aok") || u.getAttribute("data-adone")) {
+        var ok = !!u.getAttribute("data-aok");
+        if (u.className.indexOf("arm") < 0) {
+          var was = u.textContent;
+          u.className = "btn arm"; u.textContent = "Tap again to " + (ok ? "OK it" : "tick off");
+          setTimeout(function () { if (u.className.indexOf("arm") >= 0) { u.className = ok ? "btn dark" : "btn light"; u.textContent = was; } }, 3000);
+          return;
+        }
+        nptAct(ok ? "/api/amb/ok" : "/api/amb/done", { id: u.getAttribute(ok ? "data-aok" : "data-adone") }, ok ? "OK'd" : "Ticked off");
+      } else {
+        var aid = u.getAttribute("data-amb");
+        openJob = openJob === aid ? null : aid; render();
+      }
+      return;
+    }
     if (tab === "Lads") {
       var t = e.target;
       while (t && t !== this && !(t.getAttribute && (t.getAttribute("data-nok") || t.getAttribute("data-ndone") || t.getAttribute("data-npt")))) t = t.parentNode;
@@ -625,11 +682,12 @@
     });
   }
 
-  document.addEventListener("visibilitychange", function () { if (!document.hidden) { ping(); load(); loadNpt(); } });
+  document.addEventListener("visibilitychange", function () { if (!document.hidden) { ping(); load(); loadNpt(); loadAmb(); } });
 
   tick(); setInterval(tick, 10000);
   ping(); load(); setInterval(ping, 30000);
   loadNpt(); setInterval(function () { if (!document.hidden) loadNpt(); }, 120000);
+  loadAmb(); setInterval(function () { if (!document.hidden) loadAmb(); }, 120000);
 })();
 </script>
 </body>

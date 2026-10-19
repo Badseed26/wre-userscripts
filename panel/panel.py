@@ -25,7 +25,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "2.5"
+VERSION = "2.6"
 HERE = os.path.dirname(os.path.abspath(__file__))
 RAW = "https://raw.githubusercontent.com/Badseed26/wre-userscripts/%s/"
 LATEST = "https://api.github.com/repos/Badseed26/wre-userscripts/commits/main"
@@ -657,6 +657,73 @@ def npt_done(task_id):
     return "Ticked off"
 
 
+# ---------- Ambrose: photos or reports still to go up on Ambrose (you and Lisa, not the lads) ----------
+# The calendar script's A letter keeps these in the "Ambrose uploads" section of WRE daily check:
+#   title: 7 Highview Pl (13/10): photos to Ambrose, Electrical Isolation
+#   desc:  JN 9389 | wrid 795229 | visit 2026-10-13 | PO 20307919-13 | Electrical Isolation | ambrose: photos
+# The section also holds one "ambrose-cache" task with what Ambrose said; that one is never listed.
+AMB_SECTION = "6hp9wgvpfRVf5mm6"
+AMB_DESC = re.compile(r"^JN (\S*) \| wrid (\d+) \| visit (\d{4}-\d\d-\d\d) \| PO (\S+) \| ([^|\n]+?) \| ambrose: (\w+)$", re.M)
+AMB_CACHE = {"at": 0.0, "data": None}
+
+
+def amb_list(force=False):
+    token = todoist_token()
+    if not token:
+        return {"setup": True}
+    if not force and AMB_CACHE["data"] is not None and time.time() - AMB_CACHE["at"] < 60:
+        return AMB_CACHE["data"]
+    items, cursor = [], None
+    for _ in range(5):
+        q = "tasks?section_id=%s&limit=200" % AMB_SECTION + ("&cursor=" + urllib.parse.quote(cursor) if cursor else "")
+        try:
+            j = todoist_get(q, token)
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                return {"setup": True, "error": "Todoist didn't accept that token"}
+            raise
+        for t in j.get("results", []):
+            m = AMB_DESC.search(t.get("description") or "")
+            if not m:
+                continue
+            place = re.sub(r"\s*\(\d{1,2}/\d{1,2}\).*$", "", t.get("content", "")).strip()
+            items.append({"id": t.get("id"), "place": place, "visit": m.group(3), "jn": m.group(1),
+                          "po": m.group(4), "type": m.group(5).strip(), "need": m.group(6)})
+        cursor = j.get("next_cursor")
+        if not cursor:
+            break
+    items.sort(key=lambda x: (x["visit"], x["place"]))
+    data = {"items": items, "at": time.strftime("%H:%M")}
+    AMB_CACHE.update(at=time.time(), data=data)
+    return data
+
+
+def amb_task(task_id, token):
+    t = todoist_get("tasks/" + urllib.parse.quote(str(task_id)), token)
+    if not t or str(t.get("section_id")) != AMB_SECTION or not AMB_DESC.search(t.get("description") or ""):
+        raise ValueError("That's not one of the Ambrose uploads")
+    return t
+
+
+def amb_act(task_id, ok):
+    # OK: same as clicking the blue A on the calendar (no upload needed), ticked off with an ok line.
+    # Done: it's up on Ambrose, just tick it off (the calendar would have done it at its next check anyway).
+    token = todoist_token()
+    if not token:
+        raise ValueError("Connect Todoist first")
+    t = amb_task(task_id, token)
+    if ok:
+        desc = t.get("description") or ""
+        if not re.search(r"^ok: .*ambrose", desc, re.M):
+            todoist_post("tasks/" + str(task_id), {"description": desc.rstrip() + "\nok: ambrose"}, token)
+        todoist_post("comments", {"task_id": str(task_id), "content": "%s: Ambrose OK'd by Ethan without them (desk panel)" % npt_today()}, token)
+    else:
+        todoist_post("comments", {"task_id": str(task_id), "content": "%s: ticked off on the desk panel, up on Ambrose" % npt_today()}, token)
+    todoist_post("tasks/" + str(task_id) + "/close", {}, token)
+    AMB_CACHE.update(at=0.0, data=None)
+    return "OK'd, ticked off" if ok else "Ticked off"
+
+
 def save_todoist_token(token):
     token = str(token or "").strip()
     if not re.fullmatch(r"[A-Za-z0-9]{20,80}", token):
@@ -668,6 +735,7 @@ def save_todoist_token(token):
     with open(TOKENFILE, "w", encoding="utf-8") as f:
         f.write(token)
     NPT_CACHE.update(at=0.0, data=None)
+    AMB_CACHE.update(at=0.0, data=None)
 
 
 # ---------- web server ----------
@@ -749,6 +817,14 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as e:
                 log("NPT read failed: %s" % e)
                 return self.send(502, {"error": "Couldn't read Todoist (%s)" % e})
+        if u.path == "/api/amb":
+            if not self.key_ok(q.get("k", [""])[0]):
+                return self.send(401, {"error": "bad key"})
+            try:
+                return self.send(200, amb_list(force=q.get("fresh", [""])[0] == "1"))
+            except Exception as e:
+                log("Ambrose read failed: %s" % e)
+                return self.send(502, {"error": "Couldn't read Todoist (%s)" % e})
         if u.path == "/api/ping":
             return self.send(200, {"ok": True, "version": VERSION})
         if u.path == "/api/version":
@@ -758,7 +834,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not private_client(self.client_address[0]):
             return self.send(403, {"error": "home network only"})
-        if self.path not in ("/api/run", "/api/icon", "/api/todoist-token", "/api/npt/ok", "/api/npt/done"):
+        if self.path not in ("/api/run", "/api/icon", "/api/todoist-token", "/api/npt/ok", "/api/npt/done", "/api/amb/ok", "/api/amb/done"):
             return self.send(404, {"error": "not found"})
         try:
             n = int(self.headers.get("Content-Length", "0"))
@@ -782,6 +858,18 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     msg = npt_done(tid)
                 log("NPT %s %s: %s" % (self.path[9:], tid, msg))
+                return self.send(200, {"ok": True, "msg": msg})
+            except urllib.error.HTTPError as e:
+                return self.send(502, {"error": "Todoist said %s" % e.code})
+            except Exception as e:
+                return self.send(400, {"error": str(e)})
+        if self.path in ("/api/amb/ok", "/api/amb/done"):
+            try:
+                tid = str(data.get("id", ""))
+                if not re.fullmatch(r"[A-Za-z0-9]{1,40}", tid):
+                    raise ValueError("Bad id")
+                msg = amb_act(tid, self.path == "/api/amb/ok")
+                log("Ambrose %s %s: %s" % (self.path[9:], tid, msg))
                 return self.send(200, {"ok": True, "msg": msg})
             except urllib.error.HTTPError as e:
                 return self.send(502, {"error": "Todoist said %s" % e.code})

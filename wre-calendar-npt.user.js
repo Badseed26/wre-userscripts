@@ -1,13 +1,17 @@
 // ==UserScript==
 // @name         WRE Calendar NPT
 // @namespace    wre
-// @version      2.8
-// @description  Notes, photos and timesheet badges on the AroFlo calendar for the days in view, kept in step with the WRE daily check issue list in Todoist
+// @version      3.0
+// @description  Notes, photos and timesheet badges on the AroFlo calendar for the days in view, kept in step with the WRE daily check issue list in Todoist, plus an A letter on Ambrose jobs for photos or the report being up on Ambrose
 // @match        https://office.aroflo.com/ims/Site/Calendar/*
+// @match        https://tradiesadmin.ambroseconstruct.com.au/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_registerMenuCommand
+// @grant        GM_openInTab
+// @grant        GM_addValueChangeListener
+// @grant        window.close
 // @grant        unsafeWindow
 // @sandbox      JavaScript
 // @connect      api.todoist.com
@@ -61,6 +65,144 @@
     if (!r.ok || /login/i.test(r.url)) throw new Error('AroFlo said no (signed out?)');
     return json ? r.json() : r.text();
   };
+
+  // ---------- Tradies Admin (Ambrose): reads each PO's Bookings table for the A letter ----------
+  // Any PO page you open gets read and saved. The calendar also opens this site in a background tab
+  // ("#wre-sweep") to check the POs it needs: search the PO, open each one, read its bookings, close.
+  // Saved in this script's own storage (ambData), which the calendar tab picks up straight away.
+  if (location.host === 'tradiesadmin.ambroseconstruct.com.au') { ambrosePage(); return; }
+
+  function ambrosePage() {
+    const sleep = ms => new Promise(r => setTimeout(r, ms));
+    const MO = { Jan: 1, Feb: 2, Mar: 3, Apr: 4, May: 5, Jun: 6, Jul: 7, Aug: 8, Sep: 9, Oct: 10, Nov: 11, Dec: 12 };
+    const day = x => { const m = String(x || '').match(/(\d{1,2}) ([A-Z][a-z]{2}) (\d{2})\b/); return m && MO[m[2]] ? '20' + m[3] + '-' + p2(MO[m[2]]) + '-' + p2(m[1]) : null; };
+    let sweep = /wre-sweep/.test(location.hash);
+    try { if (sweep) sessionStorage.setItem('wreAmbSweep', '1'); else sweep = sessionStorage.getItem('wreAmbSweep') === '1'; } catch (e) {}
+    const isList = () => /^\/PurchaseOrders\/?$/i.test(location.pathname);
+    const isPO = () => /^\/PurchaseOrders\/[a-f0-9]{20,}/i.test(location.pathname);
+    const loggedIn = () => !!document.body && /LOG OUT/.test(document.body.innerText);
+    async function until(f, ms) {
+      const t0 = Date.now();
+      while (Date.now() - t0 < ms) { try { const x = f(); if (x) return x; } catch (e) {} await sleep(400); }
+      return null;
+    }
+    // The Bookings table on a PO page (it's in the page even while its accordion is shut):
+    // [{t: type, st: status, s/e: dates, img: photo count (null = Ambrose wants none), rep: Reports cell, c: Complete cell}]
+    function readBookings() {
+      const tbl = [...document.querySelectorAll('table')].find(t => /Booking Type/.test(t.textContent) && /Images/.test(t.textContent));
+      if (!tbl) return null;
+      const out = [];
+      tbl.querySelectorAll('tr').forEach(r => {
+        const c = [...r.children];
+        if (c.length < 9 || /Booking Type/.test(c[0].textContent)) return; // header and Comments rows
+        const tx = i => c[i].textContent.replace(/\s+/g, ' ').trim();
+        const btn = c[5].querySelector('button');
+        const img = /^N\/?A$/i.test(tx(5)) ? null : btn && /^\d+$/.test(btn.textContent.trim()) ? +btn.textContent.trim() : 0;
+        out.push({ t: tx(0), st: tx(1), s: day(tx(2)), e: day(tx(3)), img, rep: tx(6), c: tx(8) });
+      });
+      return out;
+    }
+    const poNo = () => (document.title.match(/\((\d{8}-\d{2,3})\)/) || (document.body.innerText.match(/Purchase Order #(\d{8}-\d{2,3})/)) || [])[1];
+    function savePO(po, b) {
+      const D = GM_getValue('ambData', {}) || {};
+      D.bases = D.bases || {};
+      const base = po.slice(0, 8), B = (D.bases[base] = D.bases[base] || { pos: {} });
+      B.pos = B.pos || {};
+      B.pos[po] = { at: Date.now(), hex: location.pathname.split('/')[2], b };
+      B.at = Date.now(); delete B.none;
+      GM_setValue('ambData', D);
+    }
+    const readPO = async () => {
+      const b = await until(() => (poNo() ? readBookings() : null), 20000);
+      const po = poNo();
+      if (b && po) savePO(po, b);
+      return po;
+    };
+
+    if (!sweep) { // you (or Lisa) looking at a PO: save what its bookings say
+      let last = '';
+      setInterval(() => {
+        if (document.hidden || !isPO() || location.pathname === last) return;
+        last = location.pathname;
+        readPO().catch(() => {});
+      }, 1500);
+      return;
+    }
+
+    // ---- the background check ----
+    const finish = () => { try { sessionStorage.removeItem('wreAmbSweep'); } catch (e) {} GM_setValue('ambSweepEnd', Date.now()); setTimeout(() => { try { window.close(); } catch (e) {} }, 300); };
+    const job = () => GM_getValue('ambJob', null);
+    const setJob = J => GM_setValue('ambJob', J);
+    const rowsNow = () => [...document.querySelectorAll('table tbody tr td:first-child')].map(td => td.textContent.trim()).filter(x => /^\d{8}-\d{2,3}$/.test(x));
+    function goList() {
+      const a = [...document.querySelectorAll('a[href]')].find(x => { try { return /^\/PurchaseOrders\/?$/i.test(new URL(x.href, location.href).pathname); } catch (e) { return false; } });
+      if (a) a.click(); else history.back();
+    }
+    function search(text) {
+      const s = document.querySelector('input[type=search]');
+      const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      s.focus(); set.call(s, text);
+      s.dispatchEvent(new Event('input', { bubbles: true })); s.dispatchEvent(new Event('change', { bubbles: true }));
+      ['keydown', 'keyup'].forEach(t => s.dispatchEvent(new KeyboardEvent(t, { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true })));
+    }
+    function openRow(po) { // Ambrose's rows only open on a full mouse press, not a plain click()
+      const tds = [...document.querySelectorAll('table tbody tr td:first-child')].filter(e => e.textContent.trim() === po);
+      const d = tds.length && (tds[0].querySelector('.pointer-enabled, div') || tds[0]); // the click is listened for on the inner div
+      if (!d) return false;
+      const r = d.getBoundingClientRect(), o = { bubbles: true, cancelable: true, clientX: r.x + 5, clientY: r.y + 5, button: 0, buttons: 1, view: window };
+      ['mousedown', 'mouseup', 'click'].forEach(t => d.dispatchEvent(new MouseEvent(t, o)));
+      return true;
+    }
+    (async () => {
+      await until(() => document.body && (loggedIn() || /login|account/i.test(location.pathname)), 25000);
+      if (!loggedIn()) { GM_setValue('ambErr', { at: Date.now(), msg: 'log into Tradies Admin' }); return finish(); }
+      GM_setValue('ambErr', null);
+      for (let guard = 0; guard < 80; guard++) {
+        const J = job();
+        if (!J || J.doneAt || Date.now() - J.started > 8 * 60000) return finish();
+        if (!J.cur) {
+          const base = (J.queue || []).shift();
+          if (!base) { J.doneAt = Date.now(); setJob(J); return finish(); }
+          J.cur = { base, rows: null, done: [] }; J.retry = 0; setJob(J);
+        }
+        const cur = J.cur;
+        if (isPO()) { // on a PO: read it, then back to the list
+          const po = await readPO();
+          cur.done.push(po || cur.target || '?'); setJob(J);
+          goList(); await until(isList, 10000); await sleep(1000);
+          continue;
+        }
+        if (!isList()) { goList(); if (!(await until(isList, 10000))) location.href = '/PurchaseOrders'; continue; }
+        if (!(await until(() => document.querySelector('input[type=search]') && document.querySelector('div.widget'), 20000))) { location.reload(); return; }
+        const all = [...document.querySelectorAll('div.widget')].find(e => /Show All PO/.test(e.textContent)); // search every PO, not just one tab of them
+        if (all) all.click();
+        await sleep(1500);
+        search(cur.base);
+        await sleep(2500);
+        // wait for the search to land: only this PO's rows, or Ambrose saying there are none
+        if (!(await until(() => { const r = rowsNow(); return r.length ? r.every(x => x.startsWith(cur.base)) : /\b0 items\b/.test(document.body.innerText); }, 8000))) {
+          J.retry = (J.retry || 0) + 1; setJob(J);
+          if (J.retry > 3) { J.cur = null; setJob(J); } // Ambrose won't search it: skip it this round
+          continue;
+        }
+        const rows = rowsNow().filter(r => r.startsWith(cur.base + '-'));
+        if (cur.rows === null) { cur.rows = rows; setJob(J); }
+        const next = cur.rows.find(r => !cur.done.includes(r));
+        if (!next) { // this PO's done: mark it checked, even if Ambrose had nothing under it
+          const D = GM_getValue('ambData', {}) || {};
+          D.bases = D.bases || {};
+          const B = (D.bases[cur.base] = D.bases[cur.base] || { pos: {} });
+          B.at = Date.now(); if (!cur.rows.length) B.none = true;
+          GM_setValue('ambData', D);
+          J.cur = null; setJob(J);
+          continue;
+        }
+        cur.target = next; setJob(J);
+        if (!openRow(next) || !(await until(isPO, 10000))) { cur.done.push(next); setJob(J); }
+      }
+      finish();
+    })().catch(() => finish());
+  }
 
   // ---------- cache (localStorage, small) ----------
   // C.wc[wrid] = task code; C.j[wrid] = {u: last used, n/l/p: {t: read at, d: {date: ...}}}
@@ -251,11 +393,13 @@
       b = document.createElement('span'); b.className = 'wre-npt'; b.innerHTML = '<i>N</i><i>P</i><i>T</i>'; el.appendChild(b);
       // Clicks on the badge are ours: don't open AroFlo's booking popup or start a drag.
       ['mousedown', 'mouseup', 'dblclick'].forEach(t => b.addEventListener(t, e => e.stopPropagation()));
-      b.addEventListener('click', e => { e.stopPropagation(); e.preventDefault(); const i = [...b.children].indexOf(e.target); if (i >= 0 && b.__v) badgeClick(b.__v, 'npt'[i], e.target.className); });
+      b.addEventListener('click', e => { e.stopPropagation(); e.preventDefault(); const i = [...b.children].indexOf(e.target); if (i >= 0 && b.__v) badgeClick(b.__v, 'npta'[i], e.target.className); });
     }
     b.__v = v;
     b.classList.toggle('pend', !!v.pending);
     const t = tipOf(v);
+    while (b.children.length < t.cls.length) { const i = document.createElement('i'); i.textContent = 'A'; b.appendChild(i); }
+    while (b.children.length > t.cls.length) b.lastChild.remove();
     t.cls.forEach((c, i) => { b.children[i].className = c; });
     b.title = t.text;
   }
@@ -279,14 +423,16 @@
       'Timesheet: ' + (s.t === 'm' ? "not all in, OK'd by you" : s.t === true ? 'travel and on site in' : no(s.t, tMiss)) + '\n' +
       'Crew: ' + crewTxt + (isFinite(t) && !v.pending ? '\nChecked ' + hm(t) : '') +
       (!v.pending && [s.n, s.p, s.t].some(x => x === false || x === 'm') ? '\n' + (PHONE ? 'Tap' : 'Click') + ' a red letter to OK it, a blue one to undo' : '');
-    return { cls: [s.n, s.p, s.t].map(cls), text };
+    const a = aState(v), out = [s.n, s.p, s.t].map(cls);
+    if (a && a.s !== undefined) out.push(err && a.s === null ? '' : aCls(v, a, s));
+    return { cls: out, text: a ? text + '\n' + a.line : text };
   }
   function header(jobs, busy) {
     const h = document.querySelector('.fc-header-title');
     if (!h) return;
     let s = h.querySelector('.wre-npt-h');
     if (!s) {
-      s = document.createElement('span'); s.className = 'wre-npt-h'; s.title = 'Recheck notes, photos and timesheets for the weeks in view';
+      s = document.createElement('span'); s.className = 'wre-npt-h'; s.title = 'Recheck notes, photos and timesheets for the weeks in view, and Ambrose for the A letters';
       s.addEventListener('click', e => {
         e.stopPropagation();
         if (e.target.closest('.wre-npt-tok')) setToken(); // the "set Todoist token" link
@@ -294,12 +440,15 @@
       });
       (h.querySelector('h2') || h).appendChild(s);
     }
-    let miss = 0, unk = 0;
-    Object.values(jobs).flat().forEach(v => { if (v.pending) return; const x = status(v); if (errs[v.ev.wrid] || [x.n, x.p, x.t].includes(null)) unk++; else if (!(x.n && x.p && x.t)) miss++; });
+    let miss = 0, unk = 0, aRed = 0;
+    Object.values(jobs).flat().forEach(v => { if (v.pending) return; const x = status(v); if (errs[v.ev.wrid] || [x.n, x.p, x.t].includes(null)) unk++; else if (!(x.n && x.p && x.t)) miss++;
+      const a = aState(v); if (a && a.s === false && aCls(v, a, x) === 'r') aRed++; });
     const list = paused() ? 'issue list paused' : sy.msg;
     const tok = !token() || /token not accepted/.test(sy.msg);
     s.innerHTML = 'NPT ' + (busy ? 'checking...' : miss ? '<b>' + miss + ' missing</b>' : 'all in') + (unk && !busy ? ', ' + unk + " couldn't check" : '') + ' &#8635;' +
+      (aRed ? ' &middot; A <b>' + aRed + ' to upload</b>' : '') +
       (list && token() ? ' <small class="' + (sy.bad ? 'bad' : '') + '">' + esc(list) + '</small>' : '') +
+      (aMsg ? ' <small class="' + (/not updated/.test(aMsg) ? 'bad' : '') + '">' + esc(aMsg) + '</small>' : '') +
       (tok ? ' <a class="wre-npt-tok" href="#" title="Turn on the issue list">' + (token() ? 'Fix Todoist token' : 'Set Todoist token') + '</a>' : '');
   }
 
@@ -333,6 +482,7 @@
     header(lastJobs, queue.size + running > 0);
     if (!queue.size && !running) { save(); sync(); } // save keeps "last looked at" fresh; sync covers a view that's all from cache
     pump();
+    maybeSweep(!!force);
   }
 
   function pump() {
@@ -452,7 +602,10 @@
   async function loadList(fresh) {
     const now = Date.now(), my = ++loadSeq;
     if (!fresh && tdState && now - tdState.at < 60000) return tdState;
-    const open = new Map(), done = new Map();
+    const open = new Map(), done = new Map(), aOpen = new Map(), aDone = new Map();
+    let acache = null, acacheId = null, acacheAt = 0;
+    const aTake = (t, into) => { const r = aRec(t); if (r) into.set(r.k, r); else if (into === aOpen && String(t.description || '').startsWith(ACACHE + '\n')) {
+      try { const o = JSON.parse(t.description.slice(ACACHE.length + 1)); acacheAt = o._at || 0; delete o._at; acache = unpackCache(o); } catch (e) {} acacheId = t.id; } };
     // Issues live on the issue list (the lads') and in your follow ups (yours); only tasks in the issue shape count.
     const rec = t => { const m = (t.description || '').match(DESC); if (!m) return null; const o = (t.description || '').match(OKL);
       return { k: ikey(m[2], m[3], m[4].trim()), id: t.id, pid: t.project_id, missing: m[5].trim(), ok: splitL(o && o[1]), jn: m[1] }; };
@@ -461,7 +614,7 @@
       let cur = null, n = 0;
       do {
         const j = await td('GET', 'tasks?project_id=' + P + '&limit=200' + (cur ? '&cursor=' + encodeURIComponent(cur) : ''));
-        (j && j.results || []).forEach(t => { const r = rec(t); if (r) open.set(r.k, Object.assign(r, { pid: r.pid || P })); });
+        (j && j.results || []).forEach(t => { const r = rec(t); if (r) open.set(r.k, Object.assign(r, { pid: r.pid || P })); else if (P === ISSUES) aTake(t, aOpen); });
         cur = j && j.next_cursor; n++;
       } while (cur && n < 5);
     }
@@ -470,7 +623,7 @@
       let cur = null, n = 0;
       do {
         const j = await td('GET', 'tasks/completed/by_completion_date?project_id=' + P + '&since=' + since + '&until=' + until + '&limit=200' + (cur ? '&cursor=' + encodeURIComponent(cur) : ''));
-        (j && j.items || []).forEach(t => { const r = rec(t); if (r && !open.has(r.k)) done.set(r.k, Object.assign(r, { pid: r.pid || P })); });
+        (j && j.items || []).forEach(t => { const r = rec(t); if (r && !open.has(r.k)) done.set(r.k, Object.assign(r, { pid: r.pid || P })); else if (!r && P === ISSUES) { const a = aRec(t); if (a && !aOpen.has(a.k)) aDone.set(a.k, a); } });
         cur = j && j.next_cursor; n++;
       } while (cur && n < 5);
     }
@@ -481,7 +634,11 @@
     open.forEach((r, k) => { if (r.ok.length) OV.set(k, new Set(r.ok)); });
     done.forEach((r, k) => OV.set(k, new Set(splitL(r.missing).concat(r.ok))));
     applyLocal();
-    return (tdState = { at: now, open, done });
+    AOK.clear();
+    aOpen.forEach((r, k) => { if (r.ok) AOK.add(k); });
+    aDone.forEach((r, k) => AOK.add(k));
+    applyALocal();
+    return (tdState = { at: now, open, done, aOpen, aDone, acache, acacheId, acacheAt });
   }
 
   async function sync() {
@@ -493,7 +650,7 @@
       const want = new Map(); // key -> {v, missing, early}
       const all = Object.values(lastJobs).flat().filter(v => !v.pending);
       // Anything red in view: read the list so OKs you made elsewhere (the dashboard, your phone) show here.
-      if (all.some(v => { const r = raw(v); return r.n === false || r.p === false || r.t === false; })) {
+      if (all.some(v => { const r = raw(v); return r.n === false || r.p === false || r.t === false; }) || all.some(v => isAmb(v.ev))) {
         const was = tdState && tdState.at; await loadList(); if (tdState.at !== was) all.forEach(paint);
       }
       all.forEach(v => {
@@ -505,6 +662,7 @@
         // Before 5pm today's misses aren't added yet, but an issue that's already there (e.g. from an OK) still updates and ticks off.
         want.set(ikey(v.ev.wrid, v.date, v.who), { v, missing, early: v.today && now.getHours() < LIST_HOUR });
       });
+      if (all.some(v => isAmb(v.ev))) setTimeout(ambSync, 0);
       if (!want.size) {
         if (/token saved/.test(sy.msg)) { await loadList(); sy.bad = false; sy.msg = 'list on ' + hm(Date.now()); } // proves the token works
         return;
@@ -552,11 +710,241 @@
     }
   }
 
+  // ---------- A: photos or the report up on Ambrose (you and Lisa do these, not the lads) ----------
+  // Ambrose jobs get a 4th letter. Each visit is matched to its Ambrose booking: same PO, a booking whose dates
+  // cover the visit day, the schedule note (iso, fit off, report...) breaking a tie or covering moved dates.
+  // Green: 2 or more photos on that booking in Tradies Admin, or the report done. Orange: waiting on the lads'
+  // photos (and notes, for a report), or it's today. Red: theirs are in but Ambrose isn't. No letter: no booking matches.
+  // Red ones from before today go in the "Ambrose uploads" section of WRE daily check (the panel's Ambrose tab).
+  const SEC = '6hp9wgvpfRVf5mm6';          // Todoist section: Ambrose uploads, in WRE daily check
+  const A_DAYS = 30;                       // visits from the last 30 days get chased
+  const A_EVERY = 2 * 36e5;                // a PO is looked at again on Ambrose after 2 hours
+  const A_GAP = 30 * 60000;                // the background check runs at most every 30 min (unless you hit recheck)
+  const AMB_URL = 'https://tradiesadmin.ambroseconstruct.com.au/PurchaseOrders#wre-sweep';
+  const ADESC = /^JN (\S*) \| wrid (\d+) \| visit (\d{4}-\d\d-\d\d) \| PO (\S+) \| ([^|\n]+?) \| ambrose: (\w+)$/m;
+  const ACACHE = 'ambrose-cache';          // one task in the section holds what Ambrose said, so your phone sees it too
+  const AOK = new Set();                   // wrid|date you OK'd (or ticked off)
+  const ALOCAL = new Map();                // your clicks, held 2 min over what Todoist sends back
+  let aMsg = '', aSyncing = false, sweepTab = null;
+
+  const isAmb = ev => /\bAmbrose\b/i.test(strip(ev.title) + ' ' + (C.ad[ev.wrid] || ''));
+  const poBase = ev => { const t = strip(ev.title); const m = t.match(/Ambrose[^|]*?\b(\d{8})\b/i) || t.match(/\b(20\d{6})\b/); return m ? m[1] : null; };
+  const noteOf = ev => strip([ev.note, ev.notes, ev.schedulenote].filter(Boolean).join(' '));
+  // Booking words: [in the AroFlo note, in the Ambrose booking type]
+  const KW = [[/\biso|isolat/i, /isolat/i], [/fit ?off|reconn|re-?con\b/i, /fit ?off|reconn/i], [/report/i, /report/i],
+    [/install/i, /install/i], [/shroud/i, /shroud/i], [/pole|fuse/i, /pole|fuse/i], [/make ?safe/i, /make ?safe/i]];
+
+  // What Ambrose said: this PC's own reads, or the copy in Todoist (newer wins per PO)
+  // (worked out once, then again only when either side changes)
+  let adMemo = null, adOwn = null, adTd = undefined;
+  function ambData() {
+    const td0 = tdState && tdState.acache;
+    if (adMemo && adOwn && adTd === td0) return adMemo;
+    adOwn = adOwn || (GM_getValue('ambData', {}) || {}).bases || {};
+    const out = Object.assign({}, td0 || {});
+    for (const b in adOwn) if (!out[b] || (adOwn[b].at || 0) >= (out[b].at || 0)) out[b] = adOwn[b];
+    adTd = td0;
+    return (adMemo = out);
+  }
+  const flat = B => { const all = []; for (const po in (B.pos || {})) (B.pos[po].b || []).forEach(b => all.push(Object.assign({ po }, b))); return all; };
+  function bookingOf(v) {
+    const base = poBase(v.ev);
+    if (!base) return { nob: 'no PO number on the task' };
+    const B = ambData()[base];
+    if (!B) return { unk: true, base };
+    const all = flat(B), kw = KW.filter(([a]) => a.test(noteOf(v.ev)));
+    const pick = list => {
+      if (list.length === 1) return list[0];
+      const k = list.filter(b => kw.some(([, t]) => t.test(b.t)));
+      return k.length === 1 ? k[0] : null;
+    };
+    const onDay = all.filter(b => b.s && b.s <= v.date && v.date <= (b.e || b.s));
+    let b = onDay.length ? pick(onDay) : null;
+    if (!b && kw.length) b = pick(all.filter(x => kw.some(([, t]) => t.test(x.t))));
+    return b ? { b, base, at: B.at } : { nob: 'no Ambrose booking that day', base, at: B.at };
+  }
+  const needOf = b => (b.img !== null && b.img !== undefined ? 'photos' : b.rep && !/^N\/?A$/i.test(b.rep) ? 'report' : '');
+  const bookingOk = b => { const n = needOf(b); return n === 'photos' ? b.img >= 2 : n === 'report' ? /done|submit/i.test(b.rep) : true; };
+  const akey = v => v.ev.wrid + '|' + v.date;
+
+  // null = not an Ambrose job (no letter). s: true in, 'm' OK'd by you, false not done, null not checked yet, undefined no booking (no letter)
+  function aState(v) {
+    if (!isAmb(v.ev)) return null;
+    const k = akey(v), m = bookingOf(v), okd = AOK.has(k);
+    if (m.unk) {
+      const e = GM_getValue('ambErr', null);
+      return { k, s: null, base: m.base, line: 'Ambrose: ' + (e && e.at && Date.now() - e.at < A_EVERY ? e.msg + ' so it can be checked' : PHONE ? 'not checked yet (the PC checks it)' : 'not checked yet') };
+    }
+    if (!m.b) return { k, s: undefined, base: m.base, line: 'Ambrose: ' + m.nob };
+    const b = m.b, need = needOf(b), ok = bookingOk(b);
+    const what = need === 'photos' ? (b.img ? b.img + ' photo' + (b.img > 1 ? 's' : '') + ' up' + (ok ? '' : ', needs 2') : 'no photos up')
+      : need === 'report' ? (ok ? 'report submitted' : 'report not submitted') : 'nothing needed';
+    return { k, s: ok ? true : okd ? 'm' : false, base: m.base, b, need, at: m.at,
+      line: 'Ambrose: ' + b.t + ' (' + b.po + '), ' + what + (okd && !ok ? ", OK'd by you" : '') + (m.at ? ', checked ' + agoTxt(m.at) : '') };
+  }
+  const agoTxt = t => { const d = new Date(t); return ymd(d) === ymd(new Date()) ? hm(t) : dmS(ymd(d)) + ' ' + hm(t); };
+  // Colour for the A: orange until the lads' side is in (and never red on the day), red once you're the hold up
+  function aCls(v, a, s) {
+    const x = a.s;
+    if (x === null) return '';
+    if (x === true) return 'g';
+    if (x === 'm') return 'm';
+    const ready = a.need === 'report' ? s.n === true && s.p === true : s.p === true;
+    return v.pending || v.today || !ready ? 'a' : 'r';
+  }
+
+  const aDesc = (jn, wrid, date, po, type, need, ok) => 'JN ' + jn + ' | wrid ' + wrid + ' | visit ' + date + ' | PO ' + po + ' | ' + String(type).replace(/[|\n]/g, ' ') + ' | ambrose: ' + (need || 'photos') + (ok ? '\nok: ambrose' : '');
+  const aTitle = (v, a) => street(v.ev) + ' (' + dmS(v.date) + '): ' + (a.need === 'report' ? 'report' : 'photos') + ' to Ambrose, ' + a.b.t;
+  const aRec = t => { const m = (t.description || '').match(ADESC); if (!m) return null;
+    return { k: m[2] + '|' + m[3], id: t.id, jn: m[1], wrid: m[2], date: m[3], po: m[4], type: m[5].trim(), need: m[6], ok: /^ok: .*ambrose/m.test(t.description || '') }; };
+  // The copy of what Ambrose said, kept small: {base: {at, none, pos: {po: {b: [[type, status, start, end, img, rep]]}}}}
+  const packCache = D => { const o = {}; for (const base in D) { const B = D[base], P = {}; for (const po in (B.pos || {})) P[po] = { b: (B.pos[po].b || []).map(b => [b.t, b.st, b.s, b.e, b.img, b.rep]) }; o[base] = { at: B.at, none: B.none ? 1 : undefined, pos: P }; } return o; };
+  const unpackCache = o => { const D = {}; for (const base in (o || {})) { const B = o[base], P = {}; for (const po in (B.pos || {})) P[po] = { b: (B.pos[po].b || []).map(x => ({ t: x[0], st: x[1], s: x[2], e: x[3], img: x[4], rep: x[5] })) }; D[base] = { at: B.at, none: !!B.none, pos: P }; } return D; };
+  function applyALocal() {
+    const now = Date.now();
+    for (const [k, o] of ALOCAL) { if (now - o.at > LOCAL_MS) { ALOCAL.delete(k); continue; } if (o.on) AOK.add(k); else AOK.delete(k); }
+  }
+
+  // Keep the Ambrose uploads section in step: add red ones from before today, tick off what's now up on Ambrose.
+  async function ambSync() {
+    if (!token() || paused() || aSyncing || busyOk) return;
+    const vis = Object.values(lastJobs).flat().filter(v => !v.pending && isAmb(v.ev));
+    aSyncing = true;
+    try {
+      const L = await loadList();
+      const today = ymd(new Date()), oldest = ymd(new Date(Date.now() - A_DAYS * 864e5)), seen = new Set();
+      let added = 0, closed = 0;
+      for (const v of vis) {
+        const a = aState(v);
+        if (!a || !a.k || seen.has(a.k)) continue;
+        seen.add(a.k);
+        if (ALOCAL.has(a.k) || errs[v.ev.wrid] || v.date < oldest) continue;
+        const ex = L.aOpen.get(a.k);
+        if (!ex && !L.aDone.has(a.k) && v.date < today && a.s === false && aCls(v, a, status(v)) === 'r') {
+          const t = await td('POST', 'tasks', { project_id: ISSUES, section_id: SEC, content: aTitle(v, a), description: aDesc(jnOf(v.ev), v.ev.wrid, v.date, a.b.po, a.b.t, a.need, false) });
+          if (t && t.id) L.aOpen.set(a.k, aRec(t) || { id: t.id });
+          added++;
+        } else if (ex && a.s === true) {
+          await td('POST', 'comments', { task_id: ex.id, content: dmS(today) + ': sorted, ' + a.line.replace(/^Ambrose: /, '') });
+          await td('POST', 'tasks/' + ex.id + '/close');
+          L.aOpen.delete(a.k); L.aDone.set(a.k, ex); closed++;
+        }
+      }
+      // Ones on the list that aren't on screen: check them against what Ambrose said
+      const D = ambData();
+      for (const [k, r] of [...L.aOpen]) {
+        if (seen.has(k) || !r.po) continue;
+        const B = D[r.po.slice(0, 8)], b = B && flat(B).find(x => x.po === r.po && x.t === r.type);
+        if (b && bookingOk(b)) {
+          await td('POST', 'comments', { task_id: r.id, content: dmS(today) + ': sorted, up on Ambrose' });
+          await td('POST', 'tasks/' + r.id + '/close');
+          L.aOpen.delete(k); L.aDone.set(k, r); closed++;
+        }
+      }
+      if (!PHONE) await writeCache(L);
+      aMsg = added || closed ? 'Ambrose list: ' + [added && added + ' added', closed && closed + ' ticked off'].filter(Boolean).join(', ') : '';
+    } catch (e) {
+      aMsg = 'Ambrose list not updated: ' + String(e.message || e).slice(0, 40);
+    } finally {
+      aSyncing = false;
+      header(lastJobs, queue.size + running > 0);
+    }
+  }
+  // This PC's reads go up to Todoist (one task in the section) so the phone shows the same A
+  async function writeCache(L) {
+    const own = (GM_getValue('ambData', {}) || {}).bases || {};
+    const newest = Math.max(0, ...Object.values(own).map(B => B.at || 0));
+    if (!newest || newest <= (L.acacheAt || 0)) return;
+    const cut = Date.now() - 45 * 864e5, keep = {};
+    for (const base in own) if ((own[base].at || 0) > cut) keep[base] = own[base];
+    const description = ACACHE + '\n' + JSON.stringify(Object.assign({ _at: newest }, packCache(keep)));
+    if (L.acacheId) await td('POST', 'tasks/' + L.acacheId, { description });
+    else { const t = await td('POST', 'tasks', { project_id: ISSUES, section_id: SEC, content: 'Ambrose status (calendar script data, leave this one)', description }); L.acacheId = t && t.id; }
+    L.acacheAt = newest;
+  }
+
+  // OK the A by hand (e.g. Ambrose didn't want photos for this one), or take the OK back
+  async function aClick(v, cls) {
+    if (!/\b(r|a|m)\b/.test(cls) || busyOk || v.pending) return;
+    if (!token()) { W.alert('Set the Todoist token first (link next to the dates up top), so the OK can be saved.'); return; }
+    const a = aState(v);
+    if (!a || !a.b) return;
+    const on = cls !== 'm', where = street(v.ev) + ' (' + dmS(v.date) + ')';
+    if (!W.confirm(on ? 'OK the Ambrose ' + (a.need || 'photos') + ' for ' + where + ' without them?' : 'Take the Ambrose OK off ' + where + '?')) return;
+    busyOk = true; sy.msg = 'saving...'; sy.bad = false;
+    const had = AOK.has(a.k);
+    ALOCAL.set(a.k, { on, at: Date.now() }); applyALocal(); repaint();
+    try {
+      while (syncing || aSyncing) await new Promise(r => setTimeout(r, 150));
+      const L = await loadList(true), today = ymd(new Date());
+      let rec = L.aOpen.get(a.k), closed = false;
+      if (!rec && L.aDone.has(a.k)) { rec = L.aDone.get(a.k); closed = true; }
+      if (!rec && on) {
+        const t = await td('POST', 'tasks', { project_id: ISSUES, section_id: SEC, content: aTitle(v, a), description: aDesc(jnOf(v.ev), v.ev.wrid, v.date, a.b.po, a.b.t, a.need, false) });
+        rec = { id: t.id };
+      }
+      if (rec) {
+        await td('POST', 'comments', { task_id: rec.id, content: dmS(today) + ': ' + (on ? "Ambrose OK'd by Ethan without them (calendar)" : 'Ambrose OK taken back (calendar)') });
+        if (on) {
+          await td('POST', 'tasks/' + rec.id, { description: aDesc(rec.jn || jnOf(v.ev), v.ev.wrid, v.date, a.b.po, a.b.t, a.need, true) });
+          if (!closed) await td('POST', 'tasks/' + rec.id + '/close');
+        } else {
+          if (closed) await td('POST', 'tasks/' + rec.id + '/reopen');
+          await td('POST', 'tasks/' + rec.id, { description: aDesc(rec.jn || jnOf(v.ev), v.ev.wrid, v.date, a.b.po, a.b.t, a.need, false) });
+        }
+      }
+      ALOCAL.get(a.k).at = Date.now();
+      sy.msg = (on ? "Ambrose OK'd " : 'Ambrose OK taken off ') + hm(Date.now());
+      busyOk = false; tdState = null;
+      try { await loadList(true); } catch (e) {}
+    } catch (e) {
+      ALOCAL.delete(a.k); if (had) AOK.add(a.k); else AOK.delete(a.k);
+      sy.bad = true; sy.msg = "didn't save: " + String(e.message || e).slice(0, 40);
+      busyOk = false; tdState = null;
+    }
+    repaint();
+  }
+
+  // The background check (PC only): open Tradies Admin in a background tab for the POs that need a look
+  function maybeSweep(force) {
+    if (PHONE || !cal) return;
+    const J = GM_getValue('ambJob', null), now = Date.now();
+    if (J && !J.doneAt && now - J.started < 8 * 60000) return; // one's already going
+    if (!force && now - (GM_getValue('ambLast', 0) || 0) < A_GAP) return;
+    const today = ymd(new Date()), oldest = ymd(new Date(now - A_DAYS * 864e5)), D = ambData(), bases = new Set();
+    const stale = base => force || !D[base] || now - (D[base].at || 0) > A_EVERY;
+    Object.values(lastJobs).flat().forEach(v => {
+      if (v.date < oldest || v.date > today) return;
+      const a = aState(v);
+      if (!a || a.s === true || a.s === 'm' || !a.base) return;
+      if (stale(a.base)) bases.add(a.base);
+    });
+    if (tdState) for (const r of tdState.aOpen.values()) if (r.po && stale(r.po.slice(0, 8))) bases.add(r.po.slice(0, 8));
+    if (!bases.size) return;
+    GM_setValue('ambLast', now);
+    GM_setValue('ambJob', { queue: [...bases], started: now, cur: null });
+    try { if (sweepTab && !sweepTab.closed) sweepTab.close(); } catch (e) {}
+    sweepTab = GM_openInTab(AMB_URL, { active: false, insert: true, setParent: true });
+    const mine = sweepTab;
+    setTimeout(() => { try { if (mine && !mine.closed) mine.close(); } catch (e) {} }, 8 * 60000);
+    aMsg = 'checking Ambrose (' + bases.size + ' PO' + (bases.size > 1 ? 's' : '') + ')';
+    header(lastJobs, queue.size + running > 0);
+  }
+  GM_addValueChangeListener('ambData', (n, o, val, remote) => { adOwn = null; adMemo = null; if (remote && cal) repaint(); });
+  GM_addValueChangeListener('ambErr', (n, o, val, remote) => { if (remote && cal) repaint(); });
+  GM_addValueChangeListener('ambSweepEnd', (n, o, val, remote) => {
+    if (!remote || !cal) return;
+    try { if (sweepTab && !sweepTab.closed) sweepTab.close(); } catch (e) {}
+    aMsg = ''; repaint(); ambSync();
+  });
+  setInterval(() => { if (!document.hidden && cal) maybeSweep(false); }, 10 * 60000);
+
   // ---------- OK'ing a missing item by hand, from the calendar ----------
   // Click a red letter: it's OK'd (e.g. turned away at site, so no photos). Click a blue one: the OK comes off.
   // It's saved on the visit's issue in Todoist, so the dashboard shows it and an OK made there shows here.
   let busyOk = false;
   async function badgeClick(v, k, cls) {
+    if (k === 'a') return aClick(v, cls);
     if (!/\b(r|a|m)\b/.test(cls) || busyOk || v.pending) return;
     if (!token()) { W.alert('Set the Todoist token first (link next to the dates up top), so the OK can be saved.'); return; }
     const item = ITEM[k], where = street(v.ev) + ' (' + dmS(v.date) + ')';
@@ -663,12 +1051,12 @@
     const box = document.createElement('div'); box.className = 'wre-day';
     const draw = () => {
       const t = tipOf(v);
-      box.innerHTML = '<span class="wre-npt' + (v.pending ? ' pend' : '') + '">' + 'NPT'.split('').map((l, i) => '<i class="' + t.cls[i] + '">' + l + '</i>').join('') + '</span><div class="tx">' + esc(t.text) + '</div>';
+      box.innerHTML = '<span class="wre-npt' + (v.pending ? ' pend' : '') + '">' + 'NPTA'.slice(0, t.cls.length).split('').map((l, i) => '<i class="' + t.cls[i] + '">' + l + '</i>').join('') + '</span><div class="tx">' + esc(t.text) + '</div>';
     };
     draw();
     box.addEventListener('click', e => { // OK / undo straight from the popup, same as the PC badge
       const i = [...box.querySelectorAll('.wre-npt i')].indexOf(e.target);
-      if (i >= 0) badgeClick(v, 'npt'[i], e.target.className).then(draw, draw);
+      if (i >= 0) badgeClick(v, 'npta'[i], e.target.className).then(draw, draw);
     });
     curBox = box;
     let tries = 0;
