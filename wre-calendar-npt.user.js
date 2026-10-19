@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Calendar NPT
 // @namespace    wre
-// @version      3.0.1
+// @version      3.0.2
 // @description  Notes, photos and timesheet badges on the AroFlo calendar for the days in view, kept in step with the WRE daily check issue list in Todoist, plus an A letter on Ambrose jobs for photos or the report being up on Ambrose
 // @match        https://office.aroflo.com/ims/Site/Calendar/*
 // @match        https://tradiesadmin.ambroseconstruct.com.au/*
@@ -168,19 +168,30 @@
         const cur = J.cur;
         if (isPO()) { // on a PO: read it, then back to the list
           const po = await readPO();
-          cur.done.push(po || cur.target || '?'); setJob(J);
+          if (cur.target && po !== cur.target) { // Ambrose opened a different PO (its list was still moving): try again, 3 goes
+            cur.miss = (cur.miss || 0) + 1;
+            if (cur.miss >= 3) { cur.done.push(cur.target); cur.miss = 0; }
+          } else { cur.done.push(po || cur.target || '?'); cur.miss = 0; }
+          setJob(J);
           goList(); await until(isList, 10000); await sleep(1000);
           continue;
         }
         if (!isList()) { goList(); if (!(await until(isList, 10000))) location.href = '/PurchaseOrders'; continue; }
         if (!(await until(() => document.querySelector('input[type=search]') && document.querySelector('div.widget'), 20000))) { location.reload(); return; }
-        const all = [...document.querySelectorAll('div.widget')].find(e => /Show All PO/.test(e.textContent)); // search every PO, not just one tab of them
-        if (all) all.click();
-        await sleep(1500);
+        // Search every PO, not just the tab Ambrose opens on (Awaiting Acceptance). Wait for Show All to be the
+        // active tab and its list to be in before searching, or the search lands on the wrong list.
+        const allTab = () => [...document.querySelectorAll('div.widget')].find(e => /Show All PO/.test(e.textContent));
+        const items = () => { const m = document.body.innerText.match(/\b(\d+) items\b/); return m ? +m[1] : -1; };
+        if (allTab() && !/active-widget/.test(allTab().className)) {
+          allTab().click();
+          await until(() => /active-widget/.test(allTab().className) && items() > 0 && rowsNow().length > 0, 10000);
+          await sleep(800);
+        }
         search(cur.base);
-        await sleep(2500);
-        // wait for the search to land: only this PO's rows, or Ambrose saying there are none
-        if (!(await until(() => { const r = rowsNow(); return r.length ? r.every(x => x.startsWith(cur.base)) : /\b0 items\b/.test(document.body.innerText); }, 8000))) {
+        await sleep(1500);
+        // wait for the search to land: the pager count matches the rows and they're all this PO, or Ambrose has none
+        const landed = () => { const r = rowsNow(), n = items(); return r.length ? n === r.length && r.every(x => x.startsWith(cur.base)) : n === 0; };
+        if (!(await until(landed, 8000)) || (await sleep(700), !landed())) {
           J.retry = (J.retry || 0) + 1; setJob(J);
           if (J.retry > 3) { J.cur = null; setJob(J); } // Ambrose won't search it: skip it this round
           continue;
