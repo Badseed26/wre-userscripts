@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.23
+// @version      0.9.24
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -539,7 +539,7 @@ if (ON_AF) {
   const jobs = () => gget('wfJobs', []);
   const saveJob = j => { const q = jobs(); const i = q.findIndex(x => x.id == j.id); if (i >= 0) q[i] = j; else q.push(j); gset('wfJobs', q); };
   const getJob = id => jobs().find(x => x.id == id);
-  const go = href => { later(() => { location.href = href; }, 50); };
+  const go = href => { ss('wfGoing', now()); later(() => { location.href = href; }, 50); };
   const HOME = '/ims/Site/Home/index.cfm#wre-filer';
   const opDone = (op, res) => { const j = getJob(op.jobId); if (j) { j.res = Object.assign(j.res || {}, res); j.tries = 0; saveJob(j); } ss('wfOp', null); go(HOME); };
 
@@ -970,6 +970,14 @@ if (ON_AF) {
     await waitFor(() => !!document.body, 10000); if (!IS_FILER) return; mountChip();
     status('starting');
     { const seenIds = new Set(), seenKeys = new Set(); const q = jobs().filter(j => { if (seenIds.has(j.id) || (j.status == 'new' && seenKeys.has(j.key))) return false; seenIds.add(j.id); if (j.status == 'new') seenKeys.add(j.key); return true; }); if (q.length != jobs().length) { log('Cleared ' + (jobs().length - q.length) + ' doubled up job(s)'); gset('wfJobs', q); } }
+    // Stand down if something other than the filer moved this tab (19/10). A Saturday test tab got picked up by another Claude
+    // session browsing AroFlo: it still carried the filer flag, so the filer ran in a tab someone else was driving, fought it for
+    // pages and made junk JN 9470. A filer page load is always the filer's own (an op on the go, or go() in the last 2 min), the
+    // tab being opened with #wre-filer, or an F5. Anything else and this tab stops being a filer tab.
+    { const nt = ((performance.getEntriesByType && performance.getEntriesByType('navigation')[0]) || {}).type || '';
+      const ours = /#wre-filer/.test(location.hash) || !!ss('wfOp') || now() - (ss('wfGoing') || 0) < 120e3 || nt == 'reload' || /login|signin|logon/i.test(location.pathname + ' ' + document.referrer); // signing back in after a timeout counts as ours
+      ss('wfGoing', null);
+      if (!ours) { try { sessionStorage.removeItem('wfRole'); } catch (e) {} log('This tab got moved by something else (' + document.title.slice(0, 50) + '), so it stopped being a filer tab'); if (chip) chip.remove(); return; } }
     if (await resumeOp()) return;
     if (!/Site\/Home/.test(location.pathname)) { go(HOME); return; }
     every(tick, 20e3); later(tick, 3000); every(pushLog, 30e3);
