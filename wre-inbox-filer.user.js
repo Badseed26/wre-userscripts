@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.32
+// @version      0.9.33
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -645,16 +645,25 @@ if (ON_AF) {
       return fin(op, { upErr: op.name + ' never showed in the task\'s Documents after 3 goes' }); }
     if (!/Task - AroFlo/.test(document.title) && !(await waitFor(() => /Task - AroFlo/.test(document.title), 20000))) return fin(op, { upErr: 'task page did not open' });
     if (hasDoc(await taskDocs(), op.name)) return fin(op, { up: op.name }); // already on the task (a retry), don't double it
+    // AroFlo reports a failed upload step through sendSnafu: keep a line of what it saw (19/10)
+    if (W.sendSnafu && !W.sendSnafu.wf) { const o0 = W.sendSnafu; W.sendSnafu = function (d) { try { log('AroFlo upload snafu: ' + JSON.stringify({ status: d && d.status, say: String((d && (d.errormessage || d.responseText)) || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 160) })); } catch (e) {} return o0.apply(this, arguments); }; W.sendSnafu.wf = 1; }
     const add = document.querySelector('li.btnUploadNew'); if (!add) return fin(op, { upErr: 'no Add Documents & Photos on the page' });
     add.click();
     if (!(await waitFor(() => !!document.getElementById('s3FileUpload'), 10000))) return fin(op, { upErr: 'upload box didn\'t open' });
     const inp = document.getElementById('s3FileUpload'); const bin = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
     const dt = new DataTransfer(); dt.items.add(new File([bin], op.name, { type: op.type || 'application/pdf' })); inp.files = dt.files; inp.dispatchEvent(new Event('change', { bubbles: true }));
     const box = () => inp.closest('.ui-dialog') || document.body;
-    const ok = await waitFor(() => { const t = box().innerText; return t.includes(op.name) && !/PROCESSING|UPLOADING/i.test(t); }, 60000);
-    if (!ok) return fin(op, { upErr: 'upload didn\'t finish in a minute' });
-    // give it a few seconds to settle and make sure it hasn't gone back to uploading before Done
-    await sleep(4000); if (!(await waitFor(() => !/PROCESSING|UPLOADING/i.test(box().innerText), 60000))) return fin(op, { upErr: 'upload didn\'t finish in a minute' });
+    // Follow AroFlo's own upload box (jquery.imsDocUpload): each file gets a progress row whose statuskey goes PROCESS, START,
+    // UPLOAD, then COMPLETE or FAILED (shown as Processing ..., Starting ..., Uploading ..., Complete, Failed). The old wait
+    // only knew Processing and Uploading, so it could press Done at Starting and never knew a Failed from a Complete (19/10).
+    // Only Done on COMPLETE; anything else says exactly where the box got to.
+    const row = () => [...box().querySelectorAll('.uploadProgressObj')].find(r => !r.classList.contains('uploadProgressObjTemplate') && r.innerText.includes(op.name.replace(/\.[a-z0-9]+$/i, '')));
+    const state = () => { const r = row(); if (!r) return ''; return String((jq() && jq()(r).data('statuskey')) || '') || ((r.querySelector('.uploadProgressBarText') || {}).innerText || '').trim(); };
+    const trail = []; let lastChange = now(); const t0 = now();
+    while (now() - t0 < 180000) { const st = state() || (row() ? 'row' : 'no row'); if (st != trail[trail.length - 1]) { trail.push(st); lastChange = now(); } if (/^(COMPLETE|FAILED)$/.test(st) || now() - lastChange > 60000) break; await sleep(1000); }
+    const where = trail.join(' > '); const extra = (box().innerText.match(/(error|failed|not allowed|too large|not supported|snafu)[^.]{0,120}/i) || [''])[0].trim();
+    if (trail[trail.length - 1] != 'COMPLETE') return fin(op, { upErr: 'AroFlo\'s upload box got to "' + where + '"' + (extra ? ' (' + extra + ')' : '') + ', so Done wasn\'t pressed' });
+    log('Upload of ' + op.name + ': box went ' + where);
     const done = [...box().querySelectorAll('button,a')].find(b => /^\s*Done\s*$/i.test(b.innerText || '')); if (!done) return fin(op, { upErr: 'no Done button' });
     op.fired = true; ss('wfOp', op); done.click(); await sleep(4000); return opUpload(op);
   }
@@ -858,7 +867,7 @@ if (ON_AF) {
   const scopeText = x => (x.blocks || []).map(b => (b.h ? '\n' + b.h.toUpperCase() : '') + (b.rooms || []).map(r => '\n' + r.r + (r.items || []).map(i => '\n  * ' + (typeof i == 'string' ? i : i.t)).join('')).join('') + (b.items || []).map(i => '\n  * ' + (typeof i == 'string' ? i : i.t)).join('')).join('\n').slice(0, 2500);
   async function runJob(job) {
     const x = job.x, R = job.res || {}, plan = job.plan || [];
-    const fin = async (lines, err) => { job.status = err ? 'error' : 'done'; job.plan = lines; saveJob(job); if (job.dry) await dryNote(job, job.test ? lines.concat(readOut(job, lines)) : x.cov ? lines.concat(['Line check: ' + covText(x.cov)]) : lines); if (job.pdfKey && !err) gdel(job.pdfKey); if (!err) (job.atts || []).forEach(a => gdel(a.key)); if (!err && job.retryTask) { try { await closeFu(job.retryTask); } catch (e) {} delete job.retryTask; saveJob(job); } log((err ? 'Error: ' : 'Done: ') + job.info.subject.slice(0, 60) + ' | ' + lines.join(' | ')); };
+    const fin = async (lines, err) => { job.status = err ? 'error' : 'done'; job.plan = lines; saveJob(job); if (job.dry) await dryNote(job, job.test ? lines.concat(readOut(job, lines)) : x.cov ? lines.concat(['Line check: ' + covText(x.cov)]) : lines); if (job.pdfKey && !err && !R.upErr) gdel(job.pdfKey); if (!err) (job.atts || []).forEach((a, i) => { if (!R['x' + i + 'Err']) gdel(a.key); }); if (!err && job.retryTask) { try { await closeFu(job.retryTask); } catch (e) {} delete job.retryTask; saveJob(job); } log((err ? 'Error: ' : 'Done: ') + job.info.subject.slice(0, 60) + ' | ' + lines.join(' | ')); };
     const nextAtt = () => job.dry ? -1 : (job.atts || []).findIndex((f, i) => !R['x' + i] && !R['x' + i + 'Err']);
     const doAtt = href => { const i = nextAtt(), f = job.atts[i]; return startOp({ op: 'upload', jobId: job.id, pdfKey: f.key, name: f.name, type: f.type, extra: i }, href); };
     const attTxt = () => { const a = job.atts || []; if (!a.length) return ''; const bad = a.filter((f, i) => R['x' + i + 'Err']); return ', ' + (a.length - bad.length) + ' other attachment' + (a.length == 1 ? '' : 's') + ' on' + (bad.length ? ' (' + bad.map(f => f.name).join(', ') + ' FAILED)' : ''); };
@@ -939,7 +948,12 @@ if (ON_AF) {
         }
         if (x.kind == 'updated_po' || has) {
           if (job.dry) return fin(['PO ' + x.po_full + ' is already on JN ' + job.target.jn + '. ' + (x.kind == 'updated_po' ? 'Would attach ' + fileName(job) + ((job.atts || []).length ? ' plus ' + job.atts.map(f => f.name).join(', ') : '') + ' and flag it to check: ' + (x.changes || x.summary || 'updated PO') : 'Would skip it, already set up')]);
-          if (x.kind != 'updated_po') return fin(['PO ' + x.po_full + ' already on JN ' + job.target.jn + ', skipped']);
+          if (x.kind != 'updated_po' && !job.retryTask) return fin(['PO ' + x.po_full + ' already on JN ' + job.target.jn + ', skipped']);
+          if (x.kind != 'updated_po') { // Try again: the PO's on the task already, so just top up the PDF and attachments (the upload skips files already there, 19/10)
+            if (!R.up && !R.upErr) return startOp({ op: 'upload', jobId: job.id, pdfKey: job.pdfKey, name: fileName(job) }, job.target.href);
+            if (nextAtt() >= 0) return doAtt(job.target.href);
+            if (R.upErr) await afterWrite(job, job.target.jn);
+            return fin(['PO ' + x.po_full + ' already on JN ' + job.target.jn + ': ' + (R.upErr ? 'upload FAILED (' + R.upErr + ')' : 'PDF on') + attTxt()]); }
           if (!R.up && !R.upErr) return startOp({ op: 'upload', jobId: job.id, pdfKey: job.pdfKey, name: fileName(job) }, job.target.href);
           if (nextAtt() >= 0) return doAtt(job.target.href);
           await safeFu({ sec: 'check', key: 'upd-' + x.po_full + '-' + ymd(new Date()), due: ymd(new Date()), title: 'Updated PO, check the scope: ' + shortStreet(x.address.street) + ' (JN ' + job.target.jn + ', PO -' + x.po_full.split('-')[1] + ')', desc: (x.changes || x.summary || 'Builder sent an updated PO.') + '\nThe updated PDF is on the task' + (R.upErr ? ' (upload FAILED: ' + R.upErr + ')' : '') + '. The description wasn\'t changed.' });
@@ -983,7 +997,8 @@ if (ON_AF) {
     if (x.wasUpdated) issues.push('Came in marked "Updated" but no task had PO ' + x.po_full + ', so it went on as new works. Make sure it isn\'t a double up.');
     if (x.overhead_power) issues.push('Overhead power on this PO. Needs an ESA lodged if there isn\'t one.');
     if (isNew && R.otherLoc) issues.push('Made a new location under ' + job.builder + '. The address is also in AroFlo under another client: ' + R.otherLoc);
-    if (issues.length || trialOn()) await safeFu({ sec: 'check', key: 'chk-' + x.po_full, p1: !!(R.upErr || R.descErr || (x.cov && x.cov.missing.length)), due: ymd(new Date()), title: (issues.length ? 'Check ' : 'Check the description on ') + 'JN ' + jn + ', ' + st + (isNew ? ' (new task)' : ' (PO -' + x.po_full.split('-')[1] + ' added)'), desc: (issues.join('\n\n') || 'Trial run: eyeball what the filer wrote.') + '\nEmail: ' + job.info.subject });
+    if (issues.length || trialOn()) await safeFu({ sec: 'check', key: 'chk-' + x.po_full, p1: !!(R.upErr || R.descErr || (x.cov && x.cov.missing.length)), due: ymd(new Date()), title: (issues.length ? 'Check ' : 'Check the description on ') + 'JN ' + jn + ', ' + st + (isNew ? ' (new task)' : ' (PO -' + x.po_full.split('-')[1] + ' added)'), desc: (issues.join('\n\n') || 'Trial run: eyeball what the filer wrote.') + (R.upErr ? '\nTry again redoes the upload.' : '') + '\nEmail: ' + job.info.subject,
+      pdf: R.upErr && job.pdfKey && gget(job.pdfKey, '') ? { name: fileName(job), b64: gget(job.pdfKey, '') } : null });
     const b = gget('wfBases', {}); b[jobKey(x) || x.po_full] = now(); gset('wfBases', b);
   }
 
@@ -1010,6 +1025,7 @@ if (ON_AF) {
     for (const t of ts) {
       const key = ((t.description || '').match(/^filer: (\S+)/m) || [])[1] || '';
       const note = msg => td('POST', 'tasks/' + t.id, { labels: (t.labels || []).filter(l => l != 'filer-retry'), description: 'Try again (' + tm + '): ' + msg + '\n' + String(t.description || '').replace(/^Try again \(.*\n?/m, '') }).catch(e => log('Try again note failed: ' + e.message));
+      const reread = async head => { const r = gget('wfReread', []).filter(x => now() - x.at < 15 * 60e3 && x.task != t.id); r.push({ head, at: now(), task: t.id }); gset('wfReread', r); await note('reading the email again'); log('Try again: reading the email again: ' + head.slice(0, 50)); };
       let m;
       if ((m = key.match(/^err-read-(.*)$/))) {
         const head = m[1].split('|').slice(1).join('|').trim();
@@ -1019,7 +1035,6 @@ if (ON_AF) {
       }
       if ((m = key.match(/^err-(j[a-z0-9]+)$/))) {
         const j = jobs().find(x => x.id == m[1]);
-        const reread = async head => { const r = gget('wfReread', []).filter(x => now() - x.at < 15 * 60e3 && x.task != t.id); r.push({ head, at: now(), task: t.id }); gset('wfReread', r); await note('reading the email again'); log('Try again: reading the email again: ' + head.slice(0, 50)); };
         if (!j) { const subj = ((t.description || '').match(/^Email: (.+)$/m) || [])[1] || ''; if (subj) await reread(subj.trim().slice(0, 60)); else await note('can\'t tell which email it was'); continue; }
         if (j.status == 'new') { await note('it\'s already in the queue'); continue; }
         const R = j.res || {};
@@ -1028,6 +1043,15 @@ if (ON_AF) {
         if (!R.jn) j.creating = false; // check AroFlo for the task again before making one
         Object.assign(j, { status: 'new', tries: 0, notBefore: 0, waited: true, retryTask: t.id }); saveJob(j);
         await note('back in the queue'); log('Try again: ' + j.info.subject.slice(0, 60)); continue;
+      }
+      if ((m = key.match(/^chk-(.+)$/))) { // a check item whose upload failed: redo just the upload, the task and description stay (19/10)
+        const j = jobs().find(x => x.status != 'new' && x.x && x.x.po_full == m[1]); const R = (j && j.res) || {};
+        const failed = j && (R.upErr || Object.keys(R).some(k => /^x\d+Err$/.test(k)));
+        if (!failed) { await note('nothing on this one the filer can redo, do it by hand'); continue; }
+        if (R.upErr && j.pdfKey && !gget(j.pdfKey, '')) { const pt = ((t.description || '').match(/^pdf task: (\S+)/m) || [])[1]; const b64 = await pdfFromTask(pt || t.id); if (b64) gset(j.pdfKey, b64); else { const subj = ((t.description || '').match(/^Email: (.+)$/m) || [])[1] || ''; if (subj) await reread(subj.trim().slice(0, 60)); else await note('the PDF is gone from the filer and I can\'t tell which email it was, upload it by hand'); continue; } }
+        Object.keys(R).forEach(k => { if (/Err$/.test(k)) delete R[k]; }); j.res = R;
+        Object.assign(j, { status: 'new', tries: 0, notBefore: 0, retryTask: t.id }); saveJob(j);
+        await note('redoing the upload'); log('Try again (upload): ' + j.info.subject.slice(0, 60)); continue;
       }
       await note('this one can\'t be tried again, do it by hand');
     }
