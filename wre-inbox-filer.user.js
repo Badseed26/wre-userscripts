@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.33
+// @version      0.9.34
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -659,10 +659,12 @@ if (ON_AF) {
     // Only Done on COMPLETE; anything else says exactly where the box got to.
     const row = () => [...box().querySelectorAll('.uploadProgressObj')].find(r => !r.classList.contains('uploadProgressObjTemplate') && r.innerText.includes(op.name.replace(/\.[a-z0-9]+$/i, '')));
     const state = () => { const r = row(); if (!r) return ''; return String((jq() && jq()(r).data('statuskey')) || '') || ((r.querySelector('.uploadProgressBarText') || {}).innerText || '').trim(); };
-    const trail = []; let lastChange = now(); const t0 = now();
-    while (now() - t0 < 180000) { const st = state() || (row() ? 'row' : 'no row'); if (st != trail[trail.length - 1]) { trail.push(st); lastChange = now(); } if (/^(COMPLETE|FAILED)$/.test(st) || now() - lastChange > 60000) break; await sleep(1000); }
-    const where = trail.join(' > '); const extra = (box().innerText.match(/(error|failed|not allowed|too large|not supported|snafu)[^.]{0,120}/i) || [''])[0].trim();
-    if (trail[trail.length - 1] != 'COMPLETE') return fin(op, { upErr: 'AroFlo\'s upload box got to "' + where + '"' + (extra ? ' (' + extra + ')' : '') + ', so Done wasn\'t pressed' });
+    // Chrome slows a hidden tab's own timers to once a minute, and AroFlo's upload box runs on those, so each state can take a
+    // minute to arrive. Give it 6 min all up and 2.5 min with no change, and keep the seconds each state showed up at.
+    const trail = [], at = []; let last = '', lastChange = now(); const t0 = now();
+    while (now() - t0 < 360000) { const st = state() || (row() ? 'row' : 'no row'); if (st != last) { last = st; trail.push(st); at.push(Math.round((now() - t0) / 1000)); lastChange = now(); } if (/^(COMPLETE|FAILED)$/.test(st) || now() - lastChange > 150000) break; await sleep(1000); }
+    const where = trail.map((x, i) => x + '@' + at[i] + 's').join(' > '); const extra = (box().innerText.match(/(error|failed|not allowed|too large|not supported|snafu)[^.]{0,120}/i) || [''])[0].trim();
+    if (last != 'COMPLETE') return fin(op, { upErr: 'AroFlo\'s upload box got to "' + where + '"' + (extra ? ' (' + extra + ')' : '') + ', so Done wasn\'t pressed' });
     log('Upload of ' + op.name + ': box went ' + where);
     const done = [...box().querySelectorAll('button,a')].find(b => /^\s*Done\s*$/i.test(b.innerText || '')); if (!done) return fin(op, { upErr: 'no Done button' });
     op.fired = true; ss('wfOp', op); done.click(); await sleep(4000); return opUpload(op);
