@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.30
+// @version      0.9.31
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -95,7 +95,9 @@ async function pushLog() {
   if (last == gget('wfLogPushed', '') && now() - at < 10 * 60e3) return;
   gset('wfLogPushAt', now());
   const R = gget('wfRules', null) || {}; const st = R.paused ? 'paused' : R.dry ? 'dry run' : 'live';
-  try { await td('POST', 'tasks/' + LOG_TASK, { description: 'Filer ' + VER + ', ' + st + ', last seen ' + new Date().toLocaleString('en-AU', { hour12: true }).replace(',', '') + (WT.ok() ? '' : ' (slow timers)') + '\n\n' + l.slice(-25).reverse().join('\n') }); gset('wfLogPushed', last); }
+  // second line: what each tab's chip says and how long ago, so a tab that's quietly stuck shows on the dashboard (19/10)
+  const tab = k => { const x = gget('wfState_' + k, {}); return (x.msg || '?') + (x.at ? ' (' + Math.round((now() - x.at) / 60e3) + ' min ago)' : ''); };
+  try { await td('POST', 'tasks/' + LOG_TASK, { description: 'Filer ' + VER + ', ' + st + ', last seen ' + new Date().toLocaleString('en-AU', { hour12: true }).replace(',', '') + (WT.ok() ? '' : ' (slow timers)') + '\nOutlook tab: ' + tab('mail') + ' | AroFlo tab: ' + tab('af') + '\n\n' + l.slice(-25).reverse().join('\n') }); gset('wfLogPushed', last); }
   catch (e) { try { console.log('[WRE filer] log push failed', e.message); } catch (x) {} }
 }
 function log(msg) { const l = gget('wfLog', []); l.push(new Date().toLocaleString('en-AU', { hour12: true }).replace(',', '') + ' ' + (ON_MAIL ? '[mail] ' : '[af] ') + msg); while (l.length > 300) l.shift(); gset('wfLog', l); try { console.log('[WRE filer]', msg); } catch (e) {} paint(); }
@@ -272,7 +274,12 @@ function paint() {
   chip.textContent = 'Filer ' + (r.paused ? 'paused' : r.dry ? 'dry run' : 'on') + (st.msg ? ': ' + st.msg : '');
   chip.style.background = st.bad ? '#B3261E' : r.paused ? '#69645E' : r.dry ? '#8F5408' : '#2A7243';
 }
-function status(msg, bad) { gset('wfState_' + (ON_MAIL ? 'mail' : 'af'), { msg: String(msg).slice(0, 80), bad: !!bad, at: now() }); paint(); }
+// A bad or stuck state goes in the log the first time it shows up, so a tab that's quietly going nowhere (can't find the Inbox,
+// another tab holds the lock, rows with no times) is on the dashboard, not just on its chip (19/10).
+function status(msg, bad) { const k = 'wfState_' + (ON_MAIL ? 'mail' : 'af'); const m = String(msg).slice(0, 80); const prev = gget(k, {});
+  const strip = x => String(x || '').replace(/\d{1,2}:\d{2} ?[ap]m/i, '').trim();
+  if ((bad || /another .* tab|paused|can.t find|no times|stuck/i.test(m)) && strip(m) != strip(prev.msg)) log('Status: ' + m);
+  gset(k, { msg: m, bad: !!bad, at: now() }); paint(); }
 function mountChip() {
   if (chip || !document.body) return;
   chip = document.createElement('div');
@@ -462,19 +469,21 @@ if (ON_MAIL) {
       await exitSearch();
       if (!(await goInbox())) { status('can\'t find the Inbox', true); return; }
       scrollTop();
-      const s = seen();
+      const s = seen(); let looked = 0, timed = 0;
       for (const el of rowsNow().slice(0, 40)) {
         const p = parse(el.getAttribute('aria-label')); if (p.pinned) continue;
         const rk = p.head + ' ' + p.when + '|' + ymd(new Date());
         const rr = gget('wfReread', []), sp = v => String(v).replace(/\s+/g, ' ').toLowerCase(), again = rr.find(x => sp(p.head).includes(sp(x.head)) && now() - x.at < 15 * 60e3);
         if (again) { gset('wfReread', rr.filter(x => x !== again && now() - x.at < 15 * 60e3)); gset('wfRetryNext', again.task); log('Reading again: ' + p.head.slice(0, 80)); const r = await takeOne(el, R, false); if (!reloading) later(scan, r ? 1500 : 5000); return; }
-        const t = rowTime(p.when); if (!t || t.getTime() < start - 60e3) continue;
+        looked++; const t = rowTime(p.when); if (t) timed++; if (!t || t.getTime() < start - 60e3) continue;
         if (s[rk] || [...Object.keys(s)].some(k => k.endsWith('|' + p.head.slice(0, 120)) && s[k] && Math.abs((+s[k] || 0) - t.getTime()) < 6 * 3600e3)) continue;
         if (!senderOf(p.head, R)) continue;
         if (SKIP_SUBJ.test(p.head)) { markSeen(rk); continue; }
         log('New: ' + p.head.slice(0, 80)); const r = await takeOne(el, R, false); if (!reloading) later(scan, r ? 1500 : 5000); return;
       }
-      status('watching, ' + new Date().toLocaleTimeString('en-AU', { hour: 'numeric', minute: '2-digit' }));
+      gset('wfMailPass', now()); // a full pass got through the list (the watchdog in boot reloads the tab if none has in 10 min)
+      if (looked && !timed) status('rows have no times, can\'t tell what\'s new. First row: ' + ((rowsNow()[0] || {}).getAttribute ? rowsNow()[0].getAttribute('aria-label') : '').slice(0, 60), true);
+      else status('watching, ' + new Date().toLocaleTimeString('en-AU', { hour: 'numeric', minute: '2-digit' }));
     } catch (e) { log('Outlook side error: ' + e.message); status(e.message, true); }
     finally { busy = false; }
   }
@@ -516,6 +525,10 @@ if (ON_MAIL) {
     let deb = null; const mo = new MutationObserver(() => { cancel(deb); deb = later(scan, 4000); });
     const list = rowsNow()[0] && rowsNow()[0].parentElement; if (list) mo.observe(list, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-label'] });
     every(scan, 60e3); scan(); every(pushLog, 30e3);
+    // Watchdog: no filer tab has got through the list in 10 min and nothing's half read, so this tab is stuck somewhere it can't
+    // see (19/10: the Outlook tab went quiet after a reload at 3:28 pm and missed Jai's PO). Reload it and say so.
+    gset('wfMailPass', now());
+    every(() => { if (reloading || gget('wfPending', null) || now() - gget('wfMailPass', 0) < 10 * 60e3) return; log('Outlook tab hasn\'t got through the list in 10 min (chip said: ' + (gget('wfState_mail', {}).msg || '?') + '), reloading it'); reloading = true; gset('wfMailPass', now()); location.reload(); }, 60e3);
   };
   if (document.readyState == 'loading') document.addEventListener('DOMContentLoaded', boot); else boot();
 }
@@ -556,6 +569,12 @@ if (ON_AF) {
   const P = x => '<p>' + x + '</p>', B = x => '<strong>' + x + '</strong>', BU = x => '<strong><u>' + x + '</u></strong>', A = (u, t) => '<a href="' + esc(u) + '">' + esc(t) + '</a>';
   const ul = a => a && a.length ? '<ul>' + a.map(i => '<li>' + esc(typeof i == 'string' ? i : (i.t || '')) + '</li>').join('') + '</ul>' : '';
   const addrLine = a => [a.street, a.suburb, a.state || 'QLD', a.postcode].filter(Boolean).join(' ');
+  // AroFlo's task name box takes 50 characters and its own check stops the create without moving the page past that (PO 20328779-09
+  // at 42A - 42B/Sailaway Street, 19/10). Lisa drops the state and postcode when a name runs long ("20328757 - 42B Sailaway Street
+  // Mermaid Waters"), so do the same, then the suburb, then shorten the street.
+  const taskName = (lead, a) => { const mk = p => lead + ' - ' + p.filter(Boolean).join(' ');
+    for (const p of [[a.street, a.suburb, a.state || 'QLD', a.postcode], [a.street, a.suburb], [shortStreet(a.street), a.suburb], [shortStreet(a.street)]]) { const n = mk(p); if (n.length <= 50) return n; }
+    return mk([shortStreet(a.street)]).slice(0, 50).trim(); };
   const poLine = (job) => { const x = job.x; return /ambrose/i.test(job.builder) ? 'P.O. No: ' + x.po_full + '- ' + addrLine(x.address) : 'P.O. No: ' + [...new Set([x.ref, x.po_full].filter(Boolean))].join(' - ') + ' - ' + addrLine(x.address); };
   const poBlock = job => { const x = job.x, i = job.info; let h = P(BU(esc(poLine(job)))); if (i.rs) h += P('View Repair Schedule - ' + A(i.rs, 'Repair Schedule')); if (i.img) h += P('View Site Images - ' + A(i.img, 'Images'));
     (x.blocks || []).forEach(b => { h += P(' '); if (b.h) h += P(BU(esc(b.h))); (b.rooms || []).forEach(r => { h += P(B(esc(r.r))) + ul(r.items); }); h += ul(b.items); }); return h; };
@@ -705,7 +724,8 @@ if (ON_AF) {
     if (op.dry) return opDone(op, { createDry: 'filled: ' + v('clientName') + ' | ' + v('locationName') + ' | ' + v('serviceName') + ' | ' + v('wrname') });
     // let the editor and autocompletes settle, then make sure what we typed is really in the form before submitting
     await sleep(1500); if (W.CKEDITOR && W.CKEDITOR.instances.myeditor) W.CKEDITOR.instances.myeditor.updateElement();
-    const bad = [v('wrname') == op.name ? '' : 'task name', v('custON') == op.custON ? '' : 'customer order no', v('client_id') ? '' : 'client', v('location_id') ? '' : 'location', document.forms.newwr.checkValidity() ? '' : 'a required field'].filter(Boolean);
+    // a value set by script can run past the box's maxlength, and AroFlo's own check then stops the create with the page staying put (19/10)
+    const bad = [v('wrname') == op.name ? '' : 'task name', v('custON') == op.custON ? '' : 'customer order no', v('client_id') ? '' : 'client', v('location_id') ? '' : 'location', document.forms.newwr.checkValidity() ? '' : 'a required field', overLong().join(', ')].filter(Boolean);
     if (bad.length) return opDone(op, { createErr: 'form not right before create (' + bad.join(', ') + '), nothing created' });
     op.fired = true; ss('wfOp', op); btn.click(); firedWatch(op, 'createErr');
   }
@@ -725,7 +745,9 @@ if (ON_AF) {
   }
   const startOp = (op, href) => { ss('wfOp', op); go(href); };
   // After an op clicks save or create, the page should move on. If it hasn't in 40s (validation message, confirm box, slow save), report what the page says and go home.
-  const pageSays = () => { const e = [...document.querySelectorAll('.ui-dialog:not([style*="display: none"]), .error, .alert, .afError, [class*="error"], [class*="validation"]')].filter(x => x.offsetParent).map(x => x.innerText.replace(/\s+/g, ' ').trim()).filter(Boolean); return e.join(' / ').slice(0, 300); };
+  // fields holding more than their box allows: AroFlo's check fails them without a visible message
+  const overLong = () => { const f = document.forms.newwr || document.forms.editwr; return f ? [...f.elements].filter(x => x.name && x.maxLength > 0 && String(x.value || '').length > x.maxLength).map(x => x.name + ' is ' + String(x.value).length + ' characters, the box takes ' + x.maxLength) : []; };
+  const pageSays = () => { const e = [...document.querySelectorAll('.ui-dialog:not([style*="display: none"]), .error, .alert, .afError, [class*="error"], [class*="validation"]')].filter(x => x.offsetParent).map(x => x.innerText.replace(/\s+/g, ' ').trim()).filter(Boolean).concat(overLong()); return e.join(' / ').slice(0, 300); };
   const firedWatch = (op, what) => later(() => { const cur = ss('wfOp'); if (cur && cur.jobId == op.jobId && cur.op == op.op && cur.fired) opDone(op, { [what]: 'clicked but the page didn\'t move on. ' + (pageSays() ? 'Page says: ' + pageSays() : 'No message on the page') + '. Check it by hand' }); }, 40000);
 
   // ---------- builder dates ----------
@@ -927,7 +949,7 @@ if (ON_AF) {
       if (job.creating) {
         const amb = /ambrose/i.test(job.builder);
         // Lisa names them: Ambrose by the 8 digit base, ARC by the full PO (PO118551-BU01-001), everyone else by their job ref.
-        const name = (amb ? x.po_base : (x.ref || x.po_full)) + ' - ' + addrLine(x.address);
+        const name = taskName(amb ? x.po_base : (x.ref || x.po_full), x.address);
         if (job.dry && !R.createDry && !R.createErr) return startOp({ op: 'create', jobId: job.id, dry: true, address: x.address, client: job.builder, contact: (x.site_contacts || [])[0], name, custON: amb ? x.po_base : (x.ref || x.po_full), taskType: amb ? 'Ambrose Construct Services' : 'General Electrical' }, '/ims/Site/Service/workrequest/index.cfm?new=1&tid=IMS.CRT.TSK');
         if (job.dry) return fin(['New PO ' + x.po_full + (x.wasUpdated ? ' (came in marked Updated)' : '') + ': no open task, would create one', 'Create page check: ' + (R.createDry || R.createErr), 'Task name: ' + name, 'Description: ' + plain(fullDesc(job)).split(poLine(job))[0] + poLine(job) + scopeText(x), 'Vague lines: ' + ((x.vague || []).map(v => v.po_said).join(' / ') || 'none'), 'Would attach ' + fileName(job) + ((job.atts || []).length ? ' plus ' + job.atts.map(f => f.name).join(', ') : '')]);
         if (!R.jn && !R.createErr) return startOp({ op: 'create', jobId: job.id, address: x.address, client: job.builder, contact: (x.site_contacts || [])[0], name, custON: amb ? x.po_base : (x.ref || x.po_full), taskType: amb ? 'Ambrose Construct Services' : 'General Electrical' }, '/ims/Site/Service/workrequest/index.cfm?new=1&tid=IMS.CRT.TSK');
