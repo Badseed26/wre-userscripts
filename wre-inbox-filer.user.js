@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.18
+// @version      0.9.19
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -767,7 +767,13 @@ if (ON_AF) {
           if (withPo.length == 1) open.splice(0, open.length, withPo[0]); else return errFu('PO ' + x.po_full + ': ' + open.length + ' open tasks for ' + (k || 'that address') + ' (JN ' + open.map(r => r.jn).join(', ') + ')'); }
         if (open.length == 1) { job.target = { jn: open[0].jn, href: open[0].href, name: open[0].name }; saveJob(job); }
         else {
-          if (x.kind == 'updated_po') return errFu('Updated PO ' + x.po_full + ' but no open task has it');
+          // Ambrose's system sometimes marks a brand new PO "Updated:". No open task has it, so set it up as new,
+          // unless a closed task already carries this exact PO number (19/10).
+          if (x.kind == 'updated_po') {
+            const shut = all.filter(r => !isOpenTask(r)).filter(r => k ? (r.name.toUpperCase().startsWith(k.toUpperCase()) || (r.ref || '').toUpperCase().includes(k.toUpperCase())) : hasAddr(r.name, x.address.street));
+            for (const r of shut) if ((r.name || '').includes(x.po_full) || plain((await descOf(r.href)).html).includes(x.po_full)) return errFu('Updated PO ' + x.po_full + ' but it\'s only on closed JN ' + r.jn + ' (' + r.status + ')');
+            x.kind = 'po'; x.wasUpdated = true; saveJob(job);
+          }
           // Nothing has the ref, but an open task sits at that address (Lisa set it up without the PO number): don't double up, ask Ethan.
           const there = k && x.address && x.address.street ? all.filter(isOpenTask).filter(r => hasAddr(r.name, x.address.street)) : [];
           if (there.length) { const who = there.map(r => 'JN ' + r.jn + ' ' + r.name.slice(0, 40)).join(', '); return job.dry ? fin(['New PO ' + x.po_full + ': no task has ' + k + ' but ' + who + ' is open at that address. Would flag it to Errors / to check instead of creating a task']) : errFu('PO ' + x.po_full + ' (' + k + ') looks new but ' + who + ' is already open at ' + shortStreet(x.address.street) + '. Same job? Add the PO to it by hand'); }
@@ -781,6 +787,9 @@ if (ON_AF) {
         const d = await descOf(job.target.href);
         // once this run has uploaded or added the block, the PO being on the task is our own doing, so carry on to the finish rather than calling it a skip (18/10)
         const has = !R.up && !R.desc && !R.upErr && !R.descErr && (plain(d.html).includes(x.po_full) || (job.target.name || '').includes(x.po_full));
+        // "Updated:" but this PO number isn't on the task yet: it's really new works, so add it like a revised PO (19/10)
+        if (x.kind == 'updated_po' && !has && !R.up && !R.desc && !R.upErr && !R.descErr) { x.kind = 'po'; x.wasUpdated = true; saveJob(job); }
+        const upd = x.wasUpdated ? ' (came in marked Updated, no task had it)' : '';
         // Task for this ref that's still just TBC: a create that never finished, so fill it like a new one rather than adding under TBC.
         if (!job.fillNew && x.kind == 'po' && /^(TBC)?$/i.test(plain(d.html))) { job.fillNew = true; saveJob(job); }
         if (job.fillNew) {
@@ -799,7 +808,7 @@ if (ON_AF) {
         }
         // revised PO: new works go under the existing description
         const block = poBlock(job);
-        if (job.dry) return fin(['Revised PO ' + x.po_full + ' goes on JN ' + job.target.jn + ' (' + job.target.name.slice(0, 50) + ')', 'Would attach ' + fileName(job), 'Would add under the description: ' + poLine(job) + scopeText(x), 'Vague lines: ' + ((x.vague || []).map(v => v.po_said).join(' / ') || 'none'), 'To book: ' + ((x.dates || []).length ? 'dates in email' : 'from the live repair schedule, or a confirm dates draft')]);
+        if (job.dry) return fin(['Revised PO ' + x.po_full + upd + ' goes on JN ' + job.target.jn + ' (' + job.target.name.slice(0, 50) + ')', 'Would attach ' + fileName(job), 'Would add under the description: ' + poLine(job) + scopeText(x), 'Vague lines: ' + ((x.vague || []).map(v => v.po_said).join(' / ') || 'none'), 'To book: ' + ((x.dates || []).length ? 'dates in email' : 'from the live repair schedule, or a confirm dates draft')]);
         if (!R.up && !R.upErr) return startOp({ op: 'upload', jobId: job.id, pdfKey: job.pdfKey, name: fileName(job) }, job.target.href);
         if (!R.desc && !R.descErr) { const h = d.hh; return startOp({ op: 'desc', jobId: job.id, mode: 'append', html: block, mustNotHave: x.po_full, jn: job.target.jn }, h); }
         await afterWrite(job, job.target.jn); return fin(['Revised PO ' + x.po_full + ' on JN ' + job.target.jn + ': ' + (R.upErr ? 'upload FAILED (' + R.upErr + ')' : 'PDF attached') + ', ' + (R.descErr ? 'description FAILED (' + R.descErr + ')' : 'new works added')]);
@@ -810,7 +819,7 @@ if (ON_AF) {
         // Lisa names them: Ambrose by the 8 digit base, ARC by the full PO (PO118551-BU01-001), everyone else by their job ref.
         const name = (amb ? x.po_base : (x.ref || x.po_full)) + ' - ' + addrLine(x.address);
         if (job.dry && !R.createDry && !R.createErr) return startOp({ op: 'create', jobId: job.id, dry: true, address: x.address, client: job.builder, contact: (x.site_contacts || [])[0], name, custON: amb ? x.po_base : (x.ref || x.po_full), taskType: amb ? 'Ambrose Construct Services' : 'General Electrical' }, '/ims/Site/Service/workrequest/index.cfm?new=1&tid=IMS.CRT.TSK');
-        if (job.dry) return fin(['New PO ' + x.po_full + ': no open task, would create one', 'Create page check: ' + (R.createDry || R.createErr), 'Task name: ' + name, 'Description: ' + plain(fullDesc(job)).split(poLine(job))[0] + poLine(job) + scopeText(x), 'Vague lines: ' + ((x.vague || []).map(v => v.po_said).join(' / ') || 'none'), 'Would attach ' + fileName(job)]);
+        if (job.dry) return fin(['New PO ' + x.po_full + (x.wasUpdated ? ' (came in marked Updated)' : '') + ': no open task, would create one', 'Create page check: ' + (R.createDry || R.createErr), 'Task name: ' + name, 'Description: ' + plain(fullDesc(job)).split(poLine(job))[0] + poLine(job) + scopeText(x), 'Vague lines: ' + ((x.vague || []).map(v => v.po_said).join(' / ') || 'none'), 'Would attach ' + fileName(job)]);
         if (!R.jn && !R.createErr) return startOp({ op: 'create', jobId: job.id, address: x.address, client: job.builder, contact: (x.site_contacts || [])[0], name, custON: amb ? x.po_base : (x.ref || x.po_full), taskType: amb ? 'Ambrose Construct Services' : 'General Electrical' }, '/ims/Site/Service/workrequest/index.cfm?new=1&tid=IMS.CRT.TSK');
         if (R.createErr) return errFu('New PO ' + x.po_full + ', couldn\'t create the task: ' + R.createErr);
         const r = await findJnSoon(R.jn); if (!r) return errFu('Created JN ' + R.jn + ' but can\'t find it');
@@ -830,6 +839,7 @@ if (ON_AF) {
     if (R.descErr) issues.push('Description failed: ' + R.descErr);
     if ((x.vague || []).length) issues.push('Lines I wasn\'t sure about:\n' + x.vague.map(v => '- PO said: ' + v.po_said + '\n  I wrote: ' + v.wrote).join('\n'));
     if (x.cov && (x.cov.none || x.cov.missing.length || x.cov.leftOut.length)) issues.push('PO line check: ' + covText(x.cov) + '. Add anything missing to the description.');
+    if (x.wasUpdated) issues.push('Came in marked "Updated" but no task had PO ' + x.po_full + ', so it went on as new works. Make sure it isn\'t a double up.');
     if (x.overhead_power) issues.push('Overhead power on this PO. Needs an ESA lodged if there isn\'t one.');
     if (isNew && R.otherLoc) issues.push('Made a new location under ' + job.builder + '. The address is also in AroFlo under another client: ' + R.otherLoc);
     if (issues.length || trialOn()) await safeFu({ sec: 'check', key: 'chk-' + x.po_full, p1: !!(R.upErr || R.descErr || (x.cov && x.cov.missing.length)), due: ymd(new Date()), title: (issues.length ? 'Check ' : 'Check the description on ') + 'JN ' + jn + ', ' + st + (isNew ? ' (new task)' : ' (PO -' + x.po_full.split('-')[1] + ' added)'), desc: (issues.join('\n\n') || 'Trial run: eyeball what the filer wrote.') + '\nEmail: ' + job.info.subject });
