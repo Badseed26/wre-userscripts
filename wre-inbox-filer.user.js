@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.38
+// @version      0.9.39
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -85,6 +85,11 @@ const SHORT = { street: 'st', road: 'rd', drive: 'dr', avenue: 'ave', terrace: '
 const norm = s => String(s || '').toLowerCase().replace(/\b(street|road|drive|avenue|terrace|court|place|crescent|parade|close|lane|highway|boulevard|circuit|grove)\b/g, w => SHORT[w]).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
 // Whole address inside a longer string: "40 Adelong Rd" is in "20253832 - 40 Adelong Road Shailer Park", "140 Adelong Rd" isn't.
 const hasAddr = (hay, needle) => !!norm(needle) && (' ' + norm(hay) + ' ').includes(' ' + norm(needle) + ' ');
+// Same site as a task name, allowing for unit style addresses: "42A - 42B/Sailaway Street" is JN 9437's "42B Sailaway Street"
+// (19/10, the filer made JN 9474 next to it). The street words have to be there, and one of the address's numbers as a whole
+// word, so "140 Adelong Rd" still isn't "40 Adelong Rd".
+const streetBits = s => { const t = norm(s).split(' ').filter(Boolean); let i = 0; while (i < t.length && /^(\d+[a-z]?|[a-z]|unit|lot|u|shop|villa)$/.test(t[i])) i++; return { nums: t.slice(0, i).filter(x => /^\d/.test(x)), words: t.slice(i).join(' ') }; };
+const sameSite = (hay, addr) => { const b = streetBits(addr); if (!b.words) return hasAddr(hay, addr); const h = ' ' + norm(hay) + ' '; return h.includes(' ' + b.words + ' ') && (!b.nums.length || b.nums.some(n => h.includes(' ' + n + ' '))); };
 const shortStreet = s => String(s || '').replace(/\b(Street|Road|Drive|Avenue|Terrace|Court|Place|Crescent|Parade|Close|Lane|Highway|Boulevard|Circuit|Grove)\b/g, w => { const x = SHORT[w.toLowerCase()]; return x[0].toUpperCase() + x.slice(1); });
 
 // Last 25 log lines go on the Inbox filer log task so the dashboard can show them straight off. Pushed when something's
@@ -873,7 +878,7 @@ if (ON_AF) {
   const fileName = job => { const x = job.x; if (x.kind == 'esa') return 'ESA ' + shortStreet(x.address.street) + '.pdf'; const b = /ambrose/i.test(job.builder) ? ' Ambrose' : job.builder ? ' ' + job.builder.split(' ')[0] : ''; return 'PO ' + String(x.po_full || x.ref).replace(/^PO\s*/i, '') + b + (x.kind == 'updated_po' ? ' updated ' + dmy(new Date()).slice(0, 5).replace('/', '-') : '') + '.pdf'; };
   const trialOn = () => { const s = gget('wfLiveAt', 0); return !s || now() - s < TRIAL_DAYS * 864e5; };
   const jobKey = x => x.po_base || x.ref || '';
-  const tasksFor = async x => { const out = new Map(); if (jobKey(x)) (await search(jobKey(x), 'CustOn')).forEach(r => out.set(r.jn, r)); if (jobKey(x)) (await search(jobKey(x), 'RefNo')).forEach(r => out.set(r.jn, r)); if (x.address && x.address.street) (await search(x.address.street.replace(/^\S+\s+/, ''), 'Location')).filter(r => hasAddr(r.name, x.address.street)).forEach(r => out.set(r.jn, r)); return [...out.values()]; };
+  const tasksFor = async x => { const out = new Map(); if (jobKey(x)) (await search(jobKey(x), 'CustOn')).forEach(r => out.set(r.jn, r)); if (jobKey(x)) (await search(jobKey(x), 'RefNo')).forEach(r => out.set(r.jn, r)); if (x.address && x.address.street) (await search(streetBits(x.address.street).words || x.address.street, 'Location')).filter(r => sameSite(r.name, x.address.street)).forEach(r => out.set(r.jn, r)); return [...out.values()]; };
 
   // For test runs: what Haiku read out of the email, so it can be checked by eye.
   const covText = c => c.none ? 'Haiku didn\'t list the PO lines, so it couldn\'t be checked' : c.lines + ' PO lines, ' + (c.missing.length || c.leftOut.length ? (c.missing.length ? 'MISSING: ' + c.missing.join(' / ') : '') + (c.leftOut.length ? (c.missing.length ? '. ' : '') + 'LEFT OUT (not a charge): ' + c.leftOut.join(' / ') : '') : 'all accounted for');
@@ -946,11 +951,16 @@ if (ON_AF) {
             x.kind = 'po'; x.wasUpdated = true; saveJob(job);
           }
           // Nothing has the ref, but an open task sits at that address (Lisa set it up without the PO number): don't double up, ask Ethan.
-          const there = k && x.address && x.address.street ? all.filter(isOpenTask).filter(r => hasAddr(r.name, x.address.street)) : [];
-          if (there.length) { const who = there.map(r => 'JN ' + r.jn + ' ' + r.name.slice(0, 40)).join(', '); return job.dry ? fin(['New PO ' + x.po_full + ': no task has ' + k + ' but ' + who + ' is open at that address. Would flag it to Errors / to check instead of creating a task']) : errFu('PO ' + x.po_full + ' (' + k + ') looks new but ' + who + ' is already open at ' + shortStreet(x.address.street) + '. Same job? Add the PO to it by hand'); }
+          const there = k && x.address && x.address.street ? all.filter(isOpenTask).filter(r => sameSite(r.name, x.address.street)) : [];
+          if (there.length > 1) { const who = there.map(r => 'JN ' + r.jn + ' ' + r.name.slice(0, 40)).join(', '); return job.dry ? fin(['New PO ' + x.po_full + ': no task has ' + k + ' but ' + who + ' are open at that address. Would flag it to Errors / to check instead of creating a task']) : errFu('PO ' + x.po_full + ' (' + k + ') looks new but ' + who + ' are open at ' + shortStreet(x.address.street) + '. Which one? Add the PO by hand'); }
+          // One open task at that address with another PO number on it: that's the job (Ethan, 19/10: PO 20328779-09 belonged on
+          // JN 9437, 20328757 - 42B Sailaway Street, not a new task). The PO goes on it like a revised PO and the check item says so.
+          if (there.length == 1) { job.target = { jn: there[0].jn, href: there[0].href, name: there[0].name }; job.sameSite = there[0].name.slice(0, 50); if (x.kind == 'updated_po') { x.kind = 'po'; x.wasUpdated = true; } saveJob(job); }
+          if (!job.target) {
           if (now() - job.emailAt < NEW_PO_WAIT) { job.notBefore = job.emailAt + NEW_PO_WAIT; saveJob(job); return; }
           if (!job.waited) { job.waited = true; job.notBefore = now() + 20e3; saveJob(job); return; } // one more look right before creating
           job.creating = true; saveJob(job);
+          }
         }
       }
       // existing task
@@ -986,7 +996,7 @@ if (ON_AF) {
         }
         // revised PO: new works go under the existing description
         const block = poBlock(job);
-        if (job.dry) return fin(['Revised PO ' + x.po_full + upd + ' goes on JN ' + job.target.jn + ' (' + job.target.name.slice(0, 50) + ')', 'Would attach ' + fileName(job) + ((job.atts || []).length ? ' plus ' + job.atts.map(f => f.name).join(', ') : ''), 'Would add under the description: ' + poLine(job) + scopeText(x), 'Vague lines: ' + ((x.vague || []).map(v => v.po_said).join(' / ') || 'none'), 'To book: ' + ((x.dates || []).length ? 'dates in email' : 'from the live repair schedule, or a confirm dates draft')]);
+        if (job.dry) return fin(['Revised PO ' + x.po_full + upd + (job.sameSite ? ' (no task has ' + jobKey(x) + ', same address)' : '') + ' goes on JN ' + job.target.jn + ' (' + job.target.name.slice(0, 50) + ')', 'Would attach ' + fileName(job) + ((job.atts || []).length ? ' plus ' + job.atts.map(f => f.name).join(', ') : ''), 'Would add under the description: ' + poLine(job) + scopeText(x), 'Vague lines: ' + ((x.vague || []).map(v => v.po_said).join(' / ') || 'none'), 'To book: ' + ((x.dates || []).length ? 'dates in email' : 'from the live repair schedule, or a confirm dates draft')]);
         if (!R.up && !R.upErr) return startOp({ op: 'upload', jobId: job.id, pdfKey: job.pdfKey, name: fileName(job) }, job.target.href);
         if (!R.desc && !R.descErr) { const h = d.hh; return startOp({ op: 'desc', jobId: job.id, mode: 'append', html: block, mustNotHave: x.po_full, jn: job.target.jn }, h); }
         if (nextAtt() >= 0) return doAtt(job.target.href);
@@ -1020,6 +1030,7 @@ if (ON_AF) {
     if ((x.vague || []).length) issues.push('Lines I wasn\'t sure about:\n' + x.vague.map(v => '- PO said: ' + v.po_said + '\n  I wrote: ' + v.wrote).join('\n'));
     if (x.cov && (x.cov.none || x.cov.missing.length || x.cov.leftOut.length)) issues.push('PO line check: ' + covText(x.cov) + '. Add anything missing to the description.');
     if (x.wasUpdated) issues.push('Came in marked "Updated" but no task had PO ' + x.po_full + ', so it went on as new works. Make sure it isn\'t a double up.');
+    if (job.sameSite) issues.push('No task had ' + (jobKey(x) || x.po_full) + ', so it went under the open task at that address, ' + job.sameSite + '. Make sure that\'s the same job.');
     if (x.overhead_power) issues.push('Overhead power on this PO. Needs an ESA lodged if there isn\'t one.');
     if (isNew && R.otherLoc) issues.push('Made a new location under ' + job.builder + '. The address is also in AroFlo under another client: ' + R.otherLoc);
     if (issues.length || trialOn()) await safeFu({ sec: 'check', key: 'chk-' + x.po_full, p1: !!(R.upErr || R.descErr || (x.cov && x.cov.missing.length)), due: ymd(new Date()), title: (issues.length ? 'Check ' : 'Check the description on ') + 'JN ' + jn + ', ' + st + (isNew ? ' (new task)' : ' (PO -' + x.po_full.split('-')[1] + ' added)'), desc: (issues.join('\n\n') || 'Trial run: eyeball what the filer wrote.') + (R.upErr ? '\nTry again redoes the upload.' : '') + '\nEmail: ' + job.info.subject,
