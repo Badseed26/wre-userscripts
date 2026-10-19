@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.19
+// @version      0.9.20
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -41,6 +41,7 @@ const FU = '6hfHcM9Gf74fgcJw';          // WRE follow ups
 const SEC_BOOK = '6hmpxJ4FXMvm8p4P';    // WRE follow ups > To book
 const SEC_CHECK = '6hmpxJ488W9GCXpP';   // WRE follow ups > Errors / to check
 const RULES_TASK = '6hmpxM3GFpWCgPvX';  // WRE job tracker > Inbox filer settings > Inbox filer rules
+const LOG_TASK = '6hp9c9X7CPQvgRw5';    // WRE job tracker > Inbox filer settings > Inbox filer log (the dashboard reads it)
 const AMB_API = 'https://production-reportapi.ambrosebuilding.com.au/ReportData/RepairSchedule?recipientType=Insured&jobRecID=';
 const HOLS = { '2026-10-05': 1, '2026-12-25': 1, '2026-12-28': 1, '2027-01-01': 1, '2027-01-26': 1, '2027-03-26': 1, '2027-03-29': 1, '2027-04-26': 1, '2027-05-03': 1 };
 const TRIAL_DAYS = 14;
@@ -51,7 +52,23 @@ const gget = (k, d) => { try { const v = GM_getValue(k, d); return v === undefin
 const gset = (k, v) => { try { GM_setValue(k, v); } catch (e) {} };
 const gdel = k => { try { GM_deleteValue(k); } catch (e) {} };
 const ss = (k, v) => { try { if (v === undefined) return JSON.parse(sessionStorage.getItem(k) || 'null'); if (v === null) sessionStorage.removeItem(k); else sessionStorage.setItem(k, JSON.stringify(v)); } catch (e) { return null; } };
-const sleep = ms => new Promise(r => setTimeout(r, ms));
+// Chrome slows a background tab's timers to once a minute after it's been hidden 5 min, so every little wait in the filer
+// tabs was costing up to a minute and an email took ages to get through. A worker's timers don't get slowed, so all waits
+// go through one. If the page won't allow a worker it falls back to normal timers (19/10).
+const WT = (() => {
+  const cb = {}; let n = 0, ok = false, w = null;
+  try {
+    w = new Worker(URL.createObjectURL(new Blob(['const t={};onmessage=e=>{const d=e.data;if(d[0])clearTimeout(t[d[1]]);else t[d[1]]=setTimeout(()=>{delete t[d[1]];postMessage(d[1])},d[2])}'], { type: 'text/javascript' })));
+    w.onmessage = e => { const f = cb[e.data]; delete cb[e.data]; if (f) f(); };
+    cb.ping = () => { ok = true; }; w.postMessage([0, 'ping', 0]);
+  } catch (e) { w = null; }
+  return { ok: () => ok, set: (f, ms) => { if (!ok) return 't' + setTimeout(f, ms); const id = ++n; cb[id] = f; w.postMessage([0, id, ms]); return id; },
+    clear: id => { if (id == null) return; if (typeof id == 'string' && id[0] == 't') return clearTimeout(+id.slice(1)); if (cb[id]) { delete cb[id]; w.postMessage([1, id]); } } };
+})();
+const later = (f, ms) => WT.set(f, ms || 0);
+const cancel = id => WT.clear(id);
+const every = (f, ms) => { const go = () => { later(go, ms); try { f(); } catch (e) {} }; later(go, ms); };
+const sleep = ms => new Promise(r => later(r, ms));
 const now = () => Date.now();
 const p2 = n => String(n).padStart(2, '0');
 const ymd = d => d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate());
@@ -69,6 +86,17 @@ const norm = s => String(s || '').toLowerCase().replace(/\b(street|road|drive|av
 const hasAddr = (hay, needle) => !!norm(needle) && (' ' + norm(hay) + ' ').includes(' ' + norm(needle) + ' ');
 const shortStreet = s => String(s || '').replace(/\b(Street|Road|Drive|Avenue|Terrace|Court|Place|Crescent|Parade|Close|Lane|Highway|Boulevard|Circuit|Grove)\b/g, w => { const x = SHORT[w.toLowerCase()]; return x[0].toUpperCase() + x.slice(1); });
 
+// Last 25 log lines go on the Inbox filer log task so the dashboard can show them straight off. Pushed when something's
+// changed, or every 10 min as a heartbeat, by whichever filer tab gets there first.
+async function pushLog() {
+  if (!tdToken()) return; const l = gget('wfLog', []); const last = l[l.length - 1] || '';
+  const at = gget('wfLogPushAt', 0); if (now() - at < 25e3) return;
+  if (last == gget('wfLogPushed', '') && now() - at < 10 * 60e3) return;
+  gset('wfLogPushAt', now());
+  const R = gget('wfRules', null) || {}; const st = R.paused ? 'paused' : R.dry ? 'dry run' : 'live';
+  try { await td('POST', 'tasks/' + LOG_TASK, { description: 'Filer ' + VER + ', ' + st + ', last seen ' + new Date().toLocaleString('en-AU', { hour12: true }).replace(',', '') + (WT.ok() ? '' : ' (slow timers)') + '\n\n' + l.slice(-25).reverse().join('\n') }); gset('wfLogPushed', last); }
+  catch (e) { try { console.log('[WRE filer] log push failed', e.message); } catch (x) {} }
+}
 function log(msg) { const l = gget('wfLog', []); l.push(new Date().toLocaleString('en-AU', { hour12: true }).replace(',', '') + ' ' + (ON_MAIL ? '[mail] ' : '[af] ') + msg); while (l.length > 300) l.shift(); gset('wfLog', l); try { console.log('[WRE filer]', msg); } catch (e) {} paint(); }
 
 // ---------- HTTP ----------
@@ -280,7 +308,7 @@ if (ON_MAIL) {
   }
 
   const rowsNow = () => [...document.querySelectorAll('div[role=option][data-convid]')];
-  const waitFor = (cond, max) => new Promise(res => { if (cond()) return res(true); let done = false; const mo = new MutationObserver(() => { if (!done && cond()) { done = true; mo.disconnect(); res(true); } }); mo.observe(document.body, { subtree: true, childList: true, attributes: true, characterData: true }); setTimeout(() => { if (!done) { done = true; mo.disconnect(); res(cond()); } }, max); });
+  const waitFor = (cond, max) => new Promise(res => { if (cond()) return res(true); let done = false; const mo = new MutationObserver(() => { if (!done && cond()) { done = true; mo.disconnect(); res(true); } }); mo.observe(document.body, { subtree: true, childList: true, attributes: true, characterData: true }); later(() => { if (!done) { done = true; mo.disconnect(); res(cond()); } }, max); });
   const FL = ['Unread', 'Has attachments', 'Flagged', 'Pinned', 'Replied', 'Forwarded', 'Important', 'Meeting request'];
   const TM = / ((?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{1,2}:\d{2} [AP]M|\d{1,2}:\d{2} [AP]M|(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{2}-\d{2}|\d{1,2}\/\d{1,2}\/\d{4}|\d{4}-\d{2}-\d{2}) /;
   const parse = l => { l = l.replace(/\s+/g, ' '); const f = []; let s = l, hit = true; while (hit) { hit = false; for (const k of FL) if (s.startsWith(k + ' ')) { f.push(k); s = s.slice(k.length + 1); hit = true; } } const m = s.match(TM); return { unread: f.includes('Unread'), att: f.includes('Has attachments'), pinned: f.includes('Pinned'), head: m ? s.slice(0, m.index) : s.slice(0, 120), when: m ? m[1] : '?' }; };
@@ -290,7 +318,7 @@ if (ON_MAIL) {
     m = when.match(/^(Sun|Mon|Tue|Wed|Thu|Fri|Sat) (\d{1,2}):(\d{2}) ([AP]M)$/); if (m) { const back = (d.getDay() - WDN.indexOf(m[1]) + 7) % 7 || 7; d.setDate(d.getDate() - back); d.setHours((+m[2] % 12) + (m[4] == 'PM' ? 12 : 0), +m[3], 0, 0); return d; } return null; };
   const rp = () => document.querySelector('[aria-label="Reading Pane"]');
   const bodyOf = () => { const R = rp(); const b = R && R.querySelector('[aria-label="Message body"]'); return b ? b.innerText.replace(/\s+/g, ' ').trim() : ''; };
-  const quiet = (ms, cap) => new Promise(res => { let fin = false; const done = () => { if (fin) return; fin = true; mo.disconnect(); res(); }; let t = setTimeout(done, ms); const mo = new MutationObserver(() => { clearTimeout(t); t = setTimeout(done, ms); }); mo.observe(rp() || document.body, { subtree: true, childList: true, characterData: true }); setTimeout(done, cap); });
+  const quiet = (ms, cap) => new Promise(res => { let fin = false; const done = () => { if (fin) return; fin = true; mo.disconnect(); res(); }; let t = later(done, ms); const mo = new MutationObserver(() => { cancel(t); t = later(done, ms); }); mo.observe(rp() || document.body, { subtree: true, childList: true, characterData: true }); later(done, cap); });
   const isSel = o => o.getAttribute('aria-selected') == 'true';
   const keyOf = el => { const p = parse(el.getAttribute('aria-label')); return p.head + ' ' + p.when; };
   const findRow = key => rowsNow().find(o => keyOf(o) == key);
@@ -399,7 +427,7 @@ if (ON_MAIL) {
         if (s[rk] || [...Object.keys(s)].some(k => k.endsWith('|' + p.head.slice(0, 120)) && s[k] && Math.abs((+s[k] || 0) - t.getTime()) < 6 * 3600e3)) continue;
         if (!senderOf(p.head, R)) continue;
         if (SKIP_SUBJ.test(p.head)) { markSeen(rk); continue; }
-        log('New: ' + p.head.slice(0, 80)); await takeOne(el, R, false); return;
+        log('New: ' + p.head.slice(0, 80)); const r = await takeOne(el, R, false); if (!reloading) later(scan, r ? 1500 : 5000); return;
       }
       status('watching, ' + new Date().toLocaleTimeString('en-AU', { hour: 'numeric', minute: '2-digit' }));
     } catch (e) { log('Outlook side error: ' + e.message); status(e.message, true); }
@@ -440,9 +468,9 @@ if (ON_MAIL) {
     // a test run in progress carries on after each reload
     if (gget('wfPending', null)) { await finishPending(); }
     if (gget('wfTestQ', []).length) { await sleep(1500); await W.wreFilerTestNext(); return; }
-    let deb = null; const mo = new MutationObserver(() => { clearTimeout(deb); deb = setTimeout(scan, 4000); });
+    let deb = null; const mo = new MutationObserver(() => { cancel(deb); deb = later(scan, 4000); });
     const list = rowsNow()[0] && rowsNow()[0].parentElement; if (list) mo.observe(list, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-label'] });
-    setInterval(scan, 60e3); scan();
+    every(scan, 60e3); scan(); every(pushLog, 30e3);
   };
   if (document.readyState == 'loading') document.addEventListener('DOMContentLoaded', boot); else boot();
 }
@@ -459,7 +487,7 @@ async function safeFu(o) { try { return await upsertFu(o); } catch (e) { log('To
 // AROFLO SIDE
 // =====================================================================
 if (ON_AF) {
-  const waitFor = (cond, max) => new Promise(res => { if (cond()) return res(true); let done = false; const mo = new MutationObserver(() => { if (!done && cond()) { done = true; mo.disconnect(); res(true); } }); mo.observe(document.documentElement, { subtree: true, childList: true, attributes: true }); setTimeout(() => { if (!done) { done = true; mo.disconnect(); res(cond()); } }, max); });
+  const waitFor = (cond, max) => new Promise(res => { if (cond()) return res(true); let done = false; const mo = new MutationObserver(() => { if (!done && cond()) { done = true; mo.disconnect(); res(true); } }); mo.observe(document.documentElement, { subtree: true, childList: true, attributes: true }); later(() => { if (!done) { done = true; mo.disconnect(); res(cond()); } }, max); });
   const jq = () => W.jQuery;
   // Task search: the dashboard's own Search Tasks form, no page load. field = JobNo | CustOn | Location | Desc | Client
   const search = async (term, field) => {
@@ -497,13 +525,13 @@ if (ON_AF) {
   const jobs = () => gget('wfJobs', []);
   const saveJob = j => { const q = jobs(); const i = q.findIndex(x => x.id == j.id); if (i >= 0) q[i] = j; else q.push(j); gset('wfJobs', q); };
   const getJob = id => jobs().find(x => x.id == id);
-  const go = href => { setTimeout(() => { location.href = href; }, 50); };
+  const go = href => { later(() => { location.href = href; }, 50); };
   const HOME = '/ims/Site/Home/index.cfm#wre-filer';
   const opDone = (op, res) => { const j = getJob(op.jobId); if (j) { j.res = Object.assign(j.res || {}, res); j.tries = 0; saveJob(j); } ss('wfOp', null); go(HOME); };
 
   const setv = (el, v) => { el.focus(); el.value = v; ['input', 'keyup', 'change'].forEach(t => el.dispatchEvent(new Event(t, { bubbles: true }))); if (jq()) jq()(el).trigger('change'); el.blur(); };
   const ckReady = name => waitFor(() => !!(W.CKEDITOR && W.CKEDITOR.instances[name] && W.CKEDITOR.instances[name].status == 'ready'), 10000);
-  const setData = (ed, html) => new Promise(r => { ed.setData(html, { callback: r }); setTimeout(r, 2500); });
+  const setData = (ed, html) => new Promise(r => { ed.setData(html, { callback: r }); later(r, 2500); });
   const hdrFields = () => { const f = document.forms.editwr; return f ? [...f.elements].filter(e => e.name && !/^(hidden|button|submit)$/.test(e.type) && !/^(description|thisnote)$/.test(e.name)).map(e => e.name + '=' + (/radio|checkbox/.test(e.type) ? e.checked : e.value)).join('|') : ''; };
 
   // Op: description. mode 'set' (new task with TBC) or 'append' (another PO under the existing description).
@@ -519,7 +547,7 @@ if (ON_AF) {
       const ok = plain(ed.getData()) == plain(want) && hdrFields() == f0 && (op.mode == 'set' || plain(ed.getData()).startsWith(plain(old).slice(0, 200)));
       if (!ok) { await setData(ed, old); ed.resetDirty(); return opDone(op, { descErr: 'check failed before save, nothing saved' }); }
       op.saved = true; op.fired = true; op.want = plain(want); op.f0 = f0; ss('wfOp', op); ed.updateElement();
-      setTimeout(() => jq()(document.getElementById('updateheader__btn')).trigger('click'), 50); firedWatch(op, 'descErr'); return;
+      later(() => jq()(document.getElementById('updateheader__btn')).trigger('click'), 50); firedWatch(op, 'descErr'); return;
     }
     // after the save: re-read it
     const r = await findJn(op.jn); const d = r && await descOf(r.href);
@@ -623,7 +651,7 @@ if (ON_AF) {
   const startOp = (op, href) => { ss('wfOp', op); go(href); };
   // After an op clicks save or create, the page should move on. If it hasn't in 40s (validation message, confirm box, slow save), report what the page says and go home.
   const pageSays = () => { const e = [...document.querySelectorAll('.ui-dialog:not([style*="display: none"]), .error, .alert, .afError, [class*="error"], [class*="validation"]')].filter(x => x.offsetParent).map(x => x.innerText.replace(/\s+/g, ' ').trim()).filter(Boolean); return e.join(' / ').slice(0, 300); };
-  const firedWatch = (op, what) => setTimeout(() => { const cur = ss('wfOp'); if (cur && cur.jobId == op.jobId && cur.op == op.op && cur.fired) opDone(op, { [what]: 'clicked but the page didn\'t move on. ' + (pageSays() ? 'Page says: ' + pageSays() : 'No message on the page') + '. Check it by hand' }); }, 40000);
+  const firedWatch = (op, what) => later(() => { const cur = ss('wfOp'); if (cur && cur.jobId == op.jobId && cur.op == op.op && cur.fired) opDone(op, { [what]: 'clicked but the page didn\'t move on. ' + (pageSays() ? 'Page says: ' + pageSays() : 'No message on the page') + '. Check it by hand' }); }, 40000);
 
   // ---------- builder dates ----------
   async function ambroseDates(rec, base) {
@@ -889,7 +917,7 @@ if (ON_AF) {
     { const seenIds = new Set(), seenKeys = new Set(); const q = jobs().filter(j => { if (seenIds.has(j.id) || (j.status == 'new' && seenKeys.has(j.key))) return false; seenIds.add(j.id); if (j.status == 'new') seenKeys.add(j.key); return true; }); if (q.length != jobs().length) { log('Cleared ' + (jobs().length - q.length) + ' doubled up job(s)'); gset('wfJobs', q); } }
     if (await resumeOp()) return;
     if (!/Site\/Home/.test(location.pathname)) { go(HOME); return; }
-    setInterval(tick, 20e3); setTimeout(tick, 3000);
+    every(tick, 20e3); later(tick, 3000); every(pushLog, 30e3);
   };
   if (document.readyState == 'loading') document.addEventListener('DOMContentLoaded', boot); else boot();
 }
