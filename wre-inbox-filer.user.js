@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.36
+// @version      0.9.37
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -326,7 +326,11 @@ if (ON_MAIL) {
   let lastPdf = null, catching = false;
   if (IS_FILER) {
     // Images only count while the filer has a preview open (catching), or every avatar and icon Outlook loads would land here.
-    const keep = (blob, at) => { if (blob && blob.size > 500) lastPdf = { blob, at }; };
+    // Only keep a file that really is what the grab is after (first bytes), or a freshly opened tab's avatars and icons land
+    // here first, the grab takes one of those, calls it the wrong type and gives up in seconds (19/10, both re-reads at 4:51 and 5:03).
+    const keep = async (blob, at) => { if (!blob || blob.size < 500) return; try { const h = String.fromCharCode(...new Uint8Array(await blob.slice(0, 12).arrayBuffer()));
+      const isPdf = h.startsWith('%PDF'), isImg = h.startsWith('\xFF\xD8') || h.startsWith('\x89PNG') || h.startsWith('GIF8') || h.startsWith('RIFF') || h.slice(4, 8) == 'ftyp';
+      if ((catching == 'image' ? isImg : isPdf)) lastPdf = { blob, at }; } catch (e) {} };
     const want = ct => /pdf|octet-stream/i.test(ct) || (catching && /^image\//i.test(ct));
     const of = W.fetch;
     W.fetch = function () { const p = of.apply(this, arguments); p.then(r => { try { const ct = r.headers.get('content-type') || ''; if (want(ct)) r.clone().blob().then(b => keep(b, now())); } catch (e) {} }).catch(() => {}); return p; };
@@ -380,7 +384,7 @@ if (ON_MAIL) {
     const findCard = () => { const R = rp(); return R && [...R.querySelectorAll('[title]')].find(x => x.getAttribute('title') == name); };
     // the card can be a beat behind the reading pane's text (Outlook fills the attachment well last), so give it a few seconds (19/10)
     await waitFor(() => !!findCard(), 6000); const card = findCard(); if (!card) { log('No card for ' + name + ' in the reading pane'); return null; }
-    lastPdf = null; catching = true; const t0 = now(); (card.closest('[role=button],button,[role=option]') || card).click();
+    lastPdf = null; catching = /\.pdf$/i.test(name) ? 'pdf' : 'image'; const t0 = now(); (card.closest('[role=button],button,[role=option]') || card).click();
     await waitFor(() => !!(lastPdf && lastPdf.at >= t0), 20000);
     const got = lastPdf; catching = false; await sleep(800);
     const close = [...document.querySelectorAll('button')].find(b => /^Close$/i.test(b.getAttribute('aria-label') || b.title || b.innerText.trim()) && b.offsetParent);
@@ -1051,7 +1055,9 @@ if (ON_AF) {
         if (!j) { const subj = ((t.description || '').match(/^Email: (.+)$/m) || [])[1] || ''; if (subj) await reread(subj.trim().slice(0, 60)); else await note('can\'t tell which email it was'); continue; }
         if (j.status == 'new') { await note('it\'s already in the queue'); continue; }
         const R = j.res || {};
-        if (j.pdfKey && !gget(j.pdfKey, '') && !R.up) { const b64 = await pdfFromTask(t.id); if (b64) gset(j.pdfKey, b64); else { await reread(String(j.key || '').split('|').slice(1).join('|').trim().slice(0, 60) || j.info.subject.slice(0, 60)); continue; } }
+        // no PDF in hand (never grabbed, or wiped): get it back off the Todoist comment, else read the email again (19/10: a job that
+        // never got its PDF went back in the queue as it was and hit the same error again)
+        if ((!j.pdfKey || !gget(j.pdfKey, '')) && !R.up && /^(po|updated_po|esa)$/.test((j.x || {}).kind || '')) { const b64 = j.pdfKey ? await pdfFromTask(t.id) : ''; if (b64) gset(j.pdfKey, b64); else { await reread(String(j.key || '').split('|').slice(1).join('|').trim().slice(0, 60) || j.info.subject.slice(0, 60)); continue; } }
         Object.keys(R).forEach(k => { if (/Err$/.test(k) || k == 'createDry') delete R[k]; }); j.res = R;
         if (!R.jn) j.creating = false; // check AroFlo for the task again before making one
         Object.assign(j, { status: 'new', tries: 0, notBefore: 0, waited: true, retryTask: t.id }); saveJob(j);
