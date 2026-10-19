@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.27
+// @version      0.9.28
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -265,7 +265,7 @@ Add these fields to the same JSON object:
 po_lines is a check on your own work. List EVERY line item on the PO scope, in order, including charges. For each, "went" is the exact dot point text from blocks (if one PO line became two dot points, e.g. disconnect in visit 1 and reconnect in visit 2, give the first one). Only these may be left out: charge lines (minimum call out, labour rate, allowance for a double visit, attendance fee) as "left out: charge only", the builder's standard paragraphs as "left out: builder boilerplate", and admin comments as "left out: admin comment". Never leave out a work line or an instruction about doing the work.`;
 
 // ---------- small UI chip ----------
-let chip = null;
+let chip = null, verTag = null;
 function paint() {
   if (!chip || !document.body) return;
   const st = gget('wfState_' + (ON_MAIL ? 'mail' : 'af'), {}); const r = gget('wfRules', {});
@@ -278,7 +278,11 @@ function mountChip() {
   chip = document.createElement('div');
   chip.style.cssText = 'position:fixed;left:10px;bottom:52px;z-index:2147483646;color:#fff;font:600 12px/1.2 system-ui,sans-serif;padding:6px 10px;border-radius:999px;box-shadow:0 2px 8px rgba(0,0,0,.25);cursor:pointer;max-width:420px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
   chip.title = 'WRE Inbox Filer ' + VER + '. Click for the log.';
-  chip.onclick = showLog; document.body.appendChild(chip); paint();
+  chip.onclick = showLog; document.body.appendChild(chip);
+  // which version is running, sat just above the chip (19/10)
+  verTag = document.createElement('div'); verTag.textContent = 'Filer v' + VER;
+  verTag.style.cssText = 'position:fixed;left:12px;bottom:84px;z-index:2147483646;color:#fff;background:rgba(33,32,29,.85);font:600 11px/1.2 system-ui,sans-serif;padding:3px 7px;border-radius:6px;pointer-events:none';
+  document.body.appendChild(verTag); paint();
 }
 function showLog() {
   const box = document.createElement('div');
@@ -986,7 +990,7 @@ if (ON_AF) {
     { const nt = ((performance.getEntriesByType && performance.getEntriesByType('navigation')[0]) || {}).type || '';
       const ours = /#wre-filer/.test(location.hash) || !!ss('wfOp') || now() - (ss('wfGoing') || 0) < 120e3 || nt == 'reload' || /login|signin|logon/i.test(location.pathname + ' ' + document.referrer); // signing back in after a timeout counts as ours
       ss('wfGoing', null);
-      if (!ours) { try { sessionStorage.removeItem('wfRole'); } catch (e) {} log('This tab got moved by something else (' + document.title.slice(0, 50) + '), so it stopped being a filer tab'); if (chip) chip.remove(); return; } }
+      if (!ours) { try { sessionStorage.removeItem('wfRole'); } catch (e) {} log('This tab got moved by something else (' + document.title.slice(0, 50) + '), so it stopped being a filer tab'); if (chip) chip.remove(); if (verTag) verTag.remove(); return; } }
     if (await resumeOp()) return;
     if (!/Site\/Home/.test(location.pathname)) { go(HOME); return; }
     every(tick, 20e3); later(tick, 3000); every(pushLog, 30e3);
