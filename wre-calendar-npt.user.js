@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Calendar NPT
 // @namespace    wre
-// @version      3.0
+// @version      3.0.1
 // @description  Notes, photos and timesheet badges on the AroFlo calendar for the days in view, kept in step with the WRE daily check issue list in Todoist, plus an A letter on Ambrose jobs for photos or the report being up on Ambrose
 // @match        https://office.aroflo.com/ims/Site/Calendar/*
 // @match        https://tradiesadmin.ambroseconstruct.com.au/*
@@ -906,11 +906,15 @@
   }
 
   // The background check (PC only): open Tradies Admin in a background tab for the POs that need a look
+  let sweepWhy = '';
   function maybeSweep(force) {
-    if (PHONE || !cal) return;
+    try { sweepGo(force); } catch (e) { sweepWhy = 'error: ' + (e && e.message || e); console.warn('WRE NPT Ambrose check:', e); }
+  }
+  function sweepGo(force) {
+    if (PHONE || !cal) { sweepWhy = PHONE ? 'phone' : 'no calendar'; return; }
     const J = GM_getValue('ambJob', null), now = Date.now();
-    if (J && !J.doneAt && now - J.started < 8 * 60000) return; // one's already going
-    if (!force && now - (GM_getValue('ambLast', 0) || 0) < A_GAP) return;
+    if (J && !J.doneAt && now - J.started < 8 * 60000) { sweepWhy = 'one already going'; return; } // one's already going
+    if (!force && now - (GM_getValue('ambLast', 0) || 0) < A_GAP) { sweepWhy = 'ran in the last 30 min'; return; }
     const today = ymd(new Date()), oldest = ymd(new Date(now - A_DAYS * 864e5)), D = ambData(), bases = new Set();
     const stale = base => force || !D[base] || now - (D[base].at || 0) > A_EVERY;
     Object.values(lastJobs).flat().forEach(v => {
@@ -920,7 +924,8 @@
       if (stale(a.base)) bases.add(a.base);
     });
     if (tdState) for (const r of tdState.aOpen.values()) if (r.po && stale(r.po.slice(0, 8))) bases.add(r.po.slice(0, 8));
-    if (!bases.size) return;
+    if (!bases.size) { sweepWhy = 'nothing to check'; return; }
+    sweepWhy = 'opened for ' + [...bases].join(', ');
     GM_setValue('ambLast', now);
     GM_setValue('ambJob', { queue: [...bases], started: now, cur: null });
     try { if (sweepTab && !sweepTab.closed) sweepTab.close(); } catch (e) {}
@@ -938,6 +943,15 @@
     aMsg = ''; repaint(); ambSync();
   });
   setInterval(() => { if (!document.hidden && cal) maybeSweep(false); }, 10 * 60000);
+  // For checking what the Ambrose side is up to (Tampermonkey menu, or from the page)
+  const ambStatus = () => {
+    const D = (GM_getValue('ambData', {}) || {}).bases || {}, J = GM_getValue('ambJob', null), E = GM_getValue('ambErr', null);
+    return { why: sweepWhy, job: J && { queue: J.queue, cur: J.cur && J.cur.base, started: J.started && hm(J.started), done: J.doneAt && hm(J.doneAt) },
+      last: GM_getValue('ambLast', 0) && hm(GM_getValue('ambLast', 0)), err: E && E.msg, end: GM_getValue('ambSweepEnd', 0) && hm(GM_getValue('ambSweepEnd', 0)),
+      pos: Object.fromEntries(Object.entries(D).map(([b, B]) => [b, Object.keys(B.pos || {}).length + ' POs, ' + (B.at ? hm(B.at) : '?')])) };
+  };
+  try { W.__wreAmb = () => JSON.stringify(ambStatus()); } catch (e) {}
+  GM_registerMenuCommand('Check Ambrose now', () => { GM_setValue('ambJob', null); maybeSweep(true); W.alert('Ambrose check: ' + sweepWhy); });
 
   // ---------- OK'ing a missing item by hand, from the calendar ----------
   // Click a red letter: it's OK'd (e.g. turned away at site, so no photos). Click a blue one: the OK comes off.
