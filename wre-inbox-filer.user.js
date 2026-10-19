@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.25
+// @version      0.9.26
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -607,9 +607,13 @@ if (ON_AF) {
       return opDone(op, m ? { jn: m[1], otherLoc: op.otherLoc || '', newLoc: !!op.newLoc } : { createErr: 'clicked Create Task but landed on "' + document.title + '" instead of a new task' + (pageSays() ? '. Page says: ' + pageSays() : '') }); }
     if (!document.forms.newwr && !(await waitFor(() => !!document.forms.newwr, 20000))) return opDone(op, { createErr: 'create page didn\'t open (on "' + document.title + '")' });
     const $ = jq(); const v = n => (document.querySelector('[name=' + n + ']') || {}).value || '';
-    const pickFrom = async (name, term, test) => { const el = document.querySelector('[name=' + name + ']'); el.focus(); el.value = term; $(el).autocomplete('search', term);
-      await waitFor(() => [...document.querySelectorAll('ul.ui-autocomplete li')].some(l => l.offsetParent), 6000); await sleep(600);
-      const lis = [...document.querySelectorAll('ul.ui-autocomplete li')].filter(l => l.offsetParent); const li = lis.find(l => test(l.innerText.replace(/\s+/g, ' '), l, lis)); if (!li) return false;
+    // Waits for a suggestion that passes the test, not just any list. The street search's list was still showing when the client
+    // search ran straight after it, so it read the old list and said "client Ambrose not found" (19/10).
+    const pickFrom = async (name, term, test) => { const el = document.querySelector('[name=' + name + ']'); el.focus(); try { $(el).autocomplete('close'); } catch (e) {} el.value = term; $(el).autocomplete('search', term);
+      const vis = () => [...document.querySelectorAll('ul.ui-autocomplete li')].filter(l => l.offsetParent);
+      const hit = () => { const ls = vis(); return ls.find(l => test(l.innerText.replace(/\s+/g, ' '), l, ls)); };
+      await waitFor(() => !!hit(), 8000); await sleep(600);
+      const lis = vis(); const li = hit(); if (!li) return false;
       const a = li.querySelector('a,div') || li; $(a).trigger('mouseenter'); $(a).trigger('click'); await sleep(1500); return true; };
     const a = op.address; const st = norm(a.street), sub = norm(a.suburb);
     // 1. existing location under the builder's client. The same house under another client (an old private job) doesn't count:
