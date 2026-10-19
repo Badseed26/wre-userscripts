@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.40
+// @version      0.9.41
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -683,7 +683,13 @@ if (ON_AF) {
       W.XMLHttpRequest.prototype.send = function () { try { const x = this; if (/s3_filename|s3_fileexists|amazonaws|upload_response|upload_documents/i.test(x.__wfUrl || '')) x.addEventListener('loadend', () => { try { W.__wfNet.push({ at: now(), path: String(x.__wfUrl).replace(/^https?:\/\/([^\/]+)/, '$1').split('?')[0].slice(-60), status: x.status, say: String(x.responseText || '').replace(/<[^>]+>/g, ' ').replace(/[\s"]+/g, ' ').slice(0, 160) }); } catch (e) {} }); } catch (e) {} return XS.apply(this, arguments); }; }
     const netSince = W.__wfNet.length;
     const netTxt = () => W.__wfNet.slice(netSince).map(n => n.path + ' ' + n.status + ' ' + n.say).join(' || ').slice(0, 700);
-    const add = document.querySelector('li.btnUploadNew'); if (!add) return fin(op, { upErr: 'no Add Documents & Photos on the page' });
+    // The Add in the page's top menu (li.btnUploadNew) uploads to the company's documents, not the task: its upload link only
+    // carries compCoded. The task's own Add is button#btnUploadNew inside #areaDocumentManagement, which only exists once the
+    // Documents & Photos tab has loaded (19/10: every PDF the filer put up landed in company documents and never showed on the task).
+    const addBtn = () => { const a = document.getElementById('areaDocumentManagement'); return a && a.querySelector('#btnUploadNew,.btnUploadNew'); };
+    if (!addBtn()) { const tab = document.getElementById('documents_tab'); if (!tab) return fin(op, { upErr: 'no Documents & Photos tab on the page' }); (tab.querySelector('a') || tab).click(); await waitFor(() => !!addBtn(), 20000); await sleep(800); }
+    const add = addBtn(); if (!add) return fin(op, { upErr: 'the Documents & Photos tab didn\'t load its Add button' });
+    if (!/idcoded=/.test(add.getAttribute('data-s3postprocessredirecturl') || '')) return fin(op, { upErr: 'that Add button isn\'t the task\'s (no task id on its upload link), nothing uploaded' });
     add.click();
     if (!(await waitFor(() => !!document.getElementById('s3FileUpload'), 10000))) return fin(op, { upErr: 'upload box didn\'t open' });
     const inp = document.getElementById('s3FileUpload'); const bin = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
@@ -905,7 +911,7 @@ if (ON_AF) {
   const scopeText = x => (x.blocks || []).map(b => (b.h ? '\n' + b.h.toUpperCase() : '') + (b.rooms || []).map(r => '\n' + r.r + (r.items || []).map(i => '\n  * ' + (typeof i == 'string' ? i : i.t)).join('')).join('') + (b.items || []).map(i => '\n  * ' + (typeof i == 'string' ? i : i.t)).join('')).join('\n').slice(0, 2500);
   async function runJob(job) {
     const x = job.x, R = job.res || {}, plan = job.plan || [];
-    const fin = async (lines, err) => { job.status = err ? 'error' : 'done'; job.plan = lines; saveJob(job); if (job.dry) await dryNote(job, job.test ? lines.concat(readOut(job, lines)) : x.cov ? lines.concat(['Line check: ' + covText(x.cov)]) : lines); if (job.pdfKey && !err && !R.upErr) gdel(job.pdfKey); if (!err) (job.atts || []).forEach((a, i) => { if (!R['x' + i + 'Err']) gdel(a.key); }); if (!err && job.retryTask) { try { await closeFu(job.retryTask); } catch (e) {} delete job.retryTask; saveJob(job); } log((err ? 'Error: ' : 'Done: ') + job.info.subject.slice(0, 60) + ' | ' + lines.join(' | ')); };
+    const fin = async (lines, err) => { job.status = err ? 'error' : 'done'; job.plan = lines; saveJob(job); if (job.dry) await dryNote(job, job.test ? lines.concat(readOut(job, lines)) : x.cov ? lines.concat(['Line check: ' + covText(x.cov)]) : lines); if (job.pdfKey && !err && !R.upErr) gdel(job.pdfKey); if (!err) (job.atts || []).forEach((a, i) => { if (!R['x' + i + 'Err']) gdel(a.key); }); if (!err && job.retryTask) { const stillBad = R.upErr || Object.keys(R).some(k => /^x\d+Err$/.test(k)); if (!stillBad) { try { await closeFu(job.retryTask); } catch (e) {} } delete job.retryTask; saveJob(job); } log((err ? 'Error: ' : 'Done: ') + job.info.subject.slice(0, 60) + ' | ' + lines.join(' | ')); };
     const nextAtt = () => job.dry ? -1 : (job.atts || []).findIndex((f, i) => !R['x' + i] && !R['x' + i + 'Err']);
     const doAtt = href => { const i = nextAtt(), f = job.atts[i]; return startOp({ op: 'upload', jobId: job.id, pdfKey: f.key, name: f.name, type: f.type, extra: i }, href); };
     const attTxt = () => { const a = job.atts || []; if (!a.length) return ''; const bad = a.filter((f, i) => R['x' + i + 'Err']); return ', ' + (a.length - bad.length) + ' other attachment' + (a.length == 1 ? '' : 's') + ' on' + (bad.length ? ' (' + bad.map(f => f.name).join(', ') + ' FAILED)' : ''); };
@@ -1092,7 +1098,7 @@ if (ON_AF) {
         await note('back in the queue'); log('Try again: ' + j.info.subject.slice(0, 60)); continue;
       }
       if ((m = key.match(/^chk-(.+)$/))) { // a check item whose upload failed: redo just the upload, the task and description stay (19/10)
-        const j = jobs().find(x => x.status != 'new' && x.x && x.x.po_full == m[1]); const R = (j && j.res) || {};
+        const j = jobs().filter(x => x.status != 'new' && x.x && x.x.po_full == m[1]).pop(); const R = (j && j.res) || {};
         const failed = j && (R.upErr || Object.keys(R).some(k => /^x\d+Err$/.test(k)));
         if (!failed) { await note('nothing on this one the filer can redo, do it by hand'); continue; }
         if (R.upErr && j.pdfKey && !gget(j.pdfKey, '')) { const pt = ((t.description || '').match(/^pdf task: (\S+)/m) || [])[1]; const b64 = await pdfFromTask(pt || t.id); if (b64) gset(j.pdfKey, b64); else { const subj = ((t.description || '').match(/^Email: (.+)$/m) || [])[1] || ''; if (subj) await reread(subj.trim().slice(0, 60)); else await note('the PDF is gone from the filer and I can\'t tell which email it was, upload it by hand'); continue; } }
