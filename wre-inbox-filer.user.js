@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.29
+// @version      0.9.30
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -601,13 +601,26 @@ if (ON_AF) {
   }
 
   // Op: upload the PDF on the task page (Documents & Photos, Add, file box, Done). Untested end to end, see README.
+  // The task's files as AroFlo's server has them (what the Documents & Photos tab loads), or null off a task page.
+  const taskDocs = async () => {
+    const wc = new URLSearchParams(location.search).get('wrCoded'); if (!wc) return null;
+    const q = new URLSearchParams({ searchdocumenttype: 'task', idcoded: wc, customfield_id: '0', columns: 'document', category_id: '0', searchTaskBUs: 'childbus', _search: 'true', rows: '200', page: '1', sidx: 'sortOrder', sord: 'asc' });
+    try { const r = await fetch('/ims/Site/Documents/AJAX_JSON_search_documents.cfm?' + q, { credentials: 'include' }); return r.ok ? await r.text() : null; } catch (e) { return null; }
+  };
+  const hasDoc = (list, name) => !!list && list.toLowerCase().includes(name.toLowerCase());
   async function opUpload(op) {
     // the PO reports as up/upErr, the other attachments as x<n>/x<n>Err so each one is tracked on its own
     const fin = (o, r) => opDone(o, o.extra == null ? r : { ['x' + o.extra + (r.upErr ? 'Err' : '')]: r.upErr || r.up });
     const b64 = gget(op.pdfKey, ''); if (!b64) return fin(op, { upErr: 'file missing from storage' });
-    if (op.fired) { // after Done: the page reloaded or the box closed, check the list
-      await sleep(2500); const t = document.body.innerText; return fin(op, t.includes(op.name.replace(/\.[a-z0-9]+$/i, '')) ? { up: op.name } : { up: op.name, upWarn: 'uploaded, but couldn\'t see it in the list to confirm' }); }
+    if (op.fired) { // after Done: check AroFlo's own list of the task's files, not the page (19/10: the name stayed in the upload box,
+      // so a file that never saved still looked uploaded). Not there after 20 s: start the upload again, twice, then call it.
+      let docs = null; for (let i = 0; i < 8 && !hasDoc(docs, op.name); i++) { await sleep(2500); docs = await taskDocs(); }
+      if (docs == null) { const t = document.body.innerText; return fin(op, t.includes(op.name.replace(/\.[a-z0-9]+$/i, '')) ? { up: op.name } : { upErr: 'couldn\'t confirm the upload' }); }
+      if (hasDoc(docs, op.name)) return fin(op, { up: op.name });
+      if ((op.again || 0) < 2) { op.again = (op.again || 0) + 1; op.fired = false; op.tries = 0; ss('wfOp', op); log('Upload of ' + op.name + ' didn\'t show in the task\'s Documents, going again'); location.reload(); return; }
+      return fin(op, { upErr: op.name + ' never showed in the task\'s Documents after 3 goes' }); }
     if (!/Task - AroFlo/.test(document.title) && !(await waitFor(() => /Task - AroFlo/.test(document.title), 20000))) return fin(op, { upErr: 'task page did not open' });
+    if (hasDoc(await taskDocs(), op.name)) return fin(op, { up: op.name }); // already on the task (a retry), don't double it
     const add = document.querySelector('li.btnUploadNew'); if (!add) return fin(op, { upErr: 'no Add Documents & Photos on the page' });
     add.click();
     if (!(await waitFor(() => !!document.getElementById('s3FileUpload'), 10000))) return fin(op, { upErr: 'upload box didn\'t open' });
@@ -616,6 +629,8 @@ if (ON_AF) {
     const box = () => inp.closest('.ui-dialog') || document.body;
     const ok = await waitFor(() => { const t = box().innerText; return t.includes(op.name) && !/PROCESSING|UPLOADING/i.test(t); }, 60000);
     if (!ok) return fin(op, { upErr: 'upload didn\'t finish in a minute' });
+    // give it a few seconds to settle and make sure it hasn't gone back to uploading before Done
+    await sleep(4000); if (!(await waitFor(() => !/PROCESSING|UPLOADING/i.test(box().innerText), 60000))) return fin(op, { upErr: 'upload didn\'t finish in a minute' });
     const done = [...box().querySelectorAll('button,a')].find(b => /^\s*Done\s*$/i.test(b.innerText || '')); if (!done) return fin(op, { upErr: 'no Done button' });
     op.fired = true; ss('wfOp', op); done.click(); await sleep(4000); return opUpload(op);
   }
