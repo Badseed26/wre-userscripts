@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.37
+// @version      0.9.38
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -662,6 +662,13 @@ if (ON_AF) {
     if (hasDoc(await taskDocs(), op.name)) return fin(op, { up: op.name }); // already on the task (a retry), don't double it
     // AroFlo reports a failed upload step through sendSnafu: keep a line of what it saw (19/10)
     if (W.sendSnafu && !W.sendSnafu.wf) { const o0 = W.sendSnafu; W.sendSnafu = function (d) { try { log('AroFlo upload snafu: ' + JSON.stringify({ status: d && d.status, say: String((d && (d.errormessage || d.responseText)) || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(0, 160) })); } catch (e) {} return o0.apply(this, arguments); }; W.sendSnafu.wf = 1; }
+    // Keep what AroFlo's own upload steps come back with (generate_s3_filename, the S3 post, check_s3_fileexists): the box said
+    // Complete every time while the file never showed on the task, so the log needs the server's side of it (19/10).
+    if (!W.__wfNet) { W.__wfNet = []; const XO = W.XMLHttpRequest.prototype.open, XS = W.XMLHttpRequest.prototype.send;
+      W.XMLHttpRequest.prototype.open = function (m, u) { try { this.__wfUrl = String(u); } catch (e) {} return XO.apply(this, arguments); };
+      W.XMLHttpRequest.prototype.send = function () { try { const x = this; if (/s3_filename|s3_fileexists|amazonaws|upload_response|upload_documents/i.test(x.__wfUrl || '')) x.addEventListener('loadend', () => { try { W.__wfNet.push({ at: now(), path: String(x.__wfUrl).replace(/^https?:\/\/([^\/]+)/, '$1').split('?')[0].slice(-60), status: x.status, say: String(x.responseText || '').replace(/<[^>]+>/g, ' ').replace(/[\s"]+/g, ' ').slice(0, 160) }); } catch (e) {} }); } catch (e) {} return XS.apply(this, arguments); }; }
+    const netSince = W.__wfNet.length;
+    const netTxt = () => W.__wfNet.slice(netSince).map(n => n.path + ' ' + n.status + ' ' + n.say).join(' || ').slice(0, 700);
     const add = document.querySelector('li.btnUploadNew'); if (!add) return fin(op, { upErr: 'no Add Documents & Photos on the page' });
     add.click();
     if (!(await waitFor(() => !!document.getElementById('s3FileUpload'), 10000))) return fin(op, { upErr: 'upload box didn\'t open' });
@@ -679,8 +686,8 @@ if (ON_AF) {
     const trail = [], at = []; let last = '', lastChange = now(); const t0 = now();
     for (let i = 0; now() - t0 < 360000; i++) { const st = state() || (row() ? 'row' : 'no row'); if (st != last) { last = st; trail.push(st); at.push(Math.round((now() - t0) / 1000)); lastChange = now(); } if (/^(COMPLETE|FAILED)$/.test(st) || now() - lastChange > 150000) break; if (i % 30 == 0) status('upload ' + op.name.slice(0, 30) + ': ' + st); await sleep(1000); }
     const where = trail.map((x, i) => x + '@' + at[i] + 's').join(' > '); const extra = (box().innerText.match(/(error|failed|not allowed|too large|not supported|snafu)[^.]{0,120}/i) || [''])[0].trim();
-    if (last != 'COMPLETE') return fin(op, { upErr: 'AroFlo\'s upload box got to "' + where + '"' + (extra ? ' (' + extra + ')' : '') + ', so Done wasn\'t pressed' });
-    log('Upload of ' + op.name + ': box went ' + where);
+    if (last != 'COMPLETE') return fin(op, { upErr: 'AroFlo\'s upload box got to "' + where + '"' + (extra ? ' (' + extra + ')' : '') + ', so Done wasn\'t pressed. Calls: ' + netTxt() });
+    log('Upload of ' + op.name + ': box went ' + where + '. Calls: ' + (netTxt() || 'none seen'));
     const done = [...box().querySelectorAll('button,a')].find(b => /^\s*Done\s*$/i.test(b.innerText || '')); if (!done) return fin(op, { upErr: 'no Done button' });
     op.fired = true; ss('wfOp', op); done.click(); await sleep(4000); return opUpload(op);
   }
@@ -890,6 +897,7 @@ if (ON_AF) {
     const attTxt = () => { const a = job.atts || []; if (!a.length) return ''; const bad = a.filter((f, i) => R['x' + i + 'Err']); return ', ' + (a.length - bad.length) + ' other attachment' + (a.length == 1 ? '' : 's') + ' on' + (bad.length ? ' (' + bad.map(f => f.name).join(', ') + ' FAILED)' : ''); };
     const errFu = async msg => { if (!job.dry) await safeFu({ sec: 'check', key: 'err-' + job.id, p1: true, due: ymd(new Date()), title: 'Filer: ' + msg.slice(0, 80), desc: 'Email: ' + job.info.subject + '\nFrom ' + job.info.from + ', ' + job.info.date + (job.pdfKey ? '\nPDF attached below.' : ''), pdf: job.pdfKey && gget(job.pdfKey, '') ? { name: fileName(job), b64: gget(job.pdfKey, '') } : null }); return fin([msg], true); };
 
+    if (/^(po|updated_po)$/.test(x.kind) && !job.pdfKey && /^\s*(re|fw|fwd)\s*:/i.test(job.info.subject || '')) return errFu('Builder reply on PO ' + (x.po_full || '') + ' thread with no PDF, read it: ' + (x.summary || '').slice(0, 60));
     if (/^(po|updated_po|esa)$/.test(x.kind) && !job.pdfKey) return errFu((x.kind == 'esa' ? 'Energex safety advice' : 'PO ' + (x.po_full || '')) + ': couldn\'t grab the PDF out of the email');
     if (x.kind == 'esa') {
       const st = x.address && x.address.street; if (!st) return errFu('ESA with no address I could read');
@@ -1045,7 +1053,7 @@ if (ON_AF) {
       const reread = async head => { const r = gget('wfReread', []).filter(x => now() - x.at < 15 * 60e3 && x.task != t.id); r.push({ head, at: now(), task: t.id }); gset('wfReread', r); await note('reading the email again'); log('Try again: reading the email again: ' + head.slice(0, 50)); };
       let m;
       if ((m = key.match(/^err-read-(.*)$/))) {
-        const head = m[1].split('|').slice(1).join('|').trim();
+        const head = m[1].split('|').slice(1).join('|').trim().replace(/^\S+@\S+\s+/, '');
         if (!head) { await note('can\'t tell which email it was, do this one by hand'); continue; }
         const r = gget('wfReread', []).filter(x => now() - x.at < 15 * 60e3 && x.task != t.id); r.push({ head, at: now(), task: t.id }); gset('wfReread', r);
         await note('looking for the email again'); log('Try again: reading the email again: ' + head.slice(0, 50)); continue;
@@ -1057,7 +1065,7 @@ if (ON_AF) {
         const R = j.res || {};
         // no PDF in hand (never grabbed, or wiped): get it back off the Todoist comment, else read the email again (19/10: a job that
         // never got its PDF went back in the queue as it was and hit the same error again)
-        if ((!j.pdfKey || !gget(j.pdfKey, '')) && !R.up && /^(po|updated_po|esa)$/.test((j.x || {}).kind || '')) { const b64 = j.pdfKey ? await pdfFromTask(t.id) : ''; if (b64) gset(j.pdfKey, b64); else { await reread(String(j.key || '').split('|').slice(1).join('|').trim().slice(0, 60) || j.info.subject.slice(0, 60)); continue; } }
+        if ((!j.pdfKey || !gget(j.pdfKey, '')) && !R.up && /^(po|updated_po|esa)$/.test((j.x || {}).kind || '')) { const b64 = j.pdfKey ? await pdfFromTask(t.id) : ''; if (b64) gset(j.pdfKey, b64); else { await reread(String(j.key || '').split('|').slice(1).join('|').trim().replace(/^\S+@\S+\s+/, '').slice(0, 60) || j.info.subject.slice(0, 60)); continue; } }
         Object.keys(R).forEach(k => { if (/Err$/.test(k) || k == 'createDry') delete R[k]; }); j.res = R;
         if (!R.jn) j.creating = false; // check AroFlo for the task again before making one
         Object.assign(j, { status: 'new', tries: 0, notBefore: 0, waited: true, retryTask: t.id }); saveJob(j);
