@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.21
+// @version      0.9.22
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -17,6 +17,7 @@
 // @grant        unsafeWindow
 // @connect      api.anthropic.com
 // @connect      api.todoist.com
+// @connect      files.todoist.com
 // @connect      production-reportapi.ambrosebuilding.com.au
 // @run-at       document-start
 // @updateURL    https://raw.githubusercontent.com/Badseed26/wre-userscripts/main/wre-inbox-filer.user.js
@@ -135,6 +136,17 @@ async function upsertFu(o) {
   const t = await td('POST', 'tasks', Object.assign({ project_id: FU, section_id: sec }, body));
   if (o.pdf && t && t.id) { try { const up = await tdUpload(o.pdf.name, o.pdf.b64); await td('POST', 'comments', { task_id: t.id, content: 'PDF from the email', attachment: up }); } catch (e) { log('PDF to Todoist failed: ' + e.message); } }
   return t && t.id;
+}
+// The PDF the filer put on an error as a Todoist comment, back as base64 (for Try again).
+async function pdfFromTask(id) {
+  try {
+    const j = await td('GET', 'comments?task_id=' + id); const c = ((j && j.results) || []).find(x => { const a = x.file_attachment || x.attachment || {}; return /pdf/i.test(a.file_type || '') || /\.pdf$/i.test(a.file_name || ''); });
+    const a = c && (c.file_attachment || c.attachment); if (!a || !a.file_url) return '';
+    const r = await gm({ method: 'GET', url: a.file_url, headers: { Authorization: 'Bearer ' + tdToken() }, responseType: 'arraybuffer' });
+    if (r.status < 200 || r.status >= 300 || !r.response) return '';
+    const u = new Uint8Array(r.response); let bin = ''; for (let i = 0; i < u.length; i += 32768) bin += String.fromCharCode.apply(null, u.subarray(i, i + 32768));
+    const b64 = btoa(bin); return atob(b64.slice(0, 8)).startsWith('%PDF') ? b64 : '';
+  } catch (e) { log('Couldn\'t get the PDF back off Todoist: ' + e.message); return ''; }
 }
 const closeFu = id => td('POST', 'tasks/' + id + '/close');
 const reopenFu = id => td('POST', 'tasks/' + id + '/reopen');
@@ -377,7 +389,7 @@ if (ON_MAIL) {
     x.address = x.address || {}; x.dates = x.dates || []; x.blocks = x.blocks || []; x.vague = x.vague || []; x.site_contacts = x.site_contacts || []; x.warn = x.warn || [];
     const job = { id: P.id + Math.random().toString(36).slice(2, 6), at: now(), emailAt: P.emailAt, dry: P.live ? false : (R.dry || !!P.test), test: !!P.test, key: P.key, builder: P.builder || x.builder || '', info: { from: P.info.from, date: P.info.date, subject: P.info.subject, rs: P.info.rs, rec: P.info.rec, img: P.info.img, pdfName: P.pdfName || '' }, pdfKey: P.pdfKey || '', x, status: 'new' };
     if (x.kind == 'skip' || !x.kind) { if (gget('wfRetryNext', '')) { const tid = gget('wfRetryNext', ''); gdel('wfRetryNext'); closeFu(tid).catch(() => {}); } log('Skip: ' + P.info.subject.slice(0, 70) + ' (' + (x.why || '') + ')'); if (P.pdfKey) gdel(P.pdfKey); if (job.test) await dryNote(job, ['Would skip it: ' + (x.why || '')]); }
-    else { const q = gget('wfJobs', []); if (!job.test && q.some(j => j.key == job.key && now() - j.at < 30 * 60e3)) log('Already queued, not doubling up: ' + P.info.subject.slice(0, 70)); else { if (!job.test && gget('wfRetryNext', '')) { job.retryTask = gget('wfRetryNext', ''); gdel('wfRetryNext'); } q.push(job); gset('wfJobs', q); log('Queued ' + x.kind + ': ' + P.info.subject.slice(0, 70)); } }
+    else { const q = gget('wfJobs', []); if (!job.test && !gget('wfRetryNext', '') && q.some(j => j.key == job.key && now() - j.at < 30 * 60e3)) log('Already queued, not doubling up: ' + P.info.subject.slice(0, 70)); else { if (!job.test && gget('wfRetryNext', '')) { job.retryTask = gget('wfRetryNext', ''); gdel('wfRetryNext'); } q.push(job); gset('wfJobs', q); log('Queued ' + x.kind + ': ' + P.info.subject.slice(0, 70)); } }
     if (!P.test) markSeen(P.key); gdel('wfPending'); status('idle'); return true;
   }
 
@@ -422,10 +434,10 @@ if (ON_MAIL) {
       const s = seen();
       for (const el of rowsNow().slice(0, 40)) {
         const p = parse(el.getAttribute('aria-label')); if (p.pinned) continue;
-        const t = rowTime(p.when); if (!t || t.getTime() < start - 60e3) continue;
         const rk = p.head + ' ' + p.when + '|' + ymd(new Date());
-        const rr = gget('wfReread', []), again = rr.find(x => p.head.startsWith(x.head) && now() - x.at < 15 * 60e3);
+        const rr = gget('wfReread', []), sp = v => String(v).replace(/\s+/g, ' ').toLowerCase(), again = rr.find(x => sp(p.head).includes(sp(x.head)) && now() - x.at < 15 * 60e3);
         if (again) { gset('wfReread', rr.filter(x => x !== again && now() - x.at < 15 * 60e3)); gset('wfRetryNext', again.task); log('Reading again: ' + p.head.slice(0, 80)); const r = await takeOne(el, R, false); if (!reloading) later(scan, r ? 1500 : 5000); return; }
+        const t = rowTime(p.when); if (!t || t.getTime() < start - 60e3) continue;
         if (s[rk] || [...Object.keys(s)].some(k => k.endsWith('|' + p.head.slice(0, 120)) && s[k] && Math.abs((+s[k] || 0) - t.getTime()) < 6 * 3600e3)) continue;
         if (!senderOf(p.head, R)) continue;
         if (SKIP_SUBJ.test(p.head)) { markSeen(rk); continue; }
@@ -908,10 +920,11 @@ if (ON_AF) {
       }
       if ((m = key.match(/^err-(j[a-z0-9]+)$/))) {
         const j = jobs().find(x => x.id == m[1]);
-        if (!j) { await note('the filer has dropped that one (over 7 days old), do it by hand'); continue; }
+        const reread = async head => { const r = gget('wfReread', []).filter(x => now() - x.at < 15 * 60e3 && x.task != t.id); r.push({ head, at: now(), task: t.id }); gset('wfReread', r); await note('reading the email again'); log('Try again: reading the email again: ' + head.slice(0, 50)); };
+        if (!j) { const subj = ((t.description || '').match(/^Email: (.+)$/m) || [])[1] || ''; if (subj) await reread(subj.trim().slice(0, 60)); else await note('can\'t tell which email it was'); continue; }
         if (j.status == 'new') { await note('it\'s already in the queue'); continue; }
         const R = j.res || {};
-        if (j.pdfKey && !gget(j.pdfKey, '') && !R.up) { await note('the PDF wasn\'t kept on this one (before 0.9.21), do it by hand'); continue; }
+        if (j.pdfKey && !gget(j.pdfKey, '') && !R.up) { const b64 = await pdfFromTask(t.id); if (b64) gset(j.pdfKey, b64); else { await reread(String(j.key || '').split('|').slice(1).join('|').trim().slice(0, 60) || j.info.subject.slice(0, 60)); continue; } }
         Object.keys(R).forEach(k => { if (/Err$/.test(k) || k == 'createDry') delete R[k]; }); j.res = R;
         if (!R.jn) j.creating = false; // check AroFlo for the task again before making one
         Object.assign(j, { status: 'new', tries: 0, notBefore: 0, waited: true, retryTask: t.id }); saveJob(j);
