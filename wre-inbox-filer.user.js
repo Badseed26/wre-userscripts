@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.24
+// @version      0.9.25
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -609,14 +609,18 @@ if (ON_AF) {
     const $ = jq(); const v = n => (document.querySelector('[name=' + n + ']') || {}).value || '';
     const pickFrom = async (name, term, test) => { const el = document.querySelector('[name=' + name + ']'); el.focus(); el.value = term; $(el).autocomplete('search', term);
       await waitFor(() => [...document.querySelectorAll('ul.ui-autocomplete li')].some(l => l.offsetParent), 6000); await sleep(600);
-      const li = [...document.querySelectorAll('ul.ui-autocomplete li')].filter(l => l.offsetParent).find(l => test(l.innerText.replace(/\s+/g, ' '))); if (!li) return false;
+      const lis = [...document.querySelectorAll('ul.ui-autocomplete li')].filter(l => l.offsetParent); const li = lis.find(l => test(l.innerText.replace(/\s+/g, ' '), l, lis)); if (!li) return false;
       const a = li.querySelector('a,div') || li; $(a).trigger('mouseenter'); $(a).trigger('click'); await sleep(1500); return true; };
     const a = op.address; const st = norm(a.street), sub = norm(a.suburb);
     // 1. existing location under the builder's client. The same house under another client (an old private job) doesn't count:
     // the builder's job gets its own location, like Lisa does, and the check item mentions the other one (18/10)
     const cw = (op.client || '').toLowerCase().split(' ')[0];
     const atAddr = t => hasAddr(t, a.street) && (!sub || norm(t).includes(sub));
-    let got = await pickFrom('clientName', a.street, t => atAddr(t) && (!cw || t.toLowerCase().includes(cw)));
+    // AroFlo lists the client on its own line ("Ambrose ...: PO Box 637 ...") with that client's locations under it, so the
+    // builder's name is on the client line above the address, not on the address line. Missing that sent every PO down the
+    // new location path (19/10).
+    const owner = (l, lis) => { for (let i = lis.indexOf(l); i >= 0; i--) { const t = lis[i].innerText.replace(/\s+/g, ' '); if (/^[^,]+:/.test(t.trim())) return t.toLowerCase(); } return ''; };
+    let got = await pickFrom('clientName', a.street, (t, l, lis) => atAddr(t) && !/^[^,]+:/.test(t.trim()) && (!cw || t.toLowerCase().includes(cw) || owner(l, lis).includes(cw)));
     if (!got) { const others = [...document.querySelectorAll('ul.ui-autocomplete li')].filter(l => l.offsetParent).map(l => l.innerText.replace(/\s+/g, ' ').trim()).filter(atAddr);
       if (others.length) { op.otherLoc = others.slice(0, 3).join(' / '); ss('wfOp', op); } }
     if (got && op.client && !v('clientName').toLowerCase().includes(cw)) { return opDone(op, { createErr: 'picked ' + a.street + ' but the client came up as ' + v('clientName') + ', not ' + op.client + '. Left it.' }); }
@@ -624,10 +628,11 @@ if (ON_AF) {
       // 2. new location: client first, then the + box
       if (!(await pickFrom('clientName', op.client, t => t.toLowerCase().startsWith(op.client.toLowerCase().slice(0, 20)) && /:/.test(t)))) return opDone(op, { createErr: 'client ' + op.client + ' not found' });
       // the + sits after the magnifier on the Location row: last button in the smallest box holding the field and 2+ buttons
-      let row = document.querySelector('[name=locationName]'); while (row && row.querySelectorAll('button,a.afBtn,[role=button]').length < 2) row = row.parentElement;
-      const btns = row ? [...row.querySelectorAll('button,a.afBtn,[role=button]')].filter(b => b.offsetParent) : [];
-      const pb = btns[btns.length - 1];
-      if (!pb) return opDone(op, { createErr: 'no + button for a new location' });
+      // The + is a div#btnInlineAdd inside the Location box. The old hunt for "buttons" climbed out to the whole form and clicked
+      // its last button, Create Task, which made junk JN 9470 (19/10). Only ever click inside the Location box itself.
+      const box = (document.querySelector('[name=locationName]') || { closest: () => null }).closest('.imsSearchBox__wrapper');
+      const pb = box && (box.querySelector('#btnInlineAdd') || [...box.querySelectorAll('.afBtn')].filter(b => b.offsetParent).pop());
+      if (!pb || pb.closest('form button[type=submit]') || /submit|create/i.test(pb.id + ' ' + (pb.type || '') + ' ' + pb.innerText)) return opDone(op, { createErr: 'couldn\'t find the + for a new location, nothing created' });
       if (op.dry) return opDone(op, { createDry: 'no location for ' + a.street + ' yet, would make a new one under ' + v('clientName') + ' (site contact ' + [(op.contact || {}).name, (op.contact || {}).phone].filter(Boolean).join(' ') + ')' });
       pb.click();
       if (!(await waitFor(() => !!document.getElementById('btnOptSaveLocation'), 8000))) return opDone(op, { createErr: 'new location box didn\'t open' });
