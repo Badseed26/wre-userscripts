@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.34
+// @version      0.9.35
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -529,7 +529,7 @@ if (ON_MAIL) {
     if (gget('wfTestQ', []).length) { await sleep(1500); await W.wreFilerTestNext(); return; }
     let deb = null; const mo = new MutationObserver(() => { cancel(deb); deb = later(scan, 4000); });
     const list = rowsNow()[0] && rowsNow()[0].parentElement; if (list) mo.observe(list, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-label'] });
-    every(scan, 60e3); scan(); every(pushLog, 30e3);
+    every(scan, 60e3); scan(); every(pushLog, 30e3); every(buddyCheck, 60e3);
     // Watchdog: no filer tab has got through the list in 10 min and nothing's half read, so this tab is stuck somewhere it can't
     // see (19/10: the Outlook tab went quiet after a reload at 3:28 pm and missed Jai's PO). Reload it and say so.
     gset('wfMailPass', now());
@@ -545,6 +545,14 @@ async function dryNote(job, lines) {
   try { await td('POST', 'comments', { task_id: RULES_TASK, content: h.slice(0, 14000) }); } catch (e) { log('dry run note failed: ' + e.message); }
 }
 async function safeFu(o) { try { return await upsertFu(o); } catch (e) { log('Todoist failed: ' + e.message); status('Todoist: ' + e.message, true); return null; } }
+// The other filer tab has gone quiet for 8 min (closed, stood down after something moved it, or dropped by Chrome's memory
+// saver), so open it again, once per 15 min (19/10: the AroFlo tab stood down at 4:45 pm and nothing filed till it was reopened).
+function buddyCheck() {
+  const other = ON_MAIL ? 'af' : 'mail'; const st = gget('wfState_' + other, {}); if (!st.at || now() - st.at < 8 * 60e3) return;
+  if (now() - gget('wfReopen_' + other, 0) < 15 * 60e3) return; gset('wfReopen_' + other, now());
+  log('The ' + (other == 'af' ? 'AroFlo' : 'Outlook') + ' filer tab has been quiet ' + Math.round((now() - st.at) / 60e3) + ' min, opening it again');
+  try { GM_openInTab(other == 'af' ? 'https://office.aroflo.com/ims/Site/Home/index.cfm#wre-filer' : 'https://outlook.cloud.microsoft/mail/#wre-filer', { active: false }); } catch (e) { log('Couldn\'t open it: ' + e.message); }
+}
 
 // =====================================================================
 // AROFLO SIDE
@@ -662,7 +670,7 @@ if (ON_AF) {
     // Chrome slows a hidden tab's own timers to once a minute, and AroFlo's upload box runs on those, so each state can take a
     // minute to arrive. Give it 6 min all up and 2.5 min with no change, and keep the seconds each state showed up at.
     const trail = [], at = []; let last = '', lastChange = now(); const t0 = now();
-    while (now() - t0 < 360000) { const st = state() || (row() ? 'row' : 'no row'); if (st != last) { last = st; trail.push(st); at.push(Math.round((now() - t0) / 1000)); lastChange = now(); } if (/^(COMPLETE|FAILED)$/.test(st) || now() - lastChange > 150000) break; await sleep(1000); }
+    for (let i = 0; now() - t0 < 360000; i++) { const st = state() || (row() ? 'row' : 'no row'); if (st != last) { last = st; trail.push(st); at.push(Math.round((now() - t0) / 1000)); lastChange = now(); } if (/^(COMPLETE|FAILED)$/.test(st) || now() - lastChange > 150000) break; if (i % 30 == 0) status('upload ' + op.name.slice(0, 30) + ': ' + st); await sleep(1000); }
     const where = trail.map((x, i) => x + '@' + at[i] + 's').join(' > '); const extra = (box().innerText.match(/(error|failed|not allowed|too large|not supported|snafu)[^.]{0,120}/i) || [''])[0].trim();
     if (last != 'COMPLETE') return fin(op, { upErr: 'AroFlo\'s upload box got to "' + where + '"' + (extra ? ' (' + extra + ')' : '') + ', so Done wasn\'t pressed' });
     log('Upload of ' + op.name + ': box went ' + where);
@@ -750,7 +758,7 @@ if (ON_AF) {
     const op = ss('wfOp'); if (!op) return false;
     // mid job: keep the lock and the job claimed through each page load, or a second filer tab picks the same job up and
     // makes a double (the lock used to lapse 90 s into a create, 19/10)
-    gset('wfAfLock', { tab: tabId(), at: now() }); { const j = getJob(op.jobId); if (j) { j.run = { tab: tabId(), at: now() }; saveJob(j); } }
+    gset('wfAfLock', { tab: tabId(), at: now() }); { const j = getJob(op.jobId); if (j) { j.run = { tab: tabId(), at: now() }; saveJob(j); } } status('busy: ' + op.op + (op.name ? ' ' + op.name.slice(0, 40) : ''));
     if ((op.tries = (op.tries || 0) + 1) > 4) { opDone(op, { [op.op + 'Err']: 'gave up after 4 page loads' }); return true; }
     ss('wfOp', op);
     // The script starts as the page starts loading. AroFlo's pages are big (create task is 500 KB, 59 scripts) and a background tab
@@ -1102,7 +1110,7 @@ if (ON_AF) {
       if (!ours) { try { sessionStorage.removeItem('wfRole'); } catch (e) {} log('This tab got moved by something else (' + document.title.slice(0, 50) + '), so it stopped being a filer tab'); if (chip) chip.remove(); if (verTag) verTag.remove(); return; } }
     if (await resumeOp()) return;
     if (!/Site\/Home/.test(location.pathname)) { go(HOME); return; }
-    every(tick, 20e3); later(tick, 3000); every(pushLog, 30e3);
+    every(tick, 20e3); later(tick, 3000); every(pushLog, 30e3); every(buddyCheck, 60e3);
   };
   if (document.readyState == 'loading') document.addEventListener('DOMContentLoaded', boot); else boot();
 }
