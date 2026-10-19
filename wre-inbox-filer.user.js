@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.26
+// @version      0.9.27
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -641,7 +641,7 @@ if (ON_AF) {
       pb.click();
       if (!(await waitFor(() => !!document.getElementById('btnOptSaveLocation'), 8000))) return opDone(op, { createErr: 'new location box didn\'t open' });
       const set = (n, val) => { const e = document.querySelector('.ui-dialog [name=' + n + ']'); if (e && val) setv(e, val); };
-      set('SiteContact', (op.contact || {}).name); set('SitePhone', (op.contact || {}).phone); set('Location', a.street); set('suburb', a.suburb); set('postcode', a.postcode);
+      set('SiteContact', (op.contact || {}).name); set('SitePhone', (op.contact || {}).phone); set('Location', a.street); set('Address', a.street); set('suburb', a.suburb); set('postcode', a.postcode);
       const stSel = document.querySelector('.ui-dialog [name=state_id]'); if (stSel) { const o = [...stSel.options].find(x => x.text.trim().toUpperCase() == (a.state || 'QLD').toUpperCase()); if (o) { stSel.value = o.value; $(stSel).trigger('change'); } }
       document.getElementById('btnOptSaveLocation').click(); op.newLoc = true;
       if (!(await waitFor(() => !document.getElementById('btnOptSaveLocation') && !!v('location_id'), 12000))) return opDone(op, { createErr: 'new location didn\'t save' });
