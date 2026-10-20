@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.56
+// @version      0.9.57
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Sonnet and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -980,16 +980,23 @@ if (ON_AF) {
   const calSrcNow = () => { try { const s = W.fullcalEventSource; if (s && s.data && s.data.jsonSettings && s.data.masterusercoded) { const d = { js: s.data.jsonSettings, mu: s.data.masterusercoded, at: now() }; gset('wfCalSrc', d); return d; } } catch (e) {} return null; };
   const calCache = {};
   const dayStart = d => Math.floor(new Date(d + 'T00:00:00').getTime() / 1000);
-  async function calDays(days) {
-    const need = [...new Set(days)].filter(d => !calCache[d] || now() - calCache[d].at > 90e3);
-    if (need.length) {
+  const monOf = d => { const x = new Date(d + 'T00:00:00'); x.setDate(x.getDate() - ((x.getDay() + 6) % 7)); return ymd(x); };
+  // fresh = read again even if it was read in the last 90 s (the check right before a save)
+  async function calDays(days, fresh) {
+    const need = [...new Set(days)].filter(d => fresh || !calCache[d] || now() - calCache[d].at > 90e3);
+    // Always a whole week, Mon to Sun, the way the calendar asks. Odd days on their own (10/11 and 20/11) came back empty, so
+    // Lachie looked free on Fri 20/11 and got double booked on JN 9403 (21/10).
+    for (const wk of [...new Set(need.map(monOf))]) {
+      const week = [0, 1, 2, 3, 4, 5, 6].map(i => addD(wk, i));
       const src = calSrcNow() || gget('wfCalSrc', null); if (!src) { if (IS_FILER) gset('wfCalSrcWant', now()); throw new Error('no calendar settings yet'); }
-      const body = new URLSearchParams({ jsonSettings: src.js, masterusercoded: src.mu, range: need.map(dayStart).sort().join(','), eventtypes_task: 1, eventtypes_overhead: 1, eventtypes_event: 1, eventtypes_externalevent: 1 });
+      const body = new URLSearchParams({ jsonSettings: src.js, masterusercoded: src.mu, range: week.map(dayStart).join(','), eventtypes_task: 1, eventtypes_overhead: 1, eventtypes_event: 1, eventtypes_externalevent: 1 });
       const txt = await (await fetch('/ims/Site/Calendar/AJAX/AJAX_JSON_ims_events.cfm', { method: 'POST', body, credentials: 'include' })).text();
       let a; try { a = JSON.parse(txt); } catch (e) { a = null; }
       if (!Array.isArray(a)) { gdel('wfCalSrc'); if (IS_FILER) gset('wfCalSrcWant', now()); throw new Error('calendar feed said no (' + plain(txt).slice(0, 60) + ')'); }
       const evs = a.map(e => ({ type: e.type, uid: e.resourceid, s: new Date(e.start), e: new Date(e.end || e.start), all: !!e.allDay, wrid: String(e.wrid || ''), id: String(e.schedid || e.id || ''), note: String(e.note || '').trim(), locked: e.locked == 1, sub: subOf(e.title) }));
-      need.forEach(d => { const s0 = new Date(d + 'T00:00:00'), s1 = new Date(s0.getTime() + 864e5); calCache[d] = { at: now(), ev: evs.filter(e => e.s < s1 && (e.e > s0 || +e.e == +e.s && e.s >= s0)) }; });
+      // an empty week in the next 8 weeks isn't real (the lads are always booked), so don't plan off it as if everyone's free
+      if (!evs.some(e => e.type == 'task') && wk <= addD(ymd(new Date()), 56)) throw new Error('the calendar came back empty for the week of ' + dShort(wk) + ', not planning off it');
+      week.forEach(d => { const s0 = new Date(d + 'T00:00:00'), s1 = new Date(s0.getTime() + 864e5); calCache[d] = { at: now(), ev: evs.filter(e => e.s < s1 && (e.e > s0 || +e.e == +e.s && e.s >= s0)) }; });
     }
     return days;
   }
@@ -1074,11 +1081,20 @@ if (ON_AF) {
           if (kind == 'solar_install' && !ppl.includes('Ethan')) p.f.push(D + 'solar install without Ethan on it');
           if (/^(ac_|solar_fault|switchboard)/.test(kind) && ppl.length == 1 && ppl[0] == 'Pearce') p.f.push(D + 'Pearce on his own on ' + WORDS[kind]);
           if (ppl.includes('Jack')) p.f.push(D + 'Jack is booked on it'); });
-        out.push(p); continue; }
+        // the filer's own unconfirmed booking that clashes with another booking or breaks the rules: plan it again and offer Move
+        // job to put it right (moves the same bookings, never adds a second lot). Anyone else's only gets the flag.
+        const mine = real.filter(isMine);
+        if (mine.length == real.length) {
+          mine.filter(s => s.day >= today && busyOf(s.day, s.uid, mine.map(x => x.id)).some(b => b.s < s.e && b.e > s.s)).forEach(s => p.f.push(dShort(s.day) + ': ' + s.who + ' is double booked ' + hm(s.s) + ' to ' + hm(s.e)));
+          if (p.f.length) { p.fix = 1; p.upd = mine.map(s => s.id); p.m = 'move'; p.f.push('Move job puts the filer\'s booking right'); }
+        }
+        if (!p.fix) { out.push(p); continue; } }
       const ph = on.filter(s => s.uid == LISA.uid);
-      const mineElse = ts.list.filter(s => p.ids.includes(s.id) && !v.days.includes(s.day));
-      if (mineElse.length && !mineElse.every(isMine)) { p.m = 'flag'; p.f.push('Ambrose moved this visit to ' + v.days.map(dShort).join(', ') + ' but the confirmed booking is still on ' + [...new Set(mineElse.map(s => dShort(s.day)))].join(', ') + '. Sort it by hand'); out.push(p); continue; }
-      p.m = mineElse.length ? 'move' : 'new'; p.upd = (mineElse.length ? mineElse : ph).map(s => s.id);
+      if (!p.fix) {
+        const mineElse = ts.list.filter(s => p.ids.includes(s.id) && !v.days.includes(s.day));
+        if (mineElse.length && !mineElse.every(isMine)) { p.m = 'flag'; p.f.push('Ambrose moved this visit to ' + v.days.map(dShort).join(', ') + ' but the confirmed booking is still on ' + [...new Set(mineElse.map(s => dShort(s.day)))].join(', ') + '. Sort it by hand'); out.push(p); continue; }
+        p.m = mineElse.length ? 'move' : 'new'; p.upd = (mineElse.length ? mineElse : ph).map(s => s.id);
+      }
       // how long: PO lines for iso, fit off and general work, the Ambrose slot when it's a real one (under 6 hrs)
       let est = BASE[kind] || 120;
       if (FROM_LINES[kind]) { const sc = scopeFor(lines, c.po, EARLY[kind] ? 'early' : LATE[kind] ? 'late' : ''); const lm = lineMins(sc); if (lm.mins) est = Math.max(kind == 'iso' || kind == 'makesafe' ? BASE[kind] : 60, 30 + lm.mins); lm.unk.slice(0, 2).forEach(u => p.f.push('check the time on: ' + u)); }
@@ -1128,7 +1144,12 @@ if (ON_AF) {
     const reuse = ts.list.filter(s => (p.upd || []).includes(s.id)); const ins = [], upd = [];
     // one group for the lot: the reused booking's, else a new one
     const gid = reuse.length ? reuse[0].gid : String(ts.max + 1); const isNew = !reuse.length;
-    want.forEach(w => { const r = reuse.shift(); (r ? upd : ins).push(Object.assign({ r }, w)); });
+    // reuse a booking for the same person first, so a fix changes as few people as it can
+    want.forEach(w => { let i = reuse.findIndex(r => r.uid == w.uid && r.day == w.d); if (i < 0) i = reuse.findIndex(r => r.uid == w.uid); if (i < 0) i = 0; const r = reuse.length ? reuse.splice(i, 1)[0] : null; (r ? upd : ins).push(Object.assign({ r }, w)); });
+    const left = reuse.map(r => r.who + ' ' + dShort(r.day));
+    // last check right before saving, off a fresh read of the calendar: nobody gets double booked even if the plan was wrong
+    if (p.crew[0] != 'Lisa') { await calDays(p.slots.map(s => s.d), true); const skip = (p.upd || []); const clash = want.filter(w => busyOf(w.d, w.uid, skip).some(b => b.s < w.e && b.e > w.s));
+      if (clash.length) return { ok: false, what: '', err: 'calendar check right before saving: ' + clash.map(w => nameOf(w.uid) + ' ' + dShort(w.d) + ' ' + hm(w.s)).join(', ') + ' already booked then, nothing saved' }; }
     const one = (w, i, u) => '<sched>' + (u ? '<schedid>' + w.r.id + '</schedid><uid>' + X(w.uid) + '</uid><wrid>' + wrid + '</wrid>' : '<id>' + i + '</id><wrid>' + wrid + '</wrid><uid>' + X(w.uid) + '</uid>') +
       '<sdate>' + ad(w.d) + '</sdate><stime>' + ad(w.d) + ' ' + hm(w.s) + '</stime><edatetime>' + ad(w.d) + ' ' + hm(w.e) + '</edatetime><hours>' + ((w.e - w.s) / 60) + '</hours><note>' + X(note) + '</note>' +
       (u ? '<gid>' + w.r.gid + '</gid><sstatus>' + (w.r.st || 0) + '</sstatus><editschedeventmsg>0</editschedeventmsg><locked>0</locked><worktypeid>' + (w.r.wt || ws) + '</worktypeid><utcoffset>10</utcoffset>'
@@ -1136,13 +1157,14 @@ if (ON_AF) {
     const body = new URLSearchParams({ workrequest_id: wrid, allocation_id: 0, timesheet_id: 0, ts_group_id: 0, event_id: 0, template_id: 0, baseline_template_id: 0, sendCancel: false, sendUpdate: false, schedType: 'task',
       insertxml: '<allscheds>' + ins.map((w, i) => one(w, i, false)).join('') + '</allscheds>', updatexml: '<allscheds>' + upd.map(w => one(w, 0, true)).join('') + '</allscheds>', deletexml: '<allscheds></allscheds>' });
     const what = ins.map(w => 'add ' + nameOf(w.uid) + ' ' + dShort(w.d) + ' ' + hm(w.s) + '-' + hm(w.e)).concat(upd.map(w => 'move ' + w.r.who + ' ' + dShort(w.r.day) + ' to ' + nameOf(w.uid) + ' ' + dShort(w.d) + ' ' + hm(w.s) + '-' + hm(w.e))).join(', ') + ' (note "' + note + '")';
-    if (dry) return { ok: true, dry: true, what };
+    const leftTxt = left.length ? '. Left ' + left.join(', ') + ' as it was, take it off by hand if it\'s not needed' : '';
+    if (dry) return { ok: true, dry: true, what: what + leftTxt };
     const r = await fetch('/ims/Site/Calendar/AJAX/AJAX_JSON_save_schedule_groups.cfm', { method: 'POST', body, credentials: 'include' }); const tx = await r.text(); let j; try { j = JSON.parse(tx); } catch (e) { j = null; }
     if (!j || j.status != 0) return { ok: false, what, err: 'AroFlo said ' + (j ? (j.errmessage || 'status ' + j.status) : plain(tx).slice(0, 80)) };
     // check it landed: every booking we wanted is there with the right person, day, times and note
     const after = await taskScheds(wrid); const ids = [], miss = [];
     want.forEach(w => { const h = after.list.find(s => s.uid == w.uid && s.day == w.d && s.s == w.s && s.e == w.e && s.note.slice(0, 20) == note.slice(0, 20) && !ids.includes(s.id)); if (h) ids.push(h.id); else miss.push(nameOf(w.uid) + ' ' + dShort(w.d) + ' ' + hm(w.s)); });
-    return { ok: !miss.length, what, ids, err: miss.length ? 'saved but these didn\'t show on the task: ' + miss.join(', ') : '' };
+    return { ok: !miss.length, what: what + leftTxt, ids, err: miss.length ? 'saved but these didn\'t show on the task: ' + miss.join(', ') : '' };
   }
 
   // Schedule job / Move job from the dashboard: the filer-book label and a "go: <visit> <sig>" line (" dry" on the end for a dry
