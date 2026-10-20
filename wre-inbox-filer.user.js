@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.52
+// @version      0.9.53
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Sonnet and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -76,6 +76,8 @@ const every = (f, ms) => { const go = () => { later(go, ms); try { f(); } catch 
 const sleep = ms => new Promise(r => later(r, ms));
 const now = () => Date.now();
 const p2 = n => String(n).padStart(2, '0');
+const hm = m => { m = Math.round(m); const h = Math.floor(m / 60) % 24, mi = m % 60; return (h % 12 || 12) + ':' + p2(mi) + (h < 12 ? 'am' : 'pm'); }; // minutes past midnight as AroFlo writes it, 7:30am
+const toMin = s => { const m = String(s || '').trim().match(/^(\d{1,2})(?:[:.](\d{2}))?\s*(?:([ap])\.?m?\.?)?$/i); if (!m) return null; let h = +m[1]; if (m[3]) h = h % 12 + (/p/i.test(m[3]) ? 12 : 0); return h * 60 + +(m[2] || 0); }; // "9am", "9:30 pm", "13:30"
 const ymd = d => d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate());
 const dmy = d => p2(d.getDate()) + '/' + p2(d.getMonth() + 1) + '/' + d.getFullYear();
 const dShort = s => { const d = new Date(s + 'T00:00'); return ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][d.getDay()] + ' ' + d.getDate() + '/' + (d.getMonth() + 1); };
@@ -118,6 +120,7 @@ const gm = o => new Promise(res => GM_xmlhttpRequest(Object.assign({ timeout: 60
 // ---------- Todoist ----------
 const tdToken = () => gget('todoistToken', '');
 async function td(method, path, body) {
+  if (W.__wfTd) return W.__wfTd(method, path, body); // test runs in Claude's own tab: Todoist calls go to a stand in, nothing real changes
   if (!tdToken()) throw new Error('no Todoist token (Tampermonkey menu: Set Todoist token)');
   const r = await gm({ method, url: TD + path, headers: { Authorization: 'Bearer ' + tdToken(), 'Content-Type': 'application/json' }, data: body ? JSON.stringify(body) : undefined });
   if (r.status === 401 || r.status === 403) throw new Error('Todoist token not accepted');
@@ -463,7 +466,7 @@ if (ON_MAIL) {
     // ARC jobs go by the PO itself (PO118964-BU01-009, base PO118964-BU01), whatever Haiku made of the "ARC Ref" in the subject
     if (/\barc\b/i.test(P.builder || x.builder || '') && /^PO\d/i.test(x.po_full || '')) { x.ref = ''; x.po_base = x.po_full.replace(/-\d+$/, ''); }
     x.address = x.address || {}; x.dates = x.dates || []; x.blocks = x.blocks || []; x.vague = x.vague || []; x.site_contacts = x.site_contacts || []; x.warn = x.warn || [];
-    const job = { id: P.id + Math.random().toString(36).slice(2, 6), at: now(), emailAt: P.emailAt, dry: P.live ? false : (R.dry || !!P.test), test: !!P.test, key: P.key, builder: P.builder || x.builder || '', info: { from: P.info.from, date: P.info.date, subject: P.info.subject, rs: P.info.rs, rec: P.info.rec, img: P.info.img, pdfName: P.pdfName || '' }, pdfKey: P.pdfKey || '', atts: P.atts || [], x, status: 'new' };
+    const job = { id: P.id + Math.random().toString(36).slice(2, 6), at: now(), emailAt: P.emailAt, dry: P.live ? false : (R.dry || !!P.test), test: !!P.test, key: P.key, builder: P.builder || x.builder || '', info: { from: P.info.from, date: P.info.date, subject: P.info.subject, rs: P.info.rs, rec: P.info.rec, img: P.info.img, pdfName: P.pdfName || '', sched: !!P.sched }, pdfKey: P.pdfKey || '', atts: P.atts || [], x, status: 'new' };
     if (x.kind == 'skip' || !x.kind) { (P.atts || []).forEach(a => gdel(a.key)); if (gget('wfRetryNext', '')) { const tid = gget('wfRetryNext', ''); gdel('wfRetryNext'); closeFu(tid).catch(() => {}); } log('Skip: ' + P.info.subject.slice(0, 70) + ' (' + (x.why || '') + ')'); if (P.pdfKey) gdel(P.pdfKey); if (job.test) await dryNote(job, ['Would skip it: ' + (x.why || '')]);
       // a skip is final, so the day's skipped emails that carried a PDF go on one low priority item for an eyeball (20/10)
       if (!P.test && (P.info.pdfs || []).length) { const dk = 'wfSkips_' + ymd(new Date()), sk = gget(dk, []); sk.push(P.info.subject.slice(0, 90) + ' (' + (x.why || 'skip').slice(0, 80) + ')'); gset(dk, sk);
@@ -618,7 +621,8 @@ if (ON_AF) {
   const isOpenTask = r => !/Completed|Archived|Cancel|Invoic|^Quote/i.test(r.status || '');
   const getDoc = async href => new DOMParser().parseFromString(await (await fetch(href, { credentials: 'include' })).text(), 'text/html');
   const headerHref = d => { const a = [...d.querySelectorAll('a')].find(e => /^\s*Edit Task Header\s*$/i.test(e.textContent || '')); return a ? a.getAttribute('href') : ''; };
-  const descOf = async href => { const d = await getDoc(href); const hh = headerHref(d); if (!hh) return { html: '', upcoming: [] }; const d2 = await getDoc(hh); return { html: ((d2.querySelector('textarea[name=description]') || {}).value) || '', upcoming: upcomingOf(d), hh }; };
+  // wrid: the task's number behind the scenes (the task page's hidden workrequest_id), what AroFlo's schedule calls take
+  const descOf = async href => { const d = await getDoc(href); const wrid = ((d.getElementById('workrequest_id') || {}).value) || ''; const hh = headerHref(d); if (!hh) return { html: '', upcoming: [], wrid }; const d2 = await getDoc(hh); return { html: ((d2.querySelector('textarea[name=description]') || {}).value) || '', upcoming: upcomingOf(d), hh, wrid }; };
   // "Upcoming Schedules: Lachlan Buckley: Mon, November 09, 2026 @ 7:30 AM View Schedule ..."
   const upcomingOf = d => { const t = d.body.textContent.replace(/\s+/g, ' '); const i = t.indexOf('Upcoming Schedules'); if (i < 0) return []; const s = t.slice(i + 19, i + 3000).split('All Task Schedules')[0]; const out = []; s.split('View Schedule').forEach(c => { const m = c.trim().match(/^([A-Z][a-z']+(?: [A-Z][a-z']+){1,2}): \w{3}, (\w+ \d{1,2}, \d{4}) @ (\d{1,2}:\d{2} [AP]M)/); if (!m) return; const dt = new Date(m[2] + ' ' + m[3]); if (!isNaN(dt)) out.push({ staff: m[1], day: ymd(dt), t: m[3] }); }); return out; };
   const findJn = async jn => (await search(String(jn), 'JobNo')).find(x => x.jn == String(jn));
@@ -830,7 +834,9 @@ if (ON_AF) {
     await new Promise(r => { if (document.readyState == 'complete') return r(); const done = () => { window.removeEventListener('load', done); r(); }; window.addEventListener('load', done); later(done, 60000); });
     await sleep(1500);
     try {
-      if (op.op == 'desc') await opDesc(op); else if (op.op == 'upload') await opUpload(op); else if (op.op == 'note') await opNote(op); else if (op.op == 'create') await opCreate(op); else ss('wfOp', null);
+      if (op.op == 'desc') await opDesc(op); else if (op.op == 'upload') await opUpload(op); else if (op.op == 'note') await opNote(op); else if (op.op == 'create') await opCreate(op);
+      else if (op.op == 'calsrc') { await waitFor(() => !!calSrcNow(), 30000); log(calSrcNow() ? 'Got the calendar settings for the booking plans' : 'Couldn\'t read the calendar settings off the calendar page'); gdel('wfCalSrcWant'); ss('wfOp', null); go(HOME); }
+      else ss('wfOp', null);
     } catch (e) { opDone(op, { [op.op + 'Err']: e.message }); }
     return true;
   }
@@ -853,46 +859,306 @@ if (ON_AF) {
   // ---------- "To book" follow ups ----------
   // First line: BOOK | JN 9445 | PO 20305368-07 | rec <jobRecID> | dates 2026-11-09,2026-11-20 | hold no
   const BOOK_RE = /^BOOK \| JN (\d+) \| PO ([\w-]+) \| rec (\S*) \| dates ([\d,-]*) \| hold (yes|no)/m;
+  const BOOK_NOTE = dates => 'Builder dates: ' + dates.map(dShort).join(', ') + '. Each visit gets a plan below with a Schedule job button on the dashboard. Clears itself once every date has a confirmed booking.';
+  // A time the builder put in the email (not one off the repair schedule PDF, that's not comms, Ethan 21/10) sets the start.
+  // Ethan can add his own the same way: "Set time: 2026-11-09 9:00am".
+  const setTimes = job => job.info.sched ? [] : (job.x.dates || []).filter(d => /T\d{2}:\d{2}/.test(d.start || '') && !/T00:00/.test(d.start)).map(d => 'Set time: ' + String(d.start).slice(0, 10) + ' ' + hm(+d.start.slice(11, 13) * 60 + +d.start.slice(14, 16)) + ' (builder email)');
+  // Lines a rewrite of the item keeps: set times and the plan's own record (which bookings the filer made).
+  const keepBits = (o, old) => { const k = String(old || '').split('\n').filter(l => /^(Set time|plan|go):/.test(l)); const have = new Set(o.lines); return Object.assign({}, o, { lines: o.lines.concat(k.filter(l => !have.has(l) && !(/^Set time:/.test(l) && o.lines.some(x => x.slice(0, 20) == l.slice(0, 20))))) }); };
   const bookDesc = o => 'BOOK | JN ' + o.jn + ' | PO ' + o.po + ' | rec ' + (o.rec || '') + ' | dates ' + o.dates.join(',') + ' | hold ' + (o.hold ? 'yes' : 'no') + '\n' + (o.lines || []).join('\n');
   const bookTitle = o => (o.hold ? 'On hold, builder says dates not accurate: ' : o.dates.length ? 'Book visits: ' : 'Confirm dates: ') + o.street + ' (JN ' + o.jn + (/-/.test(String(o.po)) ? ', PO -' + String(o.po).split('-')[1] : '') + ')';
   async function addToBook(job, jn, extra, link) {
     const x = job.x; const base = x.po_base; let dates = [];
-    const ad = await ambroseDates(job.info.rec, base); if (ad) dates = ad.filter(d => d.po == x.po_full || !x.po_full).map(d => d.day);
+    // every WRE line on the job's repair schedule, not just this PO's: it's one To book item per job (21/10)
+    const ad = await ambroseDates(job.info.rec, base); if (ad) dates = ad.map(d => d.day);
     if (!dates.length) dates = (x.dates || []).map(d => String(d.start || '').slice(0, 10)).filter(Boolean);
     dates = [...new Set(dates)].sort();
     const street = shortStreet(x.address.street);
     const o = { jn, po: x.po_full, rec: job.info.rec, dates, hold: false, street,
-      lines: dates.length ? ['Builder dates: ' + dates.map(dShort).join(', ') + '. Clears itself once each date has a visit booked to anyone but Lisa.'] :
+      lines: dates.length ? [BOOK_NOTE(dates)].concat(setTimes(job)) :
         ['No dates in the email or on the repair schedule yet. Draft to ' + ((x.supervisor || {}).name || 'the supervisor') + ':', '', draftAskDates(job)] };
     const soon = dates.some(d => workDaysAhead(3).includes(d));
     // one To book item per job: a second PO or a schedule update for the same JN updates the item that's there (20/10)
     let have = null; try { have = (await sectionTasks(SEC_BOOK)).find(t => (t.description || '').includes('BOOK | JN ' + jn + ' |')); } catch (e) {}
     if (have) { const key = ((have.description || '').match(/^filer: (\S+)/m) || [])[1] || ('book-' + x.po_full);
-      try { await td('POST', 'tasks/' + have.id, { content: bookTitle(o), description: bookDesc(o) + (extra ? '\n' + extra : '') + (link != null ? link : await afLineFor(jn)) + '\nfiler: ' + key, priority: soon ? 4 : 3, due_date: soon ? ymd(new Date()) : nextWork(ymd(new Date())) }); } catch (e) { log('To book update failed: ' + e.message); }
+      try { await td('POST', 'tasks/' + have.id, { content: bookTitle(o), description: bookDesc(keepBits(o, have.description)) + (extra ? '\n' + extra : '') + (link != null ? link : await afLineFor(jn)) + '\nfiler: ' + key, priority: soon ? 4 : 3, due_date: soon ? ymd(new Date()) : nextWork(ymd(new Date())) }); } catch (e) { log('To book update failed: ' + e.message); }
       return have.id; }
     return safeFu({ sec: 'book', key: 'book-' + x.po_full, title: bookTitle(o), desc: bookDesc(o) + (extra ? '\n' + extra : '') + (link != null ? link : await afLineFor(jn)), p1: soon, due: soon ? ymd(new Date()) : nextWork(ymd(new Date())) });
   }
   const draftAskDates = job => { const x = job.x; const n = ((x.supervisor || {}).name || '').split(' ')[0]; const woman = /^(Emily|Hannah|Jasonya|Sarah|Jess|Kate|Lisa|Rachel|Amy|Chloe|Emma|Olivia)$/i.test(n);
     return (n ? 'Hey ' + (woman ? n : 'mate') + ',' : 'Hey mate,') + '\n\nJust touching base on ' + addrLine(x.address) + ' (PO ' + x.po_full + '). Have you got dates for our works yet? Happy to lock them in once we know.\n\n' + (woman ? 'Thank you,' : 'Cheers mate,'); };
 
-  // Every 5 min: every To book item, check builder dates against AroFlo bookings.
-  async function checkToBook() {
-    const list = await sectionTasks(SEC_BOOK); const ahead = workDaysAhead(3);
-    for (const t of list) {
+  // Every 5 min: every To book item, builder dates against AroFlo bookings, and a plan for each visit still to book.
+  // only = one item's id (a Schedule job press re-plans just that one).
+  async function checkToBook(only) {
+    const list = await sectionTasks(SEC_BOOK); const ahead = workDaysAhead(3); const out = [];
+    for (let t of list) {
+      if (only && t.id != only) continue;
       const m = (t.description || '').match(BOOK_RE); if (!m) continue;
       const [, jn, po, rec, ds, hold] = m; let dates = ds ? ds.split(',').filter(Boolean) : [];
       const r = await findJn(jn); if (!r) continue;
       if (!isOpenTask(r)) { await closeFu(t.id); log('To book closed, JN ' + jn + ' is ' + r.status); continue; }
       const ad = await ambroseDates(rec, po.split('-')[0]);
-      if (ad) { const nd = [...new Set(ad.filter(d => d.po == po || !/-/.test(po)).map(d => d.day))].sort(); if (nd.length && nd.join(',') != dates.join(',')) {
-        const was = dates; dates = nd; const o = { jn, po, rec, dates, hold: false, street: (t.content.match(/: (.*?) \(JN/) || [])[1] || '', lines: ['Builder dates: ' + dates.map(dShort).join(', ') + (was.length ? ' (moved from ' + was.map(dShort).join(', ') + ')' : '') + '. Clears itself once each date has a visit booked to anyone but Lisa.'] };
-        await td('POST', 'tasks/' + t.id, { content: bookTitle(o), description: bookDesc(o) + afLine(jn, r.href) + '\nfiler: book-' + po });
+      if (ad) { const nd = [...new Set(ad.map(d => d.day))].sort(); if (nd.length && nd.join(',') != dates.join(',')) {
+        const was = dates; dates = nd; const o = { jn, po, rec, dates, hold: false, street: (t.content.match(/: (.*?) \(JN/) || [])[1] || '', lines: [BOOK_NOTE(dates) + (was.length ? ' Moved from ' + was.map(dShort).join(', ') + '.' : '')] };
+        const nd2 = bookDesc(keepBits(o, t.description)) + afLine(jn, r.href) + '\nfiler: book-' + po;
+        await td('POST', 'tasks/' + t.id, { content: bookTitle(o), description: nd2 }); t = Object.assign({}, t, { description: nd2 });
         log('Builder dates changed for JN ' + jn + ': ' + dates.join(', ')); } }
       if (hold == 'yes' || !dates.length) continue;
-      const d = await descOf(r.href); const up = d.upcoming.filter(u => !/^Lisa\b/.test(u.staff));
-      const missing = dates.filter(day => !up.some(u => u.day == day));
-      if (!missing.length) { await td('POST', 'comments', { task_id: t.id, content: 'Closed by the filer: every builder date has a visit booked (' + dates.map(dShort).join(', ') + ').' }); await closeFu(t.id); log('To book cleared: JN ' + jn); }
-      else if (missing.some(x => ahead.includes(x)) && t.priority != 4) await td('POST', 'tasks/' + t.id, { priority: 4, due_date: ymd(new Date()) });
+      let pl; try { pl = await planItem(t, { jn, po, rec, dates, r }); } catch (e) { log('Plan failed for JN ' + jn + ': ' + e.message); continue; }
+      if (!pl) continue; // the calendar settings aren't in yet, next go
+      out.push(pl);
+      if (pl.desc.trim() != String(t.description || '').trim()) { await td('POST', 'tasks/' + t.id, { description: pl.desc }); if (pl.news) log('Plan for JN ' + jn + ': ' + pl.news); }
+      if (pl.allConfirmed) { await td('POST', 'comments', { task_id: t.id, content: 'Closed by the filer: every visit has a confirmed booking (' + dates.map(dShort).join(', ') + ').' }); await closeFu(t.id); log('To book cleared: JN ' + jn); }
+      else if (pl.open.some(x => ahead.includes(x)) && t.priority != 4) await td('POST', 'tasks/' + t.id, { priority: 4, due_date: ymd(new Date()) });
+    }
+    return out;
+  }
+
+  // ---------- booking plans (Ethan, 21/10) ----------
+  // Who goes, which day, start and end, about how long, and anything to eyeball, worked out by script for each visit on
+  // a To book item. The dashboard's Schedule job (or Move job) button puts the filer-book label on the item with a
+  // "go: <visit> <sig>" line, and the filer books it through AroFlo's own schedule save (the call behind the schedule
+  // window's Done). Bookings go in UNCONFIRMED: once Ethan or Lisa confirm one they lock it and change the note, and the
+  // filer never touches it again.
+  const STAFF = { Ethan: { uid: 'user_131685', full: 'Ethan Callaghan', speed: 1 }, Lachie: { uid: 'user_181297', full: 'Lachlan Buckley', speed: 1 }, Pearce: { uid: 'user_215037', full: 'Pearce Eldridge', speed: 1.4 } }; // Pearce takes about 1.4 times as long (Ethan, 21/10)
+  const LISA = { uid: 'user_183337', full: 'Lisa Navie' };
+  const uidOf = n => n == 'Lisa' ? LISA.uid : STAFF[n].uid;
+  const nameOf = uid => uid == LISA.uid ? 'Lisa' : (Object.keys(STAFF).find(k => STAFF[k].uid == uid) || uid);
+  const DAY0 = 450, DAY_FLAG = 17 * 60, EARLIEST = 390; // 7:30 start, flag a day running past 5pm, an iso never starts before 6:30
+  // Starting times in minutes at Ethan's or Lachie's pace. The two person jobs are the time with two on site.
+  const BASE = { iso: 60, makesafe: 90, solar_install: 480, solar_iso: 90, solar_other: 90, solar_fault: 120, ac_install: 300, ac_service: 90, switchboard: 300, fault: 120, check: 60, check_solar: 60, check_ac: 60, fitoff: 120, general: 120 };
+  const TWO = { solar_install: 1, solar_iso: 1, solar_other: 1, solar_fault: 1, ac_install: 1 }; // always 2 on site
+  const SET = { solar_install: 1, ac_install: 1 }; // set lengths, not split between two
+  const FROM_LINES = { iso: 1, fitoff: 1, general: 1, makesafe: 1, fault: 1 }; // sized off the PO lines
+  const WORDS = { iso: 'iso', makesafe: 'make safe', solar_install: 'solar install', solar_iso: 'solar iso', solar_other: 'solar work', solar_fault: 'solar fault finding', ac_install: 'AC install', ac_service: 'AC service', switchboard: 'switchboard upgrade', fault: 'fault finding', check: 'check measure', check_solar: 'solar check measure', check_ac: 'AC check measure', fitoff: 'fit off', general: 'electrical work' };
+  // Who can go (Ethan 21/10), best first. Pearce: no AC, no solar fault finding and no switchboard upgrade unless he's the
+  // second person; never on his own on AC. Solar is always 2, an install always has Ethan.
+  const PAIRS = [['Lachie', 'Pearce'], ['Ethan', 'Lachie'], ['Ethan', 'Pearce']];
+  const CREWS = { solar_install: [['Ethan', 'Lachie'], ['Ethan', 'Pearce']], solar_iso: PAIRS, solar_other: PAIRS, solar_fault: PAIRS, ac_install: PAIRS,
+    ac_service: [['Lachie'], ['Ethan']], check_ac: [['Lachie'], ['Ethan']], check_solar: [['Ethan'], ['Lachie'], ['Pearce']], check: [['Ethan'], ['Lachie']], switchboard: [['Lachie'], ['Ethan']] };
+  const ANY1 = [['Lachie'], ['Pearce'], ['Ethan']];
+  const kindOf = t => { t = String(t || '').toLowerCase();
+    const solar = /solar|\bpv\b|inverter/.test(t), ac = /air ?con|split system|\ba\/c\b|\bac\b|ducted/.test(t);
+    if (/check measure|site measure|measure up/.test(t)) return solar ? 'check_solar' : ac ? 'check_ac' : 'check';
+    if (solar) return /install|refit/.test(t) ? 'solar_install' : /fault|not working/.test(t) ? 'solar_fault' : /isolat|disconnect|remov|make safe/.test(t) ? 'solar_iso' : 'solar_other';
+    if (ac) return /install|back to back|relocat|replace/.test(t) ? 'ac_install' : 'ac_service';
+    if (/isolat|disconnect|strip ?out|demo/.test(t)) return 'iso';
+    if (/make safe/.test(t)) return 'makesafe';
+    if (/switch ?board|meter ?box/.test(t) && /upgrade|replace|new/.test(t)) return 'switchboard';
+    if (/fault/.test(t)) return 'fault';
+    if (/fit ?off|reconnect|reinstat|second fix/.test(t)) return 'fitoff';
+    return 'general'; };
+  const EARLY = { iso: 1, solar_iso: 1, makesafe: 1 }; // done before the other trades get going that day
+  const LATE = { fitoff: 1, general: 1, ac_install: 1 }; // after the other trades finish that day
+  // Repair schedule lines that aren't a trade working on the house
+  const NOT_HANDS = /approval|no site visit|\bbins?\b|delivery|pick ?up|order|measure|report|clean|inspect|assess|quote|lodge|photo/i;
+  // Minutes per item off the PO lines, the first match wins. A disconnect or iso line is half. Anything it doesn't know is 20 and flagged.
+  const LINE_MIN = [[/smoke (alarm|detector)/, 15], [/isolat|make safe|terminat/, 20], [/switch ?board|meter ?box/, 120], [/air ?con|split system|\ba\/c\b/, 60], [/new circuit|\bcircuits?\b/, 60], [/oven|cook ?top|hot water|\bhws\b|dishwasher|range ?hood|induction/, 30], [/fans?\b/, 30], [/sensor|flood ?light|external light|outdoor light/, 20], [/down ?lights?|lights?\b|lighting|batten|oyster|pendant|led strip|fluoro|lamp/, 10], [/gpo|power ?points?|socket|outlet/, 15], [/switch/, 10], [/data|\btv\b|antenna|phone|ethernet|network/, 15], [/test|inspect|report|photo|check/, 15]];
+  const WORK = /\b(disconnect|reconnect|install|supply|remove|replace|relocat|isolat|make safe|terminat|test|inspect|report|repair|rewire|fit|shroud|label|store|dispose|run|check|swap)/i;
+  const CHARGE = /minimum charge|call ?out|labour rate|hourly rate|attendance fee|allowance|travel|double (site )?visit|^view /i;
+  const lineMins = lines => { let tot = 0; const unk = []; lines.forEach(l => { const t = l.toLowerCase(); if ((!WORK.test(t) && !/\d+\s*x\b/.test(t)) || CHARGE.test(t)) return;
+    const q = Math.min(30, +((t.match(/(\d+)\s*x\b/) || t.match(/\bx\s*(\d+)\b/) || [0, 1])[1]) || 1); const hit = LINE_MIN.find(([re]) => re.test(t)); let mn = hit ? hit[1] : 20; if (!hit) unk.push(l.slice(0, 50));
+    if (/^(disconnect|remove|isolat|label|store)/.test(t) && !/reconnect|install|supply/.test(t)) mn /= 2; tot += mn * q; }); return { mins: tot, unk }; };
+  const r30 = m => Math.max(60, Math.ceil(m / 30) * 30);
+  const hrsTxt = m => { const h = m / 60; return (h == Math.floor(h) ? h : h.toFixed(1)) + (h == 1 ? ' hr' : ' hrs'); };
+  // the task description as lines, the PO's own block, and the visit's part of it
+  const descLines = html => String(html || '').replace(/<\/(p|li|div|h\d|tr)>|<br\s*\/?>/gi, '\n').replace(/<[^>]+>/g, ' ').split('\n').map(plain).filter(Boolean);
+  const scopeFor = (lines, po, part) => { let i = lines.findIndex(l => /^P\.?\s?O\.? No/i.test(l) && po && l.includes(po)); let b = i >= 0 ? lines.slice(i + 1) : lines; const j = b.findIndex(l => /^P\.?\s?O\.? No/i.test(l)); if (j >= 0) b = b.slice(0, j);
+    const v1 = b.findIndex(l => /^VISIT 1/i.test(l)), v2 = b.findIndex(l => /^VISIT 2/i.test(l));
+    if (part == 'early' && v1 >= 0) b = b.slice(v1 + 1, v2 > v1 ? v2 : undefined); else if (part == 'late' && v2 >= 0) b = b.slice(v2 + 1);
+    return b.filter(l => !/^(SITE CONTACT|SUPERVISOR|View |P\.?\s?O\.? No)/i.test(l)); };
+  const crewMins = (kind, est, crew) => { if (crew[0] == 'Lisa' || SET[kind]) return est; const sp = crew.map(n => STAFF[n].speed), avg = sp.reduce((a, b) => a + b, 0) / sp.length;
+    return TWO[kind] || crew.length == 1 ? est * avg : est / 1.7 * avg; };
+  const sigOf = v => { let h = 5381; const s = JSON.stringify([v.crew, v.slots, v.m]); for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0; return (h >>> 0).toString(36).slice(0, 6); };
+  const slug = s => norm(s).replace(/ /g, '-').slice(0, 40) || 'visit';
+  const subOf = s => { const a = norm(String(s || '').replace(/<[^>]+>/g, ' ').split(' - ').pop().replace(/\b(qld|nsw)\b.*$/i, '')); return a.split(' ').slice(-1)[0] || ''; };
+
+  // AroFlo's calendar feed needs the settings only the calendar page has (window.fullcalEventSource). Any AroFlo calendar
+  // page this script runs on saves them; if there aren't any yet the filer tab pops over to the calendar once to get them.
+  const calSrcNow = () => { try { const s = W.fullcalEventSource; if (s && s.data && s.data.jsonSettings && s.data.masterusercoded) { const d = { js: s.data.jsonSettings, mu: s.data.masterusercoded, at: now() }; gset('wfCalSrc', d); return d; } } catch (e) {} return null; };
+  const calCache = {};
+  const dayStart = d => Math.floor(new Date(d + 'T00:00:00').getTime() / 1000);
+  async function calDays(days) {
+    const need = [...new Set(days)].filter(d => !calCache[d] || now() - calCache[d].at > 90e3);
+    if (need.length) {
+      const src = calSrcNow() || gget('wfCalSrc', null); if (!src) { if (IS_FILER) gset('wfCalSrcWant', now()); throw new Error('no calendar settings yet'); }
+      const body = new URLSearchParams({ jsonSettings: src.js, masterusercoded: src.mu, range: need.map(dayStart).sort().join(','), eventtypes_task: 1, eventtypes_overhead: 1, eventtypes_event: 1, eventtypes_externalevent: 1 });
+      const txt = await (await fetch('/ims/Site/Calendar/AJAX/AJAX_JSON_ims_events.cfm', { method: 'POST', body, credentials: 'include' })).text();
+      let a; try { a = JSON.parse(txt); } catch (e) { a = null; }
+      if (!Array.isArray(a)) { gdel('wfCalSrc'); if (IS_FILER) gset('wfCalSrcWant', now()); throw new Error('calendar feed said no (' + plain(txt).slice(0, 60) + ')'); }
+      const evs = a.map(e => ({ type: e.type, uid: e.resourceid, s: new Date(e.start), e: new Date(e.end || e.start), all: !!e.allDay, wrid: String(e.wrid || ''), id: String(e.schedid || e.id || ''), note: String(e.note || '').trim(), locked: e.locked == 1, sub: subOf(e.title) }));
+      need.forEach(d => { const s0 = new Date(d + 'T00:00:00'), s1 = new Date(s0.getTime() + 864e5); calCache[d] = { at: now(), ev: evs.filter(e => e.s < s1 && (e.e > s0 || +e.e == +e.s && e.s >= s0)) }; });
+    }
+    return days;
+  }
+  // One person's busy times on a day in minutes. Everything but timesheets (overheads) counts, Ethan's own placeholders too.
+  const busyOf = (d, uid, skip) => (calCache[d] ? calCache[d].ev : []).filter(e => e.uid == uid && e.type != 'overhead' && !(skip || []).includes(e.id)).map(e => {
+    const s0 = new Date(d + 'T00:00:00').getTime(); const s = e.all ? 0 : Math.max(0, (e.s - s0) / 60e3), en = e.all ? 1440 : Math.min(1440, (e.e - s0) / 60e3); return { s, e: Math.max(en, s + 1), sub: e.sub }; });
+  // The first time on day d the whole crew is free for mins, straight after another booking (travel goes inside this one) or
+  // straight before one, so the day runs back to back. o: fixed (a set start), endBy (an iso done before the trades), notBefore (a
+  // fit off after them), sub (this job's suburb for the travel), skip (bookings being moved).
+  function findSlot(d, crew, mins, o) {
+    const all = crew.flatMap(n => busyOf(d, uidOf(n), o.skip)).sort((a, b) => a.s - b.s);
+    const free = (s, e) => all.every(b => b.e <= s || b.s >= e);
+    const trav = s => { const pre = all.filter(b => Math.abs(b.e - s) < 1); return !pre.length ? 0 : pre.some(b => b.sub && b.sub == o.sub) ? 15 : 30; };
+    const lo = o.endBy != null ? EARLIEST : DAY0;
+    const want = o.fixed != null ? o.fixed : o.endBy != null ? Math.max(EARLIEST, Math.min(DAY0, o.endBy - mins)) : Math.max(DAY0, o.notBefore || 0);
+    const fits = (c, strict) => { const tr = trav(c), len = r30(mins + tr), e = c + len; return c >= lo && free(c, e) && e <= 21 * 60 && (!strict || ((o.endBy == null || e <= o.endBy) && (o.notBefore == null || c + tr >= o.notBefore))) ? { s: c, e, tr } : null; };
+    // straight after each booking, or ending right as one starts
+    const next = [...new Set(all.map(b => b.e).concat(all.map(b => b.s - r30(mins))))].sort((a, b) => a - b);
+    const first = (list, strict) => { for (const c of list) { const g = fits(c, strict); if (g) return g; } return null; };
+    const byNear = list => list.slice().sort((a, b) => Math.abs(a - want) - Math.abs(b - want) || a - b);
+    let got = null; const f = [];
+    if (o.fixed != null) { got = fits(o.fixed, true); if (!got) { got = first(byNear(next), true); if (got) f.push((got.s < o.fixed ? 'earlier' : 'later') + ' than the set time (' + hm(o.fixed) + '), ' + crew.join(' + ') + ' booked then'); } }
+    else if (!all.length) got = fits(want, true);
+    else got = first(next.filter(c => c >= want || o.endBy != null), true) || first(byNear([want].concat(next)), true);
+    if (!got) { got = first(byNear([want].concat(next)), false); if (got) f.push(o.endBy != null ? 'can\'t finish before the other trades start (' + hm(o.endBy) + ')' : o.notBefore != null ? 'starts before the other trades finish (' + hm(o.notBefore) + ')' : 'tight day'); }
+    if (!got) return null;
+    if (got.e > DAY_FLAG) f.push('runs to ' + hm(got.e) + ', past 5pm');
+    return Object.assign(got, { f });
+  }
+
+  async function ambroseAll(rec) { if (!rec) return null; const r = await gm({ method: 'GET', url: AMB_API + encodeURIComponent(rec) }); if (r.status != 200) return null; let j; try { j = JSON.parse(r.responseText); } catch (e) { return null; }
+    return (j.bookings || []).filter(b => !/cancel/i.test(b.status || '')).map(b => ({ wre: /wired rite/i.test(b.supplierTradingName || ''), what: (b.bookingType || '').trim(), s: new Date(b.startDate), e: new Date(b.endDate || b.startDate), po: String(b.purchaseOrderNumber || ''), note: (b.tradeNote || '').trim() })); }
+  const minOf = dt => dt.getHours() * 60 + dt.getMinutes();
+  const daysOf = (s, e) => { const out = []; let d = ymd(s); const last = ymd(e); for (let i = 0; i < 31 && d <= last; i++) { if (working(d) || d == ymd(s)) out.push(d); d = addD(d, 1); } return out; };
+  // A task's own bookings, from AroFlo's schedule window feed (all of them, past ones too)
+  async function taskScheds(wrid) {
+    const q = new URLSearchParams({ workrequestid: wrid, timesheetid: 0, allocationid: 0, groupid: 0, tsgroupid: 0, scheduleid: 0, eventid: 0, templateid: 0, baselinetemplateid: 0, groupsstartfrom: '1/1/2020', schedType: 'task', _: now() });
+    const j = await (await fetch('/ims/Site/Calendar/AJAX/AJAX_JSON_get_schedule_groups.cfm?' + q, { credentials: 'include' })).json();
+    const dd = s => { const [d, m, y] = String(s).split('/'); return y + '-' + p2(m) + '-' + p2(d); };
+    return { max: +j.maxgroupid || 0, list: (j.schedules || []).map(s => ({ id: String(s.scheduleid), uid: s.resourceid, who: STAFF[nameOf(s.resourceid)] || s.resourceid == LISA.uid ? nameOf(s.resourceid) : String(s.resourcename || s.resourceid).split(' ')[0], day: dd(s.startdate), s: toMin(s.starttime), e: toMin(s.endtime), note: String(s.note || '').trim(), locked: s.locked == 1, gid: String(s.groupid), wt: s.worktypeid || 0, st: s.schedstatus || 0 })) };
+  }
+  const isMine = s => /UNCONFIRMED/i.test(s.note) && !s.locked;
+
+  // The plan for one To book item. c = {jn, po, rec, dates, r}. Returns the new description and what's still open, or null
+  // when the calendar settings aren't in yet.
+  async function planItem(t, c) {
+    const old = String(t.description || ''); let prev = {}; try { (JSON.parse((old.match(/^plan: (.*)$/m) || [])[1] || '{}').v || []).forEach(v => { prev[v.k] = v; }); } catch (e) {}
+    const info = await descOf(c.r.href); if (!info.wrid) throw new Error('no task number on the task page');
+    const lines = descLines(info.html); const sub = subOf(c.r.name);
+    const amb = c.rec ? await ambroseAll(c.rec) : null; const base = c.po.split('-')[0];
+    // the visits: Ambrose's WRE lines (same day lines are one visit, a multi day line is one visit over its days), else the dates
+    let vs = [];
+    const wre = (amb || []).filter(b => b.wre && (!b.po || !/^\d{8}$/.test(base) || b.po.startsWith(base)));
+    if (wre.length) { wre.sort((a, b) => a.s - b.s).forEach(b => { const ds = daysOf(b.s, b.e); const v = vs.find(x => x.days.length == 1 && ds.length == 1 && x.days[0] == ds[0]);
+        if (v) { if (!v.whats.includes(b.what)) v.whats.push(b.what); v.slot = null; if (b.note) v.notes.push(b.note); } else vs.push({ whats: [b.what], days: ds, slot: ds.length == 1 ? (b.e - b.s) / 60e3 : null, notes: b.note ? [b.note] : [] }); }); }
+    else { const two = lines.some(l => /^VISIT 2/i.test(l)); vs = c.dates.map((d, i) => ({ whats: [two ? (i == 0 ? 'Iso' : i == 1 ? 'Fit off' : 'Visit ' + (i + 1)) : ''], key: 'visit-' + (i + 1), days: [d], slot: null, notes: [] })); }
+    // set times: builder email or Ethan, "Set time: 2026-11-09 9:00am"
+    const fixed = {}; old.split('\n').forEach(l => { const m = l.match(/^Set time: (\d{4}-\d{2}-\d{2}) ([\d:.]+\s*[ap]?m?)/i); if (m && toMin(m[2]) != null) fixed[m[1]] = toMin(m[2]); });
+    const today = ymd(new Date());
+    const ts = await taskScheds(info.wrid);
+    const allDays = vs.flatMap(v => v.days).filter(d => d >= today);
+    if (allDays.length) { try { await calDays(allDays); } catch (e) { if (/settings/.test(e.message)) return null; throw e; } }
+    const already = [...new Set(ts.list.filter(s => s.uid != LISA.uid).map(s => s.who))].filter(n => STAFF[n]);
+    const out = [];
+    for (const v of vs) {
+      // what kind of work: the visit's own words, else the task name, else the PO lines on the task (31 Adelong Rd is a solar install)
+      let what = v.whats.filter(Boolean).join(' + ');
+      let kind = kindOf(what); if (kind == 'general') kind = kindOf(c.r.name); if (kind == 'general' && !wre.length) kind = kindOf(scopeFor(lines, c.po, '').filter(l => !CHARGE.test(l)).join(' '));
+      if (!what) what = WORDS[kind][0].toUpperCase() + WORDS[kind].slice(1); // a non Ambrose job's one visit: say the work, "Solar install"
+      const k = v.key || slug(what);
+      const p = { k, w: what, kind, days: v.days, f: [], ids: (prev[k] || {}).ids || [] };
+      if (v.notes.length) p.tn = v.notes.join(' / ').slice(0, 120);
+      if (v.days.every(d => d < today)) { p.m = 'past'; out.push(p); continue; }
+      const on = ts.list.filter(s => v.days.includes(s.day)); const real = on.filter(s => s.uid != LISA.uid);
+      if (real.length) { p.who = [...new Set(real.map(s => s.who))]; p.m = real.every(isMine) ? 'booked' : p.ids.length && real.some(s => p.ids.includes(s.id)) ? 'confirmed' : 'lisa'; p.ids = real.filter(isMine).map(s => s.id).concat(p.ids.filter(id => real.some(s => s.id == id))); p.ids = [...new Set(p.ids)]; out.push(p); continue; }
+      const ph = on.filter(s => s.uid == LISA.uid);
+      const mineElse = ts.list.filter(s => p.ids.includes(s.id) && !v.days.includes(s.day));
+      if (mineElse.length && !mineElse.every(isMine)) { p.m = 'flag'; p.f.push('Ambrose moved this visit to ' + v.days.map(dShort).join(', ') + ' but the confirmed booking is still on ' + [...new Set(mineElse.map(s => dShort(s.day)))].join(', ') + '. Sort it by hand'); out.push(p); continue; }
+      p.m = mineElse.length ? 'move' : 'new'; p.upd = (mineElse.length ? mineElse : ph).map(s => s.id);
+      // how long: PO lines for iso, fit off and general work, the Ambrose slot when it's a real one (under 6 hrs)
+      let est = BASE[kind] || 120;
+      if (FROM_LINES[kind]) { const sc = scopeFor(lines, c.po, EARLY[kind] ? 'early' : LATE[kind] ? 'late' : ''); const lm = lineMins(sc); if (lm.mins) est = Math.max(kind == 'iso' || kind == 'makesafe' ? BASE[kind] : 60, 30 + lm.mins); lm.unk.slice(0, 2).forEach(u => p.f.push('check the time on: ' + u)); }
+      if (v.slot && v.slot < 360) { if (v.slot > est) { if (v.slot > est * 2) p.f.push('Ambrose gave ' + hrsTxt(v.slot) + ', the PO lines look like ' + hrsTxt(r30(est))); est = v.slot; } else if (est > v.slot * 2) p.f.push('PO lines look like ' + hrsTxt(r30(est)) + ', Ambrose only gave ' + hrsTxt(v.slot)); }
+      p.est = Math.round(est);
+      // the other trades that day
+      const opt = d => { const o = { sub, skip: p.upd, fixed: fixed[d] }; const tr = (amb || []).filter(b => !b.wre && !NOT_HANDS.test(b.what) && daysOf(b.s, b.e).includes(d));
+        if (EARLY[kind] && tr.length) o.endBy = Math.min(...tr.map(b => minOf(b.s))); if (LATE[kind]) { const fin = tr.filter(b => ymd(b.e) == d); if (fin.length) o.notBefore = Math.max(...fin.map(b => minOf(b.e))); } return o; };
+      // who: the people already on the job first, then the rules' order
+      let crews = (CREWS[kind] || ANY1).slice(); if (!/^check/.test(kind) && already.length) crews.sort((a, b) => b.filter(n => already.includes(n)).length - a.filter(n => already.includes(n)).length);
+      let best = null;
+      for (const crew of crews) { const mins = crewMins(kind, est, crew); const slots = []; let ok = true; const f = [];
+        for (const d of v.days.filter(x => x >= today)) { const s = findSlot(d, crew, mins, opt(d)); if (!s) { ok = false; break; } slots.push({ d, s: s.s, e: s.e, tr: s.tr }); s.f.forEach(x => f.push(x)); }
+        if (!ok) continue; const soft = f.length; const cand = { crew, mins, slots, f, soft };
+        if (!best || cand.soft < best.soft) best = cand; if (!soft) break; }
+      if (best) { p.crew = best.crew; p.slots = best.slots; p.mins = Math.round(best.mins); best.f.forEach(x => p.f.push(x)); }
+      else { // nobody fits: Lisa's column for the day, so she sorts who goes (house rules)
+        p.crew = ['Lisa']; p.slots = v.days.filter(x => x >= today).map(d => ({ d, s: fixed[d] != null ? fixed[d] : DAY0, e: (fixed[d] != null ? fixed[d] : DAY0) + r30(est) }));
+        p.lisa = TWO[kind] ? (kind == 'solar_install' ? 'needs Ethan + 1' : 'needs 2 on site') : 'to be booked'; p.f.push('nobody that can go is free, goes on Lisa\'s column (' + p.lisa + ')');
+        if (ph.length) { p.m = 'held'; p.f.push('already on Lisa\'s column'); } }
+      p.sig = sigOf(p); out.push(p);
+    }
+    // the description: the item's own lines, then a readable plan line per visit, then the plan's record for the script
+    const keep = old.split('\n').filter(l => !/^(PLAN |plan: )/.test(l));
+    const tail = keep.findIndex(l => /^(AroFlo: |filer: )/.test(l)); const head = tail < 0 ? keep : keep.slice(0, tail), rest = tail < 0 ? [] : keep.slice(tail);
+    const txt = p => { const d = p.days.map(dShort).join(', ');
+      if (p.m == 'past') return 'PLAN ' + p.w + ' (' + d + '): gone past';
+      if (/^(booked|confirmed|lisa)$/.test(p.m)) return 'PLAN ' + p.w + ' (' + d + '): ' + (p.m == 'booked' ? 'booked by the filer, UNCONFIRMED' : p.m == 'confirmed' ? 'confirmed' : 'Lisa done') + ', ' + p.who.join(' + ');
+      if (p.m == 'flag') return 'PLAN ' + p.w + ' (' + d + '): ' + p.f.join('. ');
+      const sl = p.slots[0]; return 'PLAN ' + p.w + ': ' + d + ', ' + p.crew.join(' + ') + (sl ? ', ' + hm(sl.s) + ' to ' + hm(sl.e) : '') + ' (about ' + hrsTxt(r30(p.mins || p.est)) + (sl && sl.tr ? ' plus ' + sl.tr + ' min travel' : '') + ')' + (p.m == 'move' ? ', moves the unconfirmed booking' : '') + (p.m == 'held' ? ', on Lisa\'s column' : '') + (p.f.length ? '. Check: ' + p.f.join('; ') : ''); };
+    const rec2 = { v: out.map(p => { const o = Object.assign({}, p); delete o.est; return o; }) };
+    const desc = head.concat(out.map(txt), ['plan: ' + JSON.stringify(rec2)], rest).join('\n');
+    const prevTxt = old.split('\n').filter(l => /^PLAN /.test(l)).join('|'), nowTxt = out.map(txt).join('|');
+    const live = out.filter(p => p.m != 'past');
+    return { desc, visits: out, news: prevTxt != nowTxt ? out.map(p => p.w + ' ' + p.m + (p.crew ? ' ' + p.crew.join('+') : '')).join(', ') : '',
+      allConfirmed: live.length > 0 && live.every(p => p.m == 'confirmed' || p.m == 'lisa'), open: live.filter(p => !/^(confirmed|lisa)$/.test(p.m)).flatMap(p => p.days), wrid: info.wrid };
+  }
+
+  // Book one visit through AroFlo's schedule save (what the schedule window's Done posts). New bookings go in their own
+  // group; Lisa's placeholder or the filer's own unconfirmed booking gets updated instead of a second one going in.
+  async function bookVisit(wrid, p, dry) {
+    const ts = await taskScheds(wrid); const ws = (ts.list[0] || {}).wt || 0; const X = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+    const ad = d => { const [y, m, x] = d.split('-'); return y + '/' + (+m) + '/' + (+x); }; // 2026/11/3, the way the window sends it
+    const tail = p.crew[0] == 'Lisa' ? ' - ' + p.lisa : ' - UNCONFIRMED';
+    const note = p.w.slice(0, 49 - tail.length).trim() + tail;
+    const want = []; p.slots.forEach(sl => p.crew.forEach(n => want.push({ d: sl.d, uid: uidOf(n), s: sl.s, e: sl.e })));
+    const reuse = ts.list.filter(s => (p.upd || []).includes(s.id)); const ins = [], upd = [];
+    // one group for the lot: the reused booking's, else a new one
+    const gid = reuse.length ? reuse[0].gid : String(ts.max + 1); const isNew = !reuse.length;
+    want.forEach(w => { const r = reuse.shift(); (r ? upd : ins).push(Object.assign({ r }, w)); });
+    const one = (w, i, u) => '<sched>' + (u ? '<schedid>' + w.r.id + '</schedid><uid>' + X(w.uid) + '</uid><wrid>' + wrid + '</wrid>' : '<id>' + i + '</id><wrid>' + wrid + '</wrid><uid>' + X(w.uid) + '</uid>') +
+      '<sdate>' + ad(w.d) + '</sdate><stime>' + ad(w.d) + ' ' + hm(w.s) + '</stime><edatetime>' + ad(w.d) + ' ' + hm(w.e) + '</edatetime><hours>' + ((w.e - w.s) / 60) + '</hours><note>' + X(note) + '</note>' +
+      (u ? '<gid>' + w.r.gid + '</gid><sstatus>' + (w.r.st || 0) + '</sstatus><editschedeventmsg>0</editschedeventmsg><locked>0</locked><worktypeid>' + (w.r.wt || ws) + '</worktypeid><utcoffset>10</utcoffset>'
+        : '<ohsid>0</ohsid><gid>' + gid + '</gid>' + (isNew ? '<newgid>new_' + gid + '</newgid>' : '') + '<sstatus>0</sstatus><editschedeventmsg>0</editschedeventmsg><locked>0</locked><worktypeid>' + ws + '</worktypeid><utcoffset>10</utcoffset><organiser_user_id>0</organiser_user_id><insert_source>0</insert_source>') + '</sched>';
+    const body = new URLSearchParams({ workrequest_id: wrid, allocation_id: 0, timesheet_id: 0, ts_group_id: 0, event_id: 0, template_id: 0, baseline_template_id: 0, sendCancel: false, sendUpdate: false, schedType: 'task',
+      insertxml: '<allscheds>' + ins.map((w, i) => one(w, i, false)).join('') + '</allscheds>', updatexml: '<allscheds>' + upd.map(w => one(w, 0, true)).join('') + '</allscheds>', deletexml: '<allscheds></allscheds>' });
+    const what = ins.map(w => 'add ' + nameOf(w.uid) + ' ' + dShort(w.d) + ' ' + hm(w.s) + '-' + hm(w.e)).concat(upd.map(w => 'move ' + w.r.who + ' ' + dShort(w.r.day) + ' to ' + nameOf(w.uid) + ' ' + dShort(w.d) + ' ' + hm(w.s) + '-' + hm(w.e))).join(', ') + ' (note "' + note + '")';
+    if (dry) return { ok: true, dry: true, what };
+    const r = await fetch('/ims/Site/Calendar/AJAX/AJAX_JSON_save_schedule_groups.cfm', { method: 'POST', body, credentials: 'include' }); const tx = await r.text(); let j; try { j = JSON.parse(tx); } catch (e) { j = null; }
+    if (!j || j.status != 0) return { ok: false, what, err: 'AroFlo said ' + (j ? (j.errmessage || 'status ' + j.status) : plain(tx).slice(0, 80)) };
+    // check it landed: every booking we wanted is there with the right person, day, times and note
+    const after = await taskScheds(wrid); const ids = [], miss = [];
+    want.forEach(w => { const h = after.list.find(s => s.uid == w.uid && s.day == w.d && s.s == w.s && s.e == w.e && s.note.slice(0, 20) == note.slice(0, 20) && !ids.includes(s.id)); if (h) ids.push(h.id); else miss.push(nameOf(w.uid) + ' ' + dShort(w.d) + ' ' + hm(w.s)); });
+    return { ok: !miss.length, what, ids, err: miss.length ? 'saved but these didn\'t show on the task: ' + miss.join(', ') : '' };
+  }
+
+  // Schedule job / Move job from the dashboard: the filer-book label and a "go: <visit> <sig>" line (" dry" on the end for a dry
+  // run). The plan is worked out again first; if the calendar's moved since the button showed it, nothing's booked and the
+  // new plan shows instead.
+  async function bookings() {
+    if (now() - gget('wfBookGoAt', 0) < 50e3) return; gset('wfBookGoAt', now());
+    let ts; try { ts = (await sectionTasks(SEC_BOOK)).filter(t => (t.labels || []).includes('filer-book')); } catch (e) { return; }
+    const R = await rules(); const tm = new Date().toLocaleTimeString('en-AU', { hour: 'numeric', minute: '2-digit' });
+    for (const t of ts) {
+      const gos = String(t.description || '').split('\n').map(l => l.match(/^go: (\S+) (\S+)( dry)?/)).filter(Boolean);
+      const res = [];
+      let pl = null; try { pl = (await checkToBook(t.id))[0]; } catch (e) { res.push('Couldn\'t plan it: ' + e.message); }
+      for (const g of gos) {
+        const p = pl && pl.visits.find(v => v.k == g[1]);
+        if (!p) { res.push(g[1] + ': not on the item any more'); continue; }
+        if (!/^(new|move)$/.test(p.m)) { res.push(p.w + ': ' + (p.m == 'lisa' ? 'Lisa\'s already booked it, left it' : 'nothing to book (' + p.m + ')')); continue; }
+        if (p.sig != g[2]) { res.push(p.w + ': the calendar changed since you looked, nothing booked. Check the new plan and press it again'); continue; }
+        const dry = !!g[3] || R.dry;
+        let b; try { b = await bookVisit(pl.wrid, p, dry); } catch (e) { b = { ok: false, what: '', err: e.message }; }
+        res.push(p.w + ': ' + (b.dry ? 'DRY RUN, would ' + b.what : b.ok ? 'booked, ' + b.what : 'FAILED, ' + b.err + (b.what ? ' (' + b.what + ')' : '')));
+        log((b.dry ? 'DRY RUN book' : b.ok ? 'Booked' : 'Booking failed') + ': JN ' + (t.description.match(BOOK_RE) || [])[1] + ' ' + p.w + ', ' + (b.what || '') + (b.err ? ' | ' + b.err : ''));
+        if (b.ok && !b.dry) { p.ids = (b.ids || []).concat(p.ids || []); try { const cur = await td('GET', 'tasks/' + t.id); const d0 = String((cur && cur.description) || t.description); const m = d0.match(/^plan: (.*)$/m); if (m) { const o = JSON.parse(m[1]); (o.v || []).forEach(v => { if (v.k == p.k) v.ids = p.ids; }); await td('POST', 'tasks/' + t.id, { description: d0.replace(/^plan: .*$/m, () => 'plan: ' + JSON.stringify(o)) }); } } catch (e) { log('Couldn\'t save the booking ids: ' + e.message); } }
+      }
+      // label off, go lines off, results as a comment, then plan it again so the item shows what's booked
+      try { const cur = await td('GET', 'tasks/' + t.id); await td('POST', 'tasks/' + t.id, { labels: ((cur && cur.labels) || t.labels || []).filter(l => l != 'filer-book'), description: String((cur && cur.description) || t.description).split('\n').filter(l => !/^go: /.test(l)).join('\n') });
+        if (res.length) await td('POST', 'comments', { task_id: t.id, content: 'Schedule job (' + tm + '): ' + res.join('\n') }); await checkToBook(t.id); } catch (e) { log('Schedule job tidy up failed: ' + e.message); }
     }
   }
 
@@ -921,8 +1187,8 @@ if (ON_AF) {
         if (job.dry) { out.push('Would add a To book item for JN ' + r.jn + ': ' + dates.map(dShort).join(', ')); continue; }
         job.x.po_full = job.x.po_full || job.x.po_base || String(r.jn); await addToBook(job, r.jn, '', afLine(r.jn, r.href)); out.push('JN ' + r.jn + ' To book added: ' + dates.map(dShort).join(', ')); continue; }
       if (job.dry) { out.push('Would update JN ' + r.jn + ' To book dates to ' + dates.map(dShort).join(', ') + ' and lift any hold'); continue; }
-      const m = it.description.match(BOOK_RE); const o = { jn: r.jn, po: m[2], rec: m[3], dates, hold: false, street: (it.content.match(/: (.*?) \(JN/) || [])[1] || '', lines: ['Builder dates: ' + dates.map(dShort).join(', ') + ' (from the builder\'s email ' + dShort(ymd(new Date())) + '). Clears itself once each date has a visit booked to anyone but Lisa.'] };
-      await td('POST', 'tasks/' + it.id, { content: bookTitle(o), description: bookDesc(o) + afLine(r.jn, r.href) + '\nfiler: book-' + m[2] }); out.push('JN ' + r.jn + ' new dates ' + dates.map(dShort).join(', '));
+      const m = it.description.match(BOOK_RE); const o = { jn: r.jn, po: m[2], rec: m[3], dates, hold: false, street: (it.content.match(/: (.*?) \(JN/) || [])[1] || '', lines: [BOOK_NOTE(dates) + ' From the builder\'s email ' + dShort(ymd(new Date())) + '.'].concat(setTimes(job)) };
+      await td('POST', 'tasks/' + it.id, { content: bookTitle(o), description: bookDesc(keepBits(o, it.description)) + afLine(r.jn, r.href) + '\nfiler: book-' + m[2] }); out.push('JN ' + r.jn + ' new dates ' + dates.map(dShort).join(', '));
     }
     return out;
   }
@@ -1183,7 +1449,9 @@ if (ON_AF) {
         // every 5 min (was hourly, Ethan 20/10): builder dates against the bookings, cleared once they're all booked
         if (now() - gget('wfBookAt', 0) > 5 * 60e3 && !R.dry) { gset('wfBookAt', now()); await checkToBook(); }
         if (!R.dry) await doubleUps();
-        await retries(); await linkTopUp();
+        await retries(); await bookings(); await linkTopUp();
+        // the booking plans need the calendar's settings: pop over to the calendar once for them (at most every 30 min)
+        if (gget('wfCalSrcWant', 0) && !gget('wfCalSrc', null) && now() - gget('wfCalSrcGo', 0) > 30 * 60e3) { gset('wfCalSrcGo', now()); log('Opening the calendar for its settings (booking plans)'); startOp({ op: 'calsrc', jobId: '' }, '/ims/Site/Calendar/index.cfm?viewfullcalendar=1&tid=IMS.CAL'); return; }
         // tidy: finished jobs older than 7 days
         // matched by id: two jobs() calls give different copies, so includes() never matched and every PDF got wiped while a job waited (18/10)
         const all = jobs(), keep = all.filter(j => j.status == 'new' || now() - j.at < 7 * 864e5), ids = new Set(keep.map(j => j.id));
@@ -1193,6 +1461,10 @@ if (ON_AF) {
     finally { running = false; }
   }
 
+  // Any AroFlo calendar page (Ethan's own browsing too) keeps the calendar settings fresh for the booking plans.
+  if (/\/Calendar\//.test(location.pathname)) waitFor(() => !!calSrcNow(), 60000);
+  // Claude's test runs in its own tab (never the filer tabs): the planner and booking calls, with Todoist going to a stand in.
+  if (!IS_FILER) W.wfBook = { check: checkToBook, go: bookings, plan: planItem, book: bookVisit, scheds: taskScheds, cal: calDays, busy: busyOf, slot: findSlot, kind: kindOf, mins: lineMins, src: calSrcNow };
   const boot = async () => {
     await waitFor(() => !!document.body, 10000); if (!IS_FILER) return; mountChip();
     status('starting');
