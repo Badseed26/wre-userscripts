@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.51
-// @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
+// @version      0.9.52
+// @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Sonnet and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
 // @match        https://outlook.office365.com/*
@@ -39,7 +39,7 @@ const PAGE = 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2,
 // "skip" is marked seen and gone, so it's not the place to be stingy, and a plain email is about a cent. A PO PDF is 10 to 20 cents.
 const MODEL = 'claude-sonnet-5-5';
 const MODEL_PO = 'claude-sonnet-5-5';
-const MODEL_SCHED = 'claude-haiku-5-5'; // the repair schedule PDF is a table lookup for WRE's dates: Haiku at high does it for a couple of cents (Ethan, 20/10)
+const MODEL_SCHED = 'claude-sonnet-5-5'; // back on Sonnet (Ethan, 21/10): Haiku was never tested on these, and a missed electrical row means a job never gets booked
 const PRICE = { 'claude-haiku-5-5': [0.10, 0.50], 'claude-sonnet-5-5': [2, 10] }; // USD per million tokens, in and out
 const TD = 'https://api.todoist.com/api/v1/';
 const FU = '6hfHcM9Gf74fgcJw';          // WRE follow ups
