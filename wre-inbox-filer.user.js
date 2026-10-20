@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.44
+// @version      0.9.45
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -35,8 +35,9 @@ const ON_MAIL = /outlook/.test(HOST), ON_AF = HOST === 'office.aroflo.com';
 const VER = (typeof GM_info != 'undefined' && GM_info.script && GM_info.script.version) || '?'; // read off the header so it never goes stale
 const MAX_READS_DAY = 80; // Haiku reads a day before it stops itself (a runaway loop can't burn the budget)
 const PAGE = 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); // this page load
-const MODEL = 'claude-haiku-5-5';
-const PRICE_IN = 0.10, PRICE_OUT = 0.50; // USD per million tokens
+const MODEL = 'claude-haiku-5-5';      // plain email reads: what kind of email, dates, PO number (cheap, no PDF)
+const MODEL_PO = 'claude-sonnet-5-5';  // PO PDF reads: the scope the boys work off (Ethan, 20/10: worth the 10 to 20 cents a PO)
+const PRICE = { 'claude-haiku-5-5': [0.10, 0.50], 'claude-sonnet-5-5': [2, 10] }; // USD per million tokens, in and out
 const TD = 'https://api.todoist.com/api/v1/';
 const FU = '6hfHcM9Gf74fgcJw';          // WRE follow ups
 const SEC_BOOK = '6hmpxJ4FXMvm8p4P';    // WRE follow ups > To book
@@ -201,11 +202,12 @@ function coverage(x) {
   const visits = (x.blocks || []).filter(b => /visit/i.test(b.h || '')).length;
   return { lines: (x.po_lines || []).length, items: items.length, missing, leftOut, none: !(x.po_lines || []).length && items.length > 0, dvMissing: dv && visits < 2 };
 }
-async function ai(content, maxTok, think, effort) {
+async function ai(content, maxTok, think, effort, model) {
+  model = model || MODEL; const price = PRICE[model] || PRICE[MODEL];
   const dk = 'wfReads_' + ymd(new Date()); const nr = gget(dk, 0) + 1; gset(dk, nr);
   if (nr > MAX_READS_DAY) throw new Error('over ' + MAX_READS_DAY + ' Haiku reads today, stopped till tomorrow (check the log for a loop)');
   if (!aiKey()) throw new Error('no Anthropic API key (Tampermonkey menu: Set Anthropic API key)');
-  const body = { model: MODEL, max_tokens: maxTok || 3000, messages: [{ role: 'user', content }] };
+  const body = { model, max_tokens: maxTok || 3000, messages: [{ role: 'user', content }] };
   if (effort) body.output_config = { effort }; // xhigh can't have thinking turned off
   if (!think && !/^(xhigh|max)$/.test(effort || '')) body.thinking = { type: 'disabled' };
   const r = await gm({ method: 'POST', url: 'https://api.anthropic.com/v1/messages', timeout: 300000,
@@ -215,7 +217,7 @@ async function ai(content, maxTok, think, effort) {
   if (r.status === 401) throw new Error('Anthropic API key not accepted');
   if (r.status >= 400) throw new Error((j.error && j.error.message) || ('Haiku error ' + r.status));
   if (j.stop_reason == 'max_tokens') throw new Error('Haiku ran out of room (max_tokens), the PDF may be too long');
-  const u = j.usage || {}; const cost = ((u.input_tokens || 0) * PRICE_IN + (u.output_tokens || 0) * PRICE_OUT) / 1e6;
+  const u = j.usage || {}; const cost = ((u.input_tokens || 0) * price[0] + (u.output_tokens || 0) * price[1]) / 1e6;
   const sp = gget('wfSpend', {}); const mk = ymd(new Date()).slice(0, 7); sp[mk] = (sp[mk] || 0) + cost; gset('wfSpend', sp);
   const txt = (j.content || []).filter(c => c.type === 'text').map(c => c.text || '').join('');
   const m = txt.match(/\{[\s\S]*\}/); if (!m) throw new Error('Haiku gave no JSON: ' + txt.slice(0, 120));
@@ -309,7 +311,7 @@ function showLog() {
   const sp = gget('wfSpend', {}); const mk = ymd(new Date()).slice(0, 7);
   const el = (tag, css, txt) => { const e = document.createElement(tag); if (css) e.style.cssText = css; if (txt != null) e.textContent = txt; return e; };
   const head = el('div', 'display:flex;gap:10px;align-items:center;padding:10px 14px;border-bottom:1px solid #D5D1CA');
-  head.append(el('b', '', 'WRE Inbox Filer ' + VER), el('span', 'color:#69645E', 'Haiku this month: US$' + (sp[mk] || 0).toFixed(3)), el('span', 'flex:1'));
+  head.append(el('b', '', 'WRE Inbox Filer ' + VER), el('span', 'color:#69645E', 'Claude this month: US$' + (sp[mk] || 0).toFixed(3)), el('span', 'flex:1'));
   const x = el('button', '', 'Close'); x.onclick = () => box.remove(); head.append(x);
   const pre = el('pre', 'margin:0;padding:10px 14px;overflow:auto;flex:1;white-space:pre-wrap', gget('wfLog', []).slice().reverse().join('\n'));
   box.append(head, pre); document.body.appendChild(box);
@@ -444,8 +446,8 @@ if (ON_MAIL) {
     status('reading ' + P.info.subject.slice(0, 40));
     const content = [{ type: 'text', text: READ_RULES + (pdfB64 ? '\n\n' + SCOPE_RULES : '') + '\n\nEMAIL\nFrom: ' + P.info.from + '\nDate: ' + P.info.date + '\nSubject: ' + P.info.subject + '\nAttachments: ' + (P.info.pdfs.join(', ') || 'none') + '\n\n' + P.info.body }];
     if (pdfB64) content.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdfB64 } });
-    // a PO read runs at max effort: it's still about a cent on Haiku and the scope is what the boys work off (Ethan, 20/10)
-    let x; try { x = await ai(content, pdfB64 ? 64000 : 1200, !!pdfB64, pdfB64 ? 'max' : 'low'); } catch (e) { log('Haiku failed: ' + e.message); status('Haiku: ' + e.message, true); return true; }
+    // a PO read goes to Sonnet at high effort (its normal setting, the line check backs it up); a plain email stays on Haiku at low
+    let x; try { x = await ai(content, pdfB64 ? 64000 : 1200, !!pdfB64, pdfB64 ? 'high' : 'low', pdfB64 ? MODEL_PO : MODEL); } catch (e) { log('Haiku failed: ' + e.message); status('Haiku: ' + e.message, true); return true; }
     if (P.as) Object.assign(x, P.as); // test only: pretend it was for another job
     x.po_lines = x.po_lines || []; if (/^(po|updated_po)$/.test(x.kind)) x.cov = coverage(x);
     // ARC jobs go by the PO itself (PO118964-BU01-009, base PO118964-BU01), whatever Haiku made of the "ARC Ref" in the subject
