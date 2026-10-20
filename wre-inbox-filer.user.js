@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.55
+// @version      0.9.56
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Sonnet and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -941,6 +941,7 @@ if (ON_AF) {
   const kindOf = t => { t = String(t || '').toLowerCase();
     const solar = /solar|\bpv\b|inverter/.test(t), ac = /air ?con|split system|\ba\/c\b|\bac\b|ducted/.test(t);
     if (/check measure|site measure|measure up/.test(t)) return solar ? 'check_solar' : ac ? 'check_ac' : 'check';
+    // a solar fit off is an install, Ethan + 1 (Ethan, 21/10)
     if (solar) return /install|refit|fit ?off|reinstat|reconnect/.test(t) ? 'solar_install' : /fault|not working/.test(t) ? 'solar_fault' : /isolat|disconnect|remov|make safe/.test(t) ? 'solar_iso' : 'solar_other';
     if (ac) return /install|back to back|relocat|replace/.test(t) ? 'ac_install' : 'ac_service';
     if (/isolat|disconnect|strip ?out|demo/.test(t)) return 'iso';
@@ -1062,7 +1063,6 @@ if (ON_AF) {
       if (!what) what = WORDS[kind][0].toUpperCase() + WORDS[kind].slice(1); // a non Ambrose job's one visit: say the work, "Solar install"
       const k = v.key || slug(what);
       const p = { k, w: what, kind, days: v.days, f: [], ids: (prev[k] || {}).ids || [] };
-      if (kind == 'solar_install' && /fit ?off|reinstat|reconnect/i.test(what)) p.f.push('solar fit off planned as an install (Ethan + 1)');
       if (v.notes.length) p.tn = v.notes.join(' / ').slice(0, 120);
       if (v.days.every(d => d < today)) { p.m = 'past'; out.push(p); continue; }
       const on = ts.list.filter(s => v.days.includes(s.day)); const real = on.filter(s => s.uid != LISA.uid);
