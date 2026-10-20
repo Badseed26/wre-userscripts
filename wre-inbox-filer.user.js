@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.54
+// @version      0.9.55
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Sonnet and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -941,7 +941,7 @@ if (ON_AF) {
   const kindOf = t => { t = String(t || '').toLowerCase();
     const solar = /solar|\bpv\b|inverter/.test(t), ac = /air ?con|split system|\ba\/c\b|\bac\b|ducted/.test(t);
     if (/check measure|site measure|measure up/.test(t)) return solar ? 'check_solar' : ac ? 'check_ac' : 'check';
-    if (solar) return /install|refit/.test(t) ? 'solar_install' : /fault|not working/.test(t) ? 'solar_fault' : /isolat|disconnect|remov|make safe/.test(t) ? 'solar_iso' : 'solar_other';
+    if (solar) return /install|refit|fit ?off|reinstat|reconnect/.test(t) ? 'solar_install' : /fault|not working/.test(t) ? 'solar_fault' : /isolat|disconnect|remov|make safe/.test(t) ? 'solar_iso' : 'solar_other';
     if (ac) return /install|back to back|relocat|replace/.test(t) ? 'ac_install' : 'ac_service';
     if (/isolat|disconnect|strip ?out|demo/.test(t)) return 'iso';
     if (/make safe/.test(t)) return 'makesafe';
@@ -1038,7 +1038,9 @@ if (ON_AF) {
     const old = String(t.description || ''); let prev = {}; try { (JSON.parse((old.match(/^plan: (.*)$/m) || [])[1] || '{}').v || []).forEach(v => { prev[v.k] = v; }); } catch (e) {}
     const info = await descOf(c.r.href); if (!info.wrid) throw new Error('no task number on the task page');
     const lines = descLines(info.html); const sub = subOf(c.r.name);
-    const amb = c.rec ? await ambroseAll(c.rec) : null; const base = c.po.split('-')[0];
+    // no record on the item (a schedule update email doesn't always carry the link): the task's own "View Repair Schedule" link has it (21/10, JN 9403)
+    const rec = c.rec || ((String(info.html).match(/jobRecID=([0-9a-z]{20,})/i) || [])[1]) || '';
+    const amb = rec ? await ambroseAll(rec) : null; const base = c.po.split('-')[0];
     // the visits: Ambrose's WRE lines (same day lines are one visit, a multi day line is one visit over its days), else the dates
     let vs = [];
     const wre = (amb || []).filter(b => b.wre && (!b.po || !/^\d{8}$/.test(base) || b.po.startsWith(base)));
@@ -1060,11 +1062,19 @@ if (ON_AF) {
       if (!what) what = WORDS[kind][0].toUpperCase() + WORDS[kind].slice(1); // a non Ambrose job's one visit: say the work, "Solar install"
       const k = v.key || slug(what);
       const p = { k, w: what, kind, days: v.days, f: [], ids: (prev[k] || {}).ids || [] };
+      if (kind == 'solar_install' && /fit ?off|reinstat|reconnect/i.test(what)) p.f.push('solar fit off planned as an install (Ethan + 1)');
       if (v.notes.length) p.tn = v.notes.join(' / ').slice(0, 120);
       if (v.days.every(d => d < today)) { p.m = 'past'; out.push(p); continue; }
       const on = ts.list.filter(s => v.days.includes(s.day)); const real = on.filter(s => s.uid != LISA.uid);
       // booked visits keep the planned size and crew, so the tracker tidy can compare it with the real labour hours later
-      if (real.length) { if (prev[k] && prev[k].mins) { p.mins = prev[k].mins; p.crew = prev[k].crew; } p.who = [...new Set(real.map(s => s.who))]; p.m = real.every(isMine) ? 'booked' : p.ids.length && real.some(s => p.ids.includes(s.id)) ? 'confirmed' : 'lisa'; p.ids = real.filter(isMine).map(s => s.id).concat(p.ids.filter(id => real.some(s => s.id == id))); p.ids = [...new Set(p.ids)]; out.push(p); continue; }
+      if (real.length) { if (prev[k] && prev[k].mins) { p.mins = prev[k].mins; p.crew = prev[k].crew; } p.who = [...new Set(real.map(s => s.who))]; p.m = real.every(isMine) ? 'booked' : p.ids.length && real.some(s => p.ids.includes(s.id)) ? 'confirmed' : 'lisa'; p.ids = real.filter(isMine).map(s => s.id).concat(p.ids.filter(id => real.some(s => s.id == id))); p.ids = [...new Set(p.ids)];
+        // someone else's booking that breaks who can go where gets flagged, never changed (house rules section 5)
+        v.days.filter(d => d >= today).forEach(d => { const ppl = [...new Set(real.filter(s => s.day == d).map(s => s.who))]; if (!ppl.length) return; const D = v.days.length > 1 ? dShort(d) + ': ' : '';
+          if (TWO[kind] && ppl.length < 2) p.f.push(D + 'only ' + ppl.join(' + ') + ' on it, ' + WORDS[kind] + ' needs 2 on site');
+          if (kind == 'solar_install' && !ppl.includes('Ethan')) p.f.push(D + 'solar install without Ethan on it');
+          if (/^(ac_|solar_fault|switchboard)/.test(kind) && ppl.length == 1 && ppl[0] == 'Pearce') p.f.push(D + 'Pearce on his own on ' + WORDS[kind]);
+          if (ppl.includes('Jack')) p.f.push(D + 'Jack is booked on it'); });
+        out.push(p); continue; }
       const ph = on.filter(s => s.uid == LISA.uid);
       const mineElse = ts.list.filter(s => p.ids.includes(s.id) && !v.days.includes(s.day));
       if (mineElse.length && !mineElse.every(isMine)) { p.m = 'flag'; p.f.push('Ambrose moved this visit to ' + v.days.map(dShort).join(', ') + ' but the confirmed booking is still on ' + [...new Set(mineElse.map(s => dShort(s.day)))].join(', ') + '. Sort it by hand'); out.push(p); continue; }
@@ -1096,14 +1106,14 @@ if (ON_AF) {
     const tail = keep.findIndex(l => /^(AroFlo: |filer: )/.test(l)); const head = tail < 0 ? keep : keep.slice(0, tail), rest = tail < 0 ? [] : keep.slice(tail);
     const txt = p => { const d = p.days.map(dShort).join(', ');
       if (p.m == 'past') return 'PLAN ' + p.w + ' (' + d + '): gone past';
-      if (/^(booked|confirmed|lisa)$/.test(p.m)) return 'PLAN ' + p.w + ' (' + d + '): ' + (p.m == 'booked' ? 'booked by the filer, UNCONFIRMED' : p.m == 'confirmed' ? 'confirmed' : 'Lisa done') + ', ' + p.who.join(' + ');
+      if (/^(booked|confirmed|lisa)$/.test(p.m)) return 'PLAN ' + p.w + ' (' + d + '): ' + (p.m == 'booked' ? 'booked by the filer, UNCONFIRMED' : p.m == 'confirmed' ? 'confirmed' : 'Lisa done') + ', ' + p.who.join(' + ') + (p.f.length ? '. Check: ' + p.f.join('; ') : '');
       if (p.m == 'flag') return 'PLAN ' + p.w + ' (' + d + '): ' + p.f.join('. ');
       const sl = p.slots[0]; return 'PLAN ' + p.w + ': ' + d + ', ' + p.crew.join(' + ') + (sl ? ', ' + hm(sl.s) + ' to ' + hm(sl.e) : '') + ' (about ' + hrsTxt(r30(p.mins || p.est)) + (sl && sl.tr ? ' plus ' + sl.tr + ' min travel' : '') + ')' + (p.m == 'move' ? ', moves the unconfirmed booking' : '') + (p.m == 'held' ? ', on Lisa\'s column' : '') + (p.f.length ? '. Check: ' + p.f.join('; ') : ''); };
     const rec2 = { v: out.map(p => { const o = Object.assign({}, p); delete o.est; return o; }) };
     const desc = head.concat(out.map(txt), ['plan: ' + JSON.stringify(rec2)], rest).join('\n');
     const prevTxt = old.split('\n').filter(l => /^PLAN /.test(l)).join('|'), nowTxt = out.map(txt).join('|');
     const live = out.filter(p => p.m != 'past');
-    return { desc, visits: out, news: prevTxt != nowTxt ? out.map(p => p.w + ' ' + p.m + (p.crew ? ' ' + p.crew.join('+') : '')).join(', ') : '',
+    return { desc: rec && !c.rec ? desc.replace(/^(BOOK \| JN \d+ \| PO [\w-]+ \| rec )\S*( \|)/m, (m, a, b) => a + rec + b) : desc, visits: out, news: prevTxt != nowTxt ? out.map(p => p.w + ' ' + p.m + (p.crew ? ' ' + p.crew.join('+') : '')).join(', ') : '',
       allConfirmed: live.length > 0 && live.every(p => p.m == 'confirmed' || p.m == 'lisa'), open: live.filter(p => !/^(confirmed|lisa)$/.test(p.m)).flatMap(p => p.days), wrid: info.wrid };
   }
 
