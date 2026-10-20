@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.43
+// @version      0.9.44
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -196,7 +196,10 @@ function coverage(x) {
       const boiler = /boilerplate|admin|comment|terms|invoice/i.test(w) && (/\b(asbestos|swms|risk assessment|as\/nzs|as ?3000|insurance|variation|invoice|terms|conditions|photos? (must|required|to be)|licen[cs]e|compliance|test and tag|report)\b/i.test(sd) || !work.test(sd));
       if (!charge && !boiler) leftOut.push(sd + ' (' + w + ')'); }
     else if (!w || !items.some(i => i && (i == n(w) || (n(w).length >= 12 && (i.includes(n(w)) || n(w).includes(i)))))) missing.push(l.said); });
-  return { lines: (x.po_lines || []).length, items: items.length, missing, leftOut, none: !(x.po_lines || []).length && items.length > 0 };
+  // a double site visit line means two visits (iso, then fit off): flag it when the scope came back as one block (20/10, JN 9475)
+  const dv = (x.po_lines || []).some(l => /double (site )?visit|isolation and reconnection/i.test(l.said || ''));
+  const visits = (x.blocks || []).filter(b => /visit/i.test(b.h || '')).length;
+  return { lines: (x.po_lines || []).length, items: items.length, missing, leftOut, none: !(x.po_lines || []).length && items.length > 0, dvMissing: dv && visits < 2 };
 }
 async function ai(content, maxTok, think, effort) {
   const dk = 'wfReads_' + ymd(new Date()); const nr = gget(dk, 0) + 1; gset(dk, nr);
@@ -249,6 +252,7 @@ Do change:
 - A PO line that is only an area name with its dimensions and no work ("Roofing 10L x 15W x H", "Open Plan 8.5L x 6.38W x H", "Kitchen 4L x 3W x H") is the room or area heading for the lines under it, not a job. Use the name on its own as the room ("Roofing") and put those lines under it as its items. Never write the dimensions, and never make the heading a dot point.
 - A combined builder line ("Disconnect, store, label and reconnect GPO x3") splits: the disconnect goes in visit 1, the reconnect in visit 2.
 - Lines that are only charges (minimum call out, labour rate, allowance for a double visit) don't go in as work.
+- A "Double site visit for isolation and reconnection" line (often under PRELIMINARIES) is a charge, so it's not a dot point, but it tells you the job is TWO visits even when no other line says isolate. Split the scope: "VISIT 1 - ISO" isolates and makes safe whatever the other lines replace or work on (e.g. "Isolate and make safe the garage lighting and GPO circuits, label and junction box where needed"), and "VISIT 2 - FIT OFF" has the supply, install and reconnect lines. Never leave a double visit PO as one block.
 - Overhead power safety advice and shroud allowances stay as a work dot point.
 - Any removal line says plainly whether the item is stored or disposed of, and how many.
 - Supply items say supply and install with the spec: "Supply and install 1 x new 3 blade ceiling fan (S/S or white, standard)".
@@ -902,7 +906,7 @@ if (ON_AF) {
   const tasksFor = async x => { const out = new Map(); if (jobKey(x)) (await search(jobKey(x), 'CustOn')).forEach(r => out.set(r.jn, r)); if (jobKey(x)) (await search(jobKey(x), 'RefNo')).forEach(r => out.set(r.jn, r)); if (x.address && x.address.street) (await search(streetBits(x.address.street).words || x.address.street, 'Location')).filter(r => sameSite(r.name, x.address.street)).forEach(r => out.set(r.jn, r)); return [...out.values()]; };
 
   // For test runs: what Haiku read out of the email, so it can be checked by eye.
-  const covText = c => c.none ? 'Haiku didn\'t list the PO lines, so it couldn\'t be checked' : c.lines + ' PO lines, ' + (c.missing.length || c.leftOut.length ? (c.missing.length ? 'MISSING: ' + c.missing.join(' / ') : '') + (c.leftOut.length ? (c.missing.length ? '. ' : '') + 'LEFT OUT (not a charge): ' + c.leftOut.join(' / ') : '') : 'all accounted for');
+  const covText = c => (c.none ? 'Haiku didn\'t list the PO lines, so it couldn\'t be checked' : c.lines + ' PO lines, ' + (c.missing.length || c.leftOut.length ? (c.missing.length ? 'MISSING: ' + c.missing.join(' / ') : '') + (c.leftOut.length ? (c.missing.length ? '. ' : '') + 'LEFT OUT (not a charge): ' + c.leftOut.join(' / ') : '') : 'all accounted for')) + (c.dvMissing ? '. DOUBLE VISIT on the PO (isolate then reconnect) but the scope isn\'t split into VISIT 1 - ISO and VISIT 2 - FIT OFF' : '');
   const readOut = (job, lines) => { const x = job.x, o = ['Read as: ' + x.kind + (x.po_full ? ', PO ' + x.po_full : '') + (x.address && x.address.street ? ', ' + addrLine(x.address) : '') + (x.summary ? ' (' + x.summary + ')' : '')];
     const sc = (x.site_contacts || []).filter(c => c.name || c.phone).map(c => [c.name, c.phone].filter(Boolean).join(' ')).join(' OR '); if (sc) o.push('Site contact: ' + sc);
     if (x.supervisor && x.supervisor.name) o.push('Supervisor: ' + [x.supervisor.name, x.supervisor.phone].filter(Boolean).join(' '));
@@ -1049,12 +1053,12 @@ if (ON_AF) {
     if (R.upErr) issues.push('PDF upload failed: ' + R.upErr);
     if (R.descErr) issues.push('Description failed: ' + R.descErr);
     if ((x.vague || []).length) issues.push('Lines I wasn\'t sure about:\n' + x.vague.map(v => '- PO said: ' + v.po_said + '\n  I wrote: ' + v.wrote).join('\n'));
-    if (x.cov && (x.cov.none || x.cov.missing.length || x.cov.leftOut.length)) issues.push('PO line check: ' + covText(x.cov) + '. Add anything missing to the description.');
+    if (x.cov && (x.cov.none || x.cov.missing.length || x.cov.leftOut.length || x.cov.dvMissing)) issues.push('PO line check: ' + covText(x.cov) + '. ' + (x.cov.dvMissing ? 'Split the description into the two visits.' : 'Add anything missing to the description.'));
     if (x.wasUpdated) issues.push('Came in marked "Updated" but no task had PO ' + x.po_full + ', so it went on as new works. Make sure it isn\'t a double up.');
     if (job.sameSite) issues.push('No task had ' + (jobKey(x) || x.po_full) + ', so it went under the open task at that address, ' + job.sameSite + '. Make sure that\'s the same job.');
     if (x.overhead_power) issues.push('Overhead power on this PO. Needs an ESA lodged if there isn\'t one.');
     if (isNew && R.otherLoc) issues.push('Made a new location under ' + job.builder + '. The address is also in AroFlo under another client: ' + R.otherLoc);
-    if (issues.length || trialOn()) await safeFu({ sec: 'check', key: 'chk-' + x.po_full, p1: !!(R.upErr || R.descErr || (x.cov && x.cov.missing.length)), due: ymd(new Date()), title: (issues.length ? 'Check ' : 'Check the description on ') + 'JN ' + jn + ', ' + st + (isNew ? ' (new task)' : ' (PO -' + x.po_full.split('-')[1] + ' added)'), desc: (issues.join('\n\n') || 'Trial run: eyeball what the filer wrote.') + (R.upErr ? '\nTry again redoes the upload.' : '') + '\nEmail: ' + job.info.subject + await afLineFor(jn),
+    if (issues.length || trialOn()) await safeFu({ sec: 'check', key: 'chk-' + x.po_full, p1: !!(R.upErr || R.descErr || (x.cov && (x.cov.missing.length || x.cov.dvMissing))), due: ymd(new Date()), title: (issues.length ? 'Check ' : 'Check the description on ') + 'JN ' + jn + ', ' + st + (isNew ? ' (new task)' : ' (PO -' + x.po_full.split('-')[1] + ' added)'), desc: (issues.join('\n\n') || 'Trial run: eyeball what the filer wrote.') + (R.upErr ? '\nTry again redoes the upload.' : '') + '\nEmail: ' + job.info.subject + await afLineFor(jn),
       pdf: R.upErr && job.pdfKey && gget(job.pdfKey, '') ? { name: fileName(job), b64: gget(job.pdfKey, '') } : null });
     const b = gget('wfBases', {}); b[jobKey(x) || x.po_full] = now(); gset('wfBases', b);
   }
