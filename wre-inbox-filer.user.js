@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.58
+// @version      0.9.59
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Sonnet and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -1098,6 +1098,8 @@ if (ON_AF) {
       const on = ts.list.filter(s => v.days.includes(s.day)); const real = on.filter(s => s.uid != LISA.uid);
       // booked visits keep the planned size and crew, so the tracker tidy can compare it with the real labour hours later
       if (real.length) { if (prev[k] && prev[k].mins) { p.mins = prev[k].mins; p.crew = prev[k].crew; } p.who = [...new Set(real.map(s => s.who))]; p.m = real.every(isMine) ? 'booked' : p.ids.length && real.some(s => p.ids.includes(s.id)) ? 'confirmed' : 'lisa'; p.ids = real.filter(isMine).map(s => s.id).concat(p.ids.filter(id => real.some(s => s.id == id))); p.ids = [...new Set(p.ids)];
+        // the filer's own bookings' times, for the dashboard's draft to the supervisor
+        if (p.m == 'booked') p.slots = [...new Set(real.map(s => s.day))].sort().map(d => { const xs = real.filter(s => s.day == d); return { d, s: Math.min(...xs.map(x => x.s)), e: Math.max(...xs.map(x => x.e)) }; });
         // someone else's booking that breaks who can go where gets flagged, never changed (house rules section 5)
         v.days.filter(d => d >= today).forEach(d => { const ppl = [...new Set(real.filter(s => s.day == d).map(s => s.who))]; if (!ppl.length) return; const D = v.days.length > 1 ? dShort(d) + ': ' : '';
           if (TWO[kind] && ppl.length < 2) p.f.push(D + 'only ' + ppl.join(' + ') + ' on it, ' + WORDS[kind] + ' needs 2 on site');
@@ -1148,7 +1150,9 @@ if (ON_AF) {
       if (/^(booked|confirmed|lisa)$/.test(p.m)) return 'PLAN ' + p.w + ' (' + d + '): ' + (p.m == 'booked' ? 'booked by the filer, UNCONFIRMED' : p.m == 'confirmed' ? 'confirmed' : 'Lisa done') + ', ' + p.who.join(' + ') + (p.f.length ? '. Check: ' + p.f.join('; ') : '');
       if (p.m == 'flag') return 'PLAN ' + p.w + ' (' + d + '): ' + p.f.join('. ');
       const sl = p.slots[0]; return 'PLAN ' + p.w + ': ' + d + ', ' + p.crew.join(' + ') + (sl ? ', ' + hm(sl.s) + ' to ' + hm(sl.e) : '') + ' (about ' + hrsTxt(r30(p.mins || p.est)) + (sl && sl.tr ? ' plus ' + sl.tr + ' min travel' : '') + ')' + (p.m == 'move' ? ', moves the unconfirmed booking' : '') + (p.m == 'held' ? ', on Lisa\'s column' : '') + (p.f.length ? '. Check: ' + p.f.join('; ') : ''); };
-    const rec2 = { v: out.map(p => { const o = Object.assign({}, p); delete o.est; return o; }) };
+    // sup = the supervisor's name off the task description (SUPERVISOR: Daniel Bracefield 04...), for the draft to the builder
+    const sup = ((lines.find(l => /^SUPERVISOR:/i.test(l)) || '').replace(/^SUPERVISOR:\s*/i, '').match(/^[A-Za-z' -]+/) || [''])[0].trim();
+    const rec2 = { v: out.map(p => { const o = Object.assign({}, p); delete o.est; return o; }), sup };
     const desc = head.concat(out.map(txt), ['plan: ' + JSON.stringify(rec2)], rest).join('\n');
     const prevTxt = old.split('\n').filter(l => /^PLAN /.test(l)).join('|'), nowTxt = out.map(txt).join('|');
     const live = out.filter(p => p.m != 'past');
