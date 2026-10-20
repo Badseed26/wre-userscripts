@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.48
+// @version      0.9.49
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -234,7 +234,7 @@ Work out what this email is:
 - "esa": Energex or Energy Queensland safety advice issued (from EQLsafetyadvice, subject "Safety Advice Form - <address>", PDF attached). A "Safety Advice Request Form" submission copy is NOT this, that's "skip".
 - "dates_not_accurate": someone at the builder says the current schedule or booked dates aren't right, are on hold, or new dates are coming.
 - "new_dates": the builder gives new or confirmed dates for WRE's work on a job. An Ambrose "Schedule Update for Job <number>" email with the updated repair schedule PDF attached is this when the schedule has dates for the electrician (WRE); if WRE isn't on the schedule it's "skip".
-- "cancelled": the builder cancels a PO, a booking or the whole job for WRE.
+- "cancelled": the builder cancels a PO, a booking or the whole job for WRE. That includes a job being cash settled, closed out or settled with the customer, and "remove the work not done, invoice what's been done". The email body wins over any schedule PDF attached: Ambrose's system attaches the current schedule to every job email, so a schedule showing dates doesn't mean the job's going ahead when the body says it isn't.
 - "skip": anything else (acceptance required, invoices, remittances, statements, marketing, general chat).
 
 Reply with ONLY one JSON object:
@@ -280,7 +280,8 @@ Add these fields to the same JSON object:
 
 po_lines is a check on your own work. List EVERY line item on the PO scope, in order, including charges. For each, "went" is the exact dot point text from blocks (if one PO line became two dot points, e.g. disconnect in visit 1 and reconnect in visit 2, give the first one). Only these may be left out: charge lines (minimum call out, labour rate, allowance for a double visit, attendance fee) as "left out: charge only", the builder's standard paragraphs as "left out: builder boilerplate", and admin comments as "left out: admin comment". Never leave out a work line or an instruction about doing the work.`;
 
-const SCHED_RULES = `The PDF on this email is the builder's updated repair schedule for the whole job, every trade on it. Don't write up a scope. Find the rows for the electrician (Electrical, Electrician, Wired Rite, WRE) and give each one in "dates" with "what" (isolation, fit off, rough in, make safe, as the schedule words it) and "start" as the date and time, local Brisbane time. kind is "new_dates" when WRE has at least one date on it, "skip" when WRE isn't on the schedule. po_base is the 8 digit job number from the subject (Job 20257757). po_full is WRE's PO number if the schedule shows one for the electrical rows, else "". address is the job address from the subject or the schedule. summary is one line like "Schedule update: iso Mon 9/11, fit off Thu 10/12".`;
+const SCHED_RULES = `Read the email body first. If the body says the job is cancelled, cash settled, closed out, or WRE's work isn't needed, kind is "cancelled" and the schedule PDF doesn't matter (summary: what the builder wants, e.g. "Cash settled, invoice the provisional costs done so far"). If the body gives dates itself or says dates are on hold or not accurate, the body wins over the PDF too. Only when the body is just the standard "the job schedule has been updated" note does the PDF decide.
+The PDF on this email is the builder's updated repair schedule for the whole job, every trade on it. Don't write up a scope. Find the rows for the electrician (Electrical, Electrician, Wired Rite, WRE) and give each one in "dates" with "what" (isolation, fit off, rough in, make safe, as the schedule words it) and "start" as the date and time, local Brisbane time. kind is "new_dates" when WRE has at least one date on it, "skip" when WRE isn't on the schedule. po_base is the 8 digit job number from the subject (Job 20257757). po_full is WRE's PO number if the schedule shows one for the electrical rows, else "". address is the job address from the subject or the schedule. summary is one line like "Schedule update: iso Mon 9/11, fit off Thu 10/12".`;
 
 // ---------- small UI chip ----------
 let chip = null, verTag = null;
@@ -965,8 +966,10 @@ if (ON_AF) {
     if (x.kind == 'cancelled') {
       const ts = (await tasksFor(x)).filter(isOpenTask); const who = ts.length ? ts.map(r => 'JN ' + r.jn).join(', ') : 'no open task found';
       if (job.dry) return fin(['Cancellation: would flag it (' + who + ')']);
-      await safeFu({ sec: 'check', key: 'cancel-' + (x.po_full || jobKey(x) || norm(x.address.street)), p1: true, due: ymd(new Date()), title: 'Builder cancelled: ' + (shortStreet(x.address.street) || x.po_full || 'see email') + (ts.length ? ' (' + who + ')' : ''), desc: (x.summary || 'Cancellation email from the builder.') + '\nNothing changed in AroFlo. Cancel the bookings if they\'re still there.\nEmail: ' + job.info.subject + ts.map(r => afLine(r.jn, r.href)).join('') });
-      return fin(['Cancellation flagged (' + who + ')']);
+      // the job's To book item goes too, so nothing gets booked off a schedule the builder has overridden (20/10, 6 Augusta St)
+      let closed = 0; for (const r of ts) { try { const it = (await sectionTasks(SEC_BOOK)).find(t => (t.description || '').includes('BOOK | JN ' + r.jn + ' |')); if (it) { await td('POST', 'comments', { task_id: it.id, content: 'Closed by the filer: builder cancelled (' + (x.summary || job.info.subject).slice(0, 120) + ')' }); await closeFu(it.id); closed++; log('To book closed, JN ' + r.jn + ': builder cancelled'); } } catch (e) { log('To book close failed: ' + e.message); } }
+      await safeFu({ sec: 'check', key: 'cancel-' + (x.po_full || jobKey(x) || norm(x.address.street)), p1: true, due: ymd(new Date()), title: 'Builder cancelled: ' + (shortStreet(x.address.street) || x.po_full || 'see email') + (ts.length ? ' (' + who + ')' : ''), desc: (x.summary || 'Cancellation email from the builder.') + '\nNothing changed in AroFlo. Cancel the bookings if they\'re still there.' + (closed ? ' Its To book item is closed.' : '') + '\nEmail: ' + job.info.subject + ts.map(r => afLine(r.jn, r.href)).join('') });
+      return fin(['Cancellation flagged (' + who + ')' + (closed ? ', To book closed' : '')]);
     }
     if (x.kind == 'dates_not_accurate' || x.kind == 'new_dates') {
       const ts = (await tasksFor(x)).filter(isOpenTask);
