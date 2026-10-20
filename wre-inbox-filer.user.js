@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.49
+// @version      0.9.50
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -864,7 +864,7 @@ if (ON_AF) {
   const draftAskDates = job => { const x = job.x; const n = ((x.supervisor || {}).name || '').split(' ')[0]; const woman = /^(Emily|Hannah|Jasonya|Sarah|Jess|Kate|Lisa|Rachel|Amy|Chloe|Emma|Olivia)$/i.test(n);
     return (n ? 'Hey ' + (woman ? n : 'mate') + ',' : 'Hey mate,') + '\n\nJust touching base on ' + addrLine(x.address) + ' (PO ' + x.po_full + '). Have you got dates for our works yet? Happy to lock them in once we know.\n\n' + (woman ? 'Thank you,' : 'Cheers mate,'); };
 
-  // Hourly: every To book item, check builder dates against AroFlo bookings.
+  // Every 5 min: every To book item, check builder dates against AroFlo bookings.
   async function checkToBook() {
     const list = await sectionTasks(SEC_BOOK); const ahead = workDaysAhead(3);
     for (const t of list) {
@@ -1169,7 +1169,8 @@ if (ON_AF) {
         else { status('working: ' + j.info.subject.slice(0, 40)); await runJob(j); } }
       else {
         status('idle, ' + new Date().toLocaleTimeString('en-AU', { hour: 'numeric', minute: '2-digit' }));
-        if (now() - gget('wfBookAt', 0) > 60 * 60e3 && !R.dry) { gset('wfBookAt', now()); await checkToBook(); }
+        // every 5 min (was hourly, Ethan 20/10): builder dates against the bookings, cleared once they're all booked
+        if (now() - gget('wfBookAt', 0) > 5 * 60e3 && !R.dry) { gset('wfBookAt', now()); await checkToBook(); }
         if (!R.dry) await doubleUps();
         await retries(); await linkTopUp();
         // tidy: finished jobs older than 7 days
