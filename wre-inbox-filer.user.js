@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.45
+// @version      0.9.46
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -35,8 +35,10 @@ const ON_MAIL = /outlook/.test(HOST), ON_AF = HOST === 'office.aroflo.com';
 const VER = (typeof GM_info != 'undefined' && GM_info.script && GM_info.script.version) || '?'; // read off the header so it never goes stale
 const MAX_READS_DAY = 80; // Haiku reads a day before it stops itself (a runaway loop can't burn the budget)
 const PAGE = 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); // this page load
-const MODEL = 'claude-haiku-5-5';      // plain email reads: what kind of email, dates, PO number (cheap, no PDF)
-const MODEL_PO = 'claude-sonnet-5-5';  // PO PDF reads: the scope the boys work off (Ethan, 20/10: worth the 10 to 20 cents a PO)
+// Every read goes to Sonnet at high effort (Ethan, 20/10). The email read is the gate: a cancellation or a dates email called
+// "skip" is marked seen and gone, so it's not the place to be stingy, and a plain email is about a cent. A PO PDF is 10 to 20 cents.
+const MODEL = 'claude-sonnet-5-5';
+const MODEL_PO = 'claude-sonnet-5-5';
 const PRICE = { 'claude-haiku-5-5': [0.10, 0.50], 'claude-sonnet-5-5': [2, 10] }; // USD per million tokens, in and out
 const TD = 'https://api.todoist.com/api/v1/';
 const FU = '6hfHcM9Gf74fgcJw';          // WRE follow ups
@@ -446,8 +448,8 @@ if (ON_MAIL) {
     status('reading ' + P.info.subject.slice(0, 40));
     const content = [{ type: 'text', text: READ_RULES + (pdfB64 ? '\n\n' + SCOPE_RULES : '') + '\n\nEMAIL\nFrom: ' + P.info.from + '\nDate: ' + P.info.date + '\nSubject: ' + P.info.subject + '\nAttachments: ' + (P.info.pdfs.join(', ') || 'none') + '\n\n' + P.info.body }];
     if (pdfB64) content.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdfB64 } });
-    // a PO read goes to Sonnet at high effort (its normal setting, the line check backs it up); a plain email stays on Haiku at low
-    let x; try { x = await ai(content, pdfB64 ? 64000 : 1200, !!pdfB64, pdfB64 ? 'high' : 'low', pdfB64 ? MODEL_PO : MODEL); } catch (e) { log('Haiku failed: ' + e.message); status('Haiku: ' + e.message, true); return true; }
+    // high effort with thinking on for both: the plain email read gets room to think before it answers (1200 was the old Haiku cap)
+    let x; try { x = await ai(content, pdfB64 ? 64000 : 8000, true, 'high', pdfB64 ? MODEL_PO : MODEL); } catch (e) { log('Haiku failed: ' + e.message); status('Haiku: ' + e.message, true); return true; }
     if (P.as) Object.assign(x, P.as); // test only: pretend it was for another job
     x.po_lines = x.po_lines || []; if (/^(po|updated_po)$/.test(x.kind)) x.cov = coverage(x);
     // ARC jobs go by the PO itself (PO118964-BU01-009, base PO118964-BU01), whatever Haiku made of the "ARC Ref" in the subject
