@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.57
+// @version      0.9.58
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Sonnet and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -107,9 +107,9 @@ async function pushLog() {
   gset('wfLogPushAt', now());
   const R = gget('wfRules', null) || {}; const st = R.paused ? 'paused' : R.dry ? 'dry run' : 'live';
   // second line: what each tab's chip says and how long ago, so a tab that's quietly stuck shows on the dashboard (19/10)
-  const tab = k => { const x = gget('wfState_' + k, {}); return (x.msg || '?') + (x.at ? ' (' + Math.round((now() - x.at) / 60e3) + ' min ago)' : ''); };
+  const tab = k => { const x = gget('wfState_' + k, {}); return (x.msg || '?') + (x.at ? ' (' + Math.round((now() - x.at) / 60e3) + ' min ago' + (x.lag || '') + ')' : ''); };
   const reads = gget('wfReads_' + ymd(new Date()), 0), spend = (gget('wfSpend', {})[ymd(new Date()).slice(0, 7)] || 0);
-  try { await td('POST', 'tasks/' + LOG_TASK, { description: 'Filer ' + VER + ', ' + st + ', ' + reads + ' of ' + MAX_READS_DAY + ' reads today, US$' + spend.toFixed(2) + ' this month, last seen ' + new Date().toLocaleString('en-AU', { hour12: true }).replace(',', '') + (WT.ok() ? '' : ' (slow timers)') + '\nOutlook tab: ' + tab('mail') + ' | AroFlo tab: ' + tab('af') + '\n\n' + l.slice(-25).reverse().join('\n') }); gset('wfLogPushed', last); }
+  try { await td('POST', 'tasks/' + LOG_TASK, { description: 'Filer ' + VER + ', ' + st + ', ' + reads + ' of ' + MAX_READS_DAY + ' reads today, US$' + spend.toFixed(2) + ' this month, last seen ' + new Date().toLocaleString('en-AU', { hour12: true }).replace(',', '') + (WT.ok() ? '' : ' (worker timers off)') + '\nOutlook tab: ' + tab('mail') + ' | AroFlo tab: ' + tab('af') + '\n\n' + l.slice(-25).reverse().join('\n') }); gset('wfLogPushed', last); }
   catch (e) { try { console.log('[WRE filer] log push failed', e.message); } catch (x) {} }
 }
 function log(msg) { const l = gget('wfLog', []); l.push(new Date().toLocaleString('en-AU', { hour12: true }).replace(',', '') + ' ' + (ON_MAIL ? '[mail] ' : '[af] ') + msg); while (l.length > 300) l.shift(); gset('wfLog', l); try { console.log('[WRE filer]', msg); } catch (e) {} paint(); }
@@ -303,7 +303,7 @@ function status(msg, bad) { const k = 'wfState_' + (ON_MAIL ? 'mail' : 'af'); co
   // this tab's own last status (sessionStorage), not the shared one: two tabs taking turns filled the log with the same line (19/10)
   const last = ss('wfStatusLast') || ''; ss('wfStatusLast', m);
   if ((bad || /another .* tab|paused|can.t find|no times|stuck/i.test(m)) && strip(m) != strip(last)) log('Status: ' + m);
-  gset(k, { msg: m, bad: !!bad, at: now() }); paint(); }
+  gset(k, { msg: m, bad: !!bad, at: now(), lag: IS_FILER ? lagTxt() : '' }); paint(); }
 function mountChip() {
   if (chip || !document.body) return;
   chip = document.createElement('div');
@@ -339,6 +339,29 @@ try {
 if (/#wre-filer/.test(location.hash)) { try { sessionStorage.setItem('wfRole', '1'); } catch (e) {} }
 const tabId = () => { let t = ss('wfTabId'); if (!t) { t = 't' + now() + Math.random().toString(36).slice(2, 6); ss('wfTabId', t); } return t; };
 const IS_FILER = (() => { try { return sessionStorage.getItem('wfRole') === '1'; } catch (e) { return false; } })();
+
+// Chrome holds a tab that's been hidden 5 min to waking its timers once a minute, unless the tab is using WebRTC. So each
+// filer tab keeps a tiny WebRTC link to itself: nothing leaves the PC, it's only in the two filer tabs, and Chrome's settings
+// aren't touched (Ethan, 21/10). AroFlo's own page code (the upload box) runs on those timers, the filer's waits already don't.
+const awake = { pcs: null, lag: [] };
+async function keepAwake() {
+  try {
+    const PC = W.RTCPeerConnection || window.RTCPeerConnection; if (!PC) { log('Keep awake: no WebRTC in this tab'); return; }
+    const a = new PC(), b = new PC();
+    a.onicecandidate = e => { if (e.candidate) b.addIceCandidate(e.candidate).catch(() => {}); };
+    b.onicecandidate = e => { if (e.candidate) a.addIceCandidate(e.candidate).catch(() => {}); };
+    const ch = a.createDataChannel('wre-awake'); b.ondatachannel = () => {};
+    const o = await a.createOffer(); await a.setLocalDescription(o); await b.setRemoteDescription(o);
+    const an = await b.createAnswer(); await b.setLocalDescription(an); await a.setRemoteDescription(an);
+    awake.pcs = [a, b, ch];
+    ch.onopen = () => log('Keep awake on: WebRTC link open in this tab');
+    setInterval(() => { try { if (ch.readyState == 'open') ch.send('.'); } catch (e) {} }, 20e3);
+  } catch (e) { log('Keep awake didn\'t start: ' + e.message); }
+  // How late the page's own timers run (the ones AroFlo's code uses), worst in the last 10 min, so the log shows if it works.
+  let last = Date.now(); setInterval(() => { const t = Date.now(), late = t - last - 5000; last = t; awake.lag.push([t, Math.max(0, late)]); awake.lag = awake.lag.filter(x => t - x[0] < 10 * 60e3); }, 5000);
+}
+const lagTxt = () => { const m = Math.max(0, ...awake.lag.map(x => x[1])); return !awake.lag.length ? '' : m > 10e3 ? ', page timers held back up to ' + Math.round(m / 1000) + 's' : ', page timers ok'; };
+if (IS_FILER) keepAwake();
 
 // =====================================================================
 // OUTLOOK SIDE
