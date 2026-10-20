@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.53
+// @version      0.9.54
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Sonnet and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -1063,7 +1063,8 @@ if (ON_AF) {
       if (v.notes.length) p.tn = v.notes.join(' / ').slice(0, 120);
       if (v.days.every(d => d < today)) { p.m = 'past'; out.push(p); continue; }
       const on = ts.list.filter(s => v.days.includes(s.day)); const real = on.filter(s => s.uid != LISA.uid);
-      if (real.length) { p.who = [...new Set(real.map(s => s.who))]; p.m = real.every(isMine) ? 'booked' : p.ids.length && real.some(s => p.ids.includes(s.id)) ? 'confirmed' : 'lisa'; p.ids = real.filter(isMine).map(s => s.id).concat(p.ids.filter(id => real.some(s => s.id == id))); p.ids = [...new Set(p.ids)]; out.push(p); continue; }
+      // booked visits keep the planned size and crew, so the tracker tidy can compare it with the real labour hours later
+      if (real.length) { if (prev[k] && prev[k].mins) { p.mins = prev[k].mins; p.crew = prev[k].crew; } p.who = [...new Set(real.map(s => s.who))]; p.m = real.every(isMine) ? 'booked' : p.ids.length && real.some(s => p.ids.includes(s.id)) ? 'confirmed' : 'lisa'; p.ids = real.filter(isMine).map(s => s.id).concat(p.ids.filter(id => real.some(s => s.id == id))); p.ids = [...new Set(p.ids)]; out.push(p); continue; }
       const ph = on.filter(s => s.uid == LISA.uid);
       const mineElse = ts.list.filter(s => p.ids.includes(s.id) && !v.days.includes(s.day));
       if (mineElse.length && !mineElse.every(isMine)) { p.m = 'flag'; p.f.push('Ambrose moved this visit to ' + v.days.map(dShort).join(', ') + ' but the confirmed booking is still on ' + [...new Set(mineElse.map(s => dShort(s.day)))].join(', ') + '. Sort it by hand'); out.push(p); continue; }
