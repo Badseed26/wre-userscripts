@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.46
+// @version      0.9.47
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -609,7 +609,7 @@ if (ON_AF) {
   // The task page link for a follow up, so the dashboard can open the job in AroFlo (Ethan, 20/10). The search's own bits come off the href.
   const afUrl = href => href ? 'https://office.aroflo.com' + String(href).replace(/[&?](searchString|searchParam|changeview|activeTab)=[^&]*/g, '').replace(/index\.cfm&/, 'index.cfm?') : '';
   const afLine = (jn, href) => href ? '\nAroFlo: JN ' + jn + ' ' + afUrl(href) : '';
-  const afLineFor = async jn => { const r = await findJn(jn); return r ? afLine(jn, r.href) : ''; };
+  const afLineFor = async jn => { const r = await findJnSoon(jn); return r ? afLine(jn, r.href) : ''; };
   // A task made a second ago isn't always in the search yet (JN 9467, 18/10), so give it half a minute.
   const findJnSoon = async jn => { for (let i = 0; i < 6; i++) { const r = await findJn(jn); if (r) return r; await sleep(5000); } return null; };
 
@@ -839,7 +839,7 @@ if (ON_AF) {
   const BOOK_RE = /^BOOK \| JN (\d+) \| PO ([\w-]+) \| rec (\S*) \| dates ([\d,-]*) \| hold (yes|no)/m;
   const bookDesc = o => 'BOOK | JN ' + o.jn + ' | PO ' + o.po + ' | rec ' + (o.rec || '') + ' | dates ' + o.dates.join(',') + ' | hold ' + (o.hold ? 'yes' : 'no') + '\n' + (o.lines || []).join('\n');
   const bookTitle = o => (o.hold ? 'On hold, builder says dates not accurate: ' : o.dates.length ? 'Book visits: ' : 'Confirm dates: ') + o.street + ' (JN ' + o.jn + ', PO -' + String(o.po).split('-')[1] + ')';
-  async function addToBook(job, jn, extra) {
+  async function addToBook(job, jn, extra, link) {
     const x = job.x; const base = x.po_base; let dates = [];
     const ad = await ambroseDates(job.info.rec, base); if (ad) dates = ad.filter(d => d.po == x.po_full || !x.po_full).map(d => d.day);
     if (!dates.length) dates = (x.dates || []).map(d => String(d.start || '').slice(0, 10)).filter(Boolean);
@@ -849,7 +849,7 @@ if (ON_AF) {
       lines: dates.length ? ['Builder dates: ' + dates.map(dShort).join(', ') + '. Clears itself once each date has a visit booked to anyone but Lisa.'] :
         ['No dates in the email or on the repair schedule yet. Draft to ' + ((x.supervisor || {}).name || 'the supervisor') + ':', '', draftAskDates(job)] };
     const soon = dates.some(d => workDaysAhead(3).includes(d));
-    return safeFu({ sec: 'book', key: 'book-' + x.po_full, title: bookTitle(o), desc: bookDesc(o) + (extra ? '\n' + extra : '') + await afLineFor(jn), p1: soon, due: soon ? ymd(new Date()) : nextWork(ymd(new Date())) });
+    return safeFu({ sec: 'book', key: 'book-' + x.po_full, title: bookTitle(o), desc: bookDesc(o) + (extra ? '\n' + extra : '') + (link != null ? link : await afLineFor(jn)), p1: soon, due: soon ? ymd(new Date()) : nextWork(ymd(new Date())) });
   }
   const draftAskDates = job => { const x = job.x; const n = ((x.supervisor || {}).name || '').split(' ')[0]; const woman = /^(Emily|Hannah|Jasonya|Sarah|Jess|Kate|Lisa|Rachel|Amy|Chloe|Emma|Olivia)$/i.test(n);
     return (n ? 'Hey ' + (woman ? n : 'mate') + ',' : 'Hey mate,') + '\n\nJust touching base on ' + addrLine(x.address) + ' (PO ' + x.po_full + '). Have you got dates for our works yet? Happy to lock them in once we know.\n\n' + (woman ? 'Thank you,' : 'Cheers mate,'); };
@@ -1008,7 +1008,7 @@ if (ON_AF) {
           if (!R.desc && !R.descErr) return startOp({ op: 'desc', jobId: job.id, mode: 'set', html: fullDesc(job), jn }, d.hh);
           if (!R.up && !R.upErr) return startOp({ op: 'upload', jobId: job.id, pdfKey: job.pdfKey, name: fileName(job) }, job.target.href);
           if (nextAtt() >= 0) return doAtt(job.target.href);
-          await afterWrite(job, jn, true); return fin(['Finished JN ' + jn + ' for PO ' + x.po_full + ': ' + (R.descErr ? 'description FAILED (' + R.descErr + ')' : 'description on') + ', ' + (R.upErr ? 'upload FAILED (' + R.upErr + ')' : 'PDF attached')]);
+          await afterWrite(job, jn, true, job.target.href); return fin(['Finished JN ' + jn + ' for PO ' + x.po_full + ': ' + (R.descErr ? 'description FAILED (' + R.descErr + ')' : 'description on') + ', ' + (R.upErr ? 'upload FAILED (' + R.upErr + ')' : 'PDF attached')]);
         }
         if (x.kind == 'updated_po' || has) {
           if (job.dry) return fin(['PO ' + x.po_full + ' is already on JN ' + job.target.jn + '. ' + (x.kind == 'updated_po' ? 'Would attach ' + fileName(job) + ((job.atts || []).length ? ' plus ' + job.atts.map(f => f.name).join(', ') : '') + ' and flag it to check: ' + (x.changes || x.summary || 'updated PO') : 'Would skip it, already set up')]);
@@ -1016,7 +1016,7 @@ if (ON_AF) {
           if (x.kind != 'updated_po') { // Try again: the PO's on the task already, so just top up the PDF and attachments (the upload skips files already there, 19/10)
             if (!R.up && !R.upErr) return startOp({ op: 'upload', jobId: job.id, pdfKey: job.pdfKey, name: fileName(job) }, job.target.href);
             if (nextAtt() >= 0) return doAtt(job.target.href);
-            if (R.upErr) await afterWrite(job, job.target.jn);
+            if (R.upErr) await afterWrite(job, job.target.jn, false, job.target.href);
             return fin(['PO ' + x.po_full + ' already on JN ' + job.target.jn + ': ' + (R.upErr ? 'upload FAILED (' + R.upErr + ')' : 'PDF on') + attTxt()]); }
           if (!R.up && !R.upErr) return startOp({ op: 'upload', jobId: job.id, pdfKey: job.pdfKey, name: fileName(job) }, job.target.href);
           if (nextAtt() >= 0) return doAtt(job.target.href);
@@ -1029,7 +1029,7 @@ if (ON_AF) {
         if (!R.up && !R.upErr) return startOp({ op: 'upload', jobId: job.id, pdfKey: job.pdfKey, name: fileName(job) }, job.target.href);
         if (!R.desc && !R.descErr) { const h = d.hh; return startOp({ op: 'desc', jobId: job.id, mode: 'append', html: block, mustNotHave: x.po_full, jn: job.target.jn }, h); }
         if (nextAtt() >= 0) return doAtt(job.target.href);
-        await afterWrite(job, job.target.jn); return fin(['Revised PO ' + x.po_full + ' on JN ' + job.target.jn + ': ' + (R.upErr ? 'upload FAILED (' + R.upErr + ')' : 'PDF attached') + ', ' + (R.descErr ? 'description FAILED (' + R.descErr + ')' : 'new works added')]);
+        await afterWrite(job, job.target.jn, false, job.target.href); return fin(['Revised PO ' + x.po_full + ' on JN ' + job.target.jn + ': ' + (R.upErr ? 'upload FAILED (' + R.upErr + ')' : 'PDF attached') + ', ' + (R.descErr ? 'description FAILED (' + R.descErr + ')' : 'new works added')]);
       }
       // new task
       if (job.creating) {
@@ -1044,15 +1044,17 @@ if (ON_AF) {
         if (!R.desc && !R.descErr) { const d = await getDoc(r.href); return startOp({ op: 'desc', jobId: job.id, mode: 'set', html: fullDesc(job), jn: R.jn }, headerHref(d)); }
         if (!R.up && !R.upErr) return startOp({ op: 'upload', jobId: job.id, pdfKey: job.pdfKey, name: fileName(job) }, r.href);
         if (nextAtt() >= 0) return doAtt(r.href);
-        await afterWrite(job, R.jn, true); return fin(['New task JN ' + R.jn + ' for PO ' + x.po_full + ': ' + (R.descErr ? 'description FAILED (' + R.descErr + ')' : 'description on') + ', ' + (R.upErr ? 'upload FAILED (' + R.upErr + ')' : 'PDF attached') + attTxt()]);
+        await afterWrite(job, R.jn, true, r.href); return fin(['New task JN ' + R.jn + ' for PO ' + x.po_full + ': ' + (R.descErr ? 'description FAILED (' + R.descErr + ')' : 'description on') + ', ' + (R.upErr ? 'upload FAILED (' + R.upErr + ')' : 'PDF attached') + attTxt()]);
       }
     }
     return fin(['Nothing to do for kind ' + x.kind]);
   }
   // After a PO lands on a task: To book item, trial check, vague lines, overhead power flag, failures.
-  async function afterWrite(job, jn, isNew) {
+  async function afterWrite(job, jn, isNew, href) {
     const x = job.x, R = job.res || {}; const st = shortStreet(x.address.street);
-    await addToBook(job, jn);
+    // the task's link: from the href the job already has (a new task isn't in the search straight away, JN 9477 20/10), else a search
+    const link = href ? afLine(jn, href) : await afLineFor(jn);
+    await addToBook(job, jn, '', link);
     const issues = [];
     if (R.upErr) issues.push('PDF upload failed: ' + R.upErr);
     if (R.descErr) issues.push('Description failed: ' + R.descErr);
@@ -1062,9 +1064,20 @@ if (ON_AF) {
     if (job.sameSite) issues.push('No task had ' + (jobKey(x) || x.po_full) + ', so it went under the open task at that address, ' + job.sameSite + '. Make sure that\'s the same job.');
     if (x.overhead_power) issues.push('Overhead power on this PO. Needs an ESA lodged if there isn\'t one.');
     if (isNew && R.otherLoc) issues.push('Made a new location under ' + job.builder + '. The address is also in AroFlo under another client: ' + R.otherLoc);
-    if (issues.length || trialOn()) await safeFu({ sec: 'check', key: 'chk-' + x.po_full, p1: !!(R.upErr || R.descErr || (x.cov && (x.cov.missing.length || x.cov.dvMissing))), due: ymd(new Date()), title: (issues.length ? 'Check ' : 'Check the description on ') + 'JN ' + jn + ', ' + st + (isNew ? ' (new task)' : ' (PO -' + x.po_full.split('-')[1] + ' added)'), desc: (issues.join('\n\n') || 'Trial run: eyeball what the filer wrote.') + (R.upErr ? '\nTry again redoes the upload.' : '') + '\nEmail: ' + job.info.subject + await afLineFor(jn),
+    if (issues.length || trialOn()) await safeFu({ sec: 'check', key: 'chk-' + x.po_full, p1: !!(R.upErr || R.descErr || (x.cov && (x.cov.missing.length || x.cov.dvMissing))), due: ymd(new Date()), title: (issues.length ? 'Check ' : 'Check the description on ') + 'JN ' + jn + ', ' + st + (isNew ? ' (new task)' : ' (PO -' + x.po_full.split('-')[1] + ' added)'), desc: (issues.join('\n\n') || 'Trial run: eyeball what the filer wrote.') + (R.upErr ? '\nTry again redoes the upload.' : '') + '\nEmail: ' + job.info.subject + link,
       pdf: R.upErr && job.pdfKey && gget(job.pdfKey, '') ? { name: fileName(job), b64: gget(job.pdfKey, '') } : null });
     const b = gget('wfBases', {}); b[jobKey(x) || x.po_full] = now(); gset('wfBases', b);
+  }
+
+  // Open To book and check items with no AroFlo link (from before 0.9.43, or made before the task was in the search) get one (20/10).
+  async function linkTopUp() {
+    if (now() - gget('wfLinkAt', 0) < 5 * 60e3) return; gset('wfLinkAt', now());
+    for (const sec of [SEC_BOOK, SEC_CHECK]) { let list; try { list = await sectionTasks(sec); } catch (e) { return; }
+      for (const t of list) { const d = String(t.description || ''); if (/^AroFlo: /m.test(d)) continue;
+        const jn = ((t.content + '\n' + d).match(/\bJN ?(\d{4,5})\b/) || [])[1]; if (!jn) continue;
+        const line = await afLineFor(jn); if (!line) continue;
+        const nd = /^filer: /m.test(d) ? d.replace(/\n?(filer: [^\n]*)$/m, m => line + '\n' + m.replace(/^\n/, '')) : d + line;
+        try { await td('POST', 'tasks/' + t.id, { description: nd }); log('AroFlo link added to: ' + String(t.content).slice(0, 50)); } catch (e) { log('Link top up failed: ' + e.message); } } }
   }
 
   // 5pm: two open tasks sharing a base number.
@@ -1143,7 +1156,7 @@ if (ON_AF) {
         status('idle, ' + new Date().toLocaleTimeString('en-AU', { hour: 'numeric', minute: '2-digit' }));
         if (now() - gget('wfBookAt', 0) > 60 * 60e3 && !R.dry) { gset('wfBookAt', now()); await checkToBook(); }
         if (!R.dry) await doubleUps();
-        await retries();
+        await retries(); await linkTopUp();
         // tidy: finished jobs older than 7 days
         // matched by id: two jobs() calls give different copies, so includes() never matched and every PDF got wiped while a job waited (18/10)
         const all = jobs(), keep = all.filter(j => j.status == 'new' || now() - j.at < 7 * 864e5), ids = new Set(keep.map(j => j.id));
