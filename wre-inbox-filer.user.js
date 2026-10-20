@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.47
+// @version      0.9.48
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -233,9 +233,9 @@ Work out what this email is:
 - "updated_po": the builder re-sent an existing PO with changes (Ambrose subjects start "Updated:").
 - "esa": Energex or Energy Queensland safety advice issued (from EQLsafetyadvice, subject "Safety Advice Form - <address>", PDF attached). A "Safety Advice Request Form" submission copy is NOT this, that's "skip".
 - "dates_not_accurate": someone at the builder says the current schedule or booked dates aren't right, are on hold, or new dates are coming.
-- "new_dates": the builder gives new or confirmed dates for WRE's work on a job.
+- "new_dates": the builder gives new or confirmed dates for WRE's work on a job. An Ambrose "Schedule Update for Job <number>" email with the updated repair schedule PDF attached is this when the schedule has dates for the electrician (WRE); if WRE isn't on the schedule it's "skip".
 - "cancelled": the builder cancels a PO, a booking or the whole job for WRE.
-- "skip": anything else (acceptance required, repair schedule updates or PDFs, invoices, remittances, statements, marketing, general chat).
+- "skip": anything else (acceptance required, invoices, remittances, statements, marketing, general chat).
 
 Reply with ONLY one JSON object:
 {"kind":"po|updated_po|esa|dates_not_accurate|new_dates|cancelled|skip","why":"few words",
@@ -279,6 +279,8 @@ Add these fields to the same JSON object:
  "po_lines":[{"said":"one PO line item, copied word for word with its quantity","went":"the dot point it became, copied exactly as you wrote it in blocks, or 'left out: <reason>'"}]
 
 po_lines is a check on your own work. List EVERY line item on the PO scope, in order, including charges. For each, "went" is the exact dot point text from blocks (if one PO line became two dot points, e.g. disconnect in visit 1 and reconnect in visit 2, give the first one). Only these may be left out: charge lines (minimum call out, labour rate, allowance for a double visit, attendance fee) as "left out: charge only", the builder's standard paragraphs as "left out: builder boilerplate", and admin comments as "left out: admin comment". Never leave out a work line or an instruction about doing the work.`;
+
+const SCHED_RULES = `The PDF on this email is the builder's updated repair schedule for the whole job, every trade on it. Don't write up a scope. Find the rows for the electrician (Electrical, Electrician, Wired Rite, WRE) and give each one in "dates" with "what" (isolation, fit off, rough in, make safe, as the schedule words it) and "start" as the date and time, local Brisbane time. kind is "new_dates" when WRE has at least one date on it, "skip" when WRE isn't on the schedule. po_base is the 8 digit job number from the subject (Job 20257757). po_full is WRE's PO number if the schedule shows one for the electrical rows, else "". address is the job address from the subject or the schedule. summary is one line like "Schedule update: iso Mon 9/11, fit off Thu 10/12".`;
 
 // ---------- small UI chip ----------
 let chip = null, verTag = null;
@@ -446,7 +448,7 @@ if (ON_MAIL) {
     P.tries = (P.tries || 0) + 1; P.run = { page: PAGE, at: now() }; gset('wfPending', P);
     const R = await rules(); const pdfB64 = P.pdfKey ? gget(P.pdfKey, '') : '';
     status('reading ' + P.info.subject.slice(0, 40));
-    const content = [{ type: 'text', text: READ_RULES + (pdfB64 ? '\n\n' + SCOPE_RULES : '') + '\n\nEMAIL\nFrom: ' + P.info.from + '\nDate: ' + P.info.date + '\nSubject: ' + P.info.subject + '\nAttachments: ' + (P.info.pdfs.join(', ') || 'none') + '\n\n' + P.info.body }];
+    const content = [{ type: 'text', text: READ_RULES + (pdfB64 ? '\n\n' + (P.sched ? SCHED_RULES : SCOPE_RULES) : '') + '\n\nEMAIL\nFrom: ' + P.info.from + '\nDate: ' + P.info.date + '\nSubject: ' + P.info.subject + '\nAttachments: ' + (P.info.pdfs.join(', ') || 'none') + '\n\n' + P.info.body }];
     if (pdfB64) content.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdfB64 } });
     // high effort with thinking on for both: the plain email read gets room to think before it answers (1200 was the old Haiku cap)
     let x; try { x = await ai(content, pdfB64 ? 64000 : 8000, true, 'high', pdfB64 ? MODEL_PO : MODEL); } catch (e) { log('Haiku failed: ' + e.message); status('Haiku: ' + e.message, true); return true; }
@@ -474,13 +476,15 @@ if (ON_MAIL) {
     const fullKey = (info.date || ymd(new Date())) + '|' + p.head.slice(0, 120);
     // Which PDF is the PO: skip schedules, reports and photos, then look for a PO looking name (ARC's are "PO128170-BU01-002.pdf").
     const okPdf = info.pdfs.filter(n => !/repair.?schedule|schedule|invoice|statement|remittance|assessment|report|photo|scope of works/i.test(n));
-    const pick = okPdf.find(n => /purchase order|work order|\bpo\b|\bpo[\s_-]?\d|safety advice|variation|\bwo\b/i.test(n)) || (okPdf.length == 1 ? okPdf[0] : okPdf.find(n => /\d{4,}/.test(n)) || '');
+    // a "Schedule Update for Job" email: the updated repair schedule PDF is the thing to read, for WRE's dates (20/10)
+    const sched = /schedule update/i.test(info.subject) ? (info.pdfs.find(n => /schedule/i.test(n)) || '') : '';
+    const pick = sched || okPdf.find(n => /purchase order|work order|\bpo\b|\bpo[\s_-]?\d|safety advice|variation|\bwo\b/i.test(n)) || (okPdf.length == 1 ? okPdf[0] : okPdf.find(n => /\d{4,}/.test(n)) || '');
     let pdfKey = '';
     if (pick) { const b64 = await grabPdf(pick); if (b64) { pdfKey = 'wfPdf_' + id; gset(pdfKey, b64); } else log('Couldn\'t grab the PDF on ' + p.head.slice(0, 60)); }
     // every other PDF and photo on the email goes on the task too (19/10)
     const atts = [], more = []; await grabRest(info.pdfs.filter(n => n != pick).concat(info.imgs || []), id, atts, more);
     if (wasUnread) { await park(); const ok = await markUnread(key); if (!ok) log('!! couldn\'t put back to unread: ' + p.head.slice(0, 60)); }
-    gset('wfPending', { tab: tabId(), at: now(), id, key: test ? 'test|' + fullKey : fullKey, rowKey: key, emailAt: test ? 0 : (rowTime(p.when) || new Date()).getTime(), builder: sd.builder, info, pdfKey, pdfName: pick, atts, more, moreTries: 0, wasUnread, test: !!test, live: !!(test && test.live), as: (test && test.as) || null });
+    gset('wfPending', { tab: tabId(), at: now(), id, key: test ? 'test|' + fullKey : fullKey, rowKey: key, emailAt: test ? 0 : (rowTime(p.when) || new Date()).getTime(), builder: sd.builder, info, pdfKey, pdfName: pick, sched: !!sched, atts, more, moreTries: 0, wasUnread, test: !!test, live: !!(test && test.live), as: (test && test.as) || null });
     markSeen(key + '|' + ymd(new Date()));
     if (pdfKey || atts.length || more.length) { reloading = true; status('reloading after the preview'); await sleep(500); location.reload(); return true; }
     return await finishPending();
@@ -838,7 +842,7 @@ if (ON_AF) {
   // First line: BOOK | JN 9445 | PO 20305368-07 | rec <jobRecID> | dates 2026-11-09,2026-11-20 | hold no
   const BOOK_RE = /^BOOK \| JN (\d+) \| PO ([\w-]+) \| rec (\S*) \| dates ([\d,-]*) \| hold (yes|no)/m;
   const bookDesc = o => 'BOOK | JN ' + o.jn + ' | PO ' + o.po + ' | rec ' + (o.rec || '') + ' | dates ' + o.dates.join(',') + ' | hold ' + (o.hold ? 'yes' : 'no') + '\n' + (o.lines || []).join('\n');
-  const bookTitle = o => (o.hold ? 'On hold, builder says dates not accurate: ' : o.dates.length ? 'Book visits: ' : 'Confirm dates: ') + o.street + ' (JN ' + o.jn + ', PO -' + String(o.po).split('-')[1] + ')';
+  const bookTitle = o => (o.hold ? 'On hold, builder says dates not accurate: ' : o.dates.length ? 'Book visits: ' : 'Confirm dates: ') + o.street + ' (JN ' + o.jn + (/-/.test(String(o.po)) ? ', PO -' + String(o.po).split('-')[1] : '') + ')';
   async function addToBook(job, jn, extra, link) {
     const x = job.x; const base = x.po_base; let dates = [];
     const ad = await ambroseDates(job.info.rec, base); if (ad) dates = ad.filter(d => d.po == x.po_full || !x.po_full).map(d => d.day);
@@ -849,6 +853,11 @@ if (ON_AF) {
       lines: dates.length ? ['Builder dates: ' + dates.map(dShort).join(', ') + '. Clears itself once each date has a visit booked to anyone but Lisa.'] :
         ['No dates in the email or on the repair schedule yet. Draft to ' + ((x.supervisor || {}).name || 'the supervisor') + ':', '', draftAskDates(job)] };
     const soon = dates.some(d => workDaysAhead(3).includes(d));
+    // one To book item per job: a second PO or a schedule update for the same JN updates the item that's there (20/10)
+    let have = null; try { have = (await sectionTasks(SEC_BOOK)).find(t => (t.description || '').includes('BOOK | JN ' + jn + ' |')); } catch (e) {}
+    if (have) { const key = ((have.description || '').match(/^filer: (\S+)/m) || [])[1] || ('book-' + x.po_full);
+      try { await td('POST', 'tasks/' + have.id, { content: bookTitle(o), description: bookDesc(o) + (extra ? '\n' + extra : '') + (link != null ? link : await afLineFor(jn)) + '\nfiler: ' + key, priority: soon ? 4 : 3, due_date: soon ? ymd(new Date()) : nextWork(ymd(new Date())) }); } catch (e) { log('To book update failed: ' + e.message); }
+      return have.id; }
     return safeFu({ sec: 'book', key: 'book-' + x.po_full, title: bookTitle(o), desc: bookDesc(o) + (extra ? '\n' + extra : '') + (link != null ? link : await afLineFor(jn)), p1: soon, due: soon ? ymd(new Date()) : nextWork(ymd(new Date())) });
   }
   const draftAskDates = job => { const x = job.x; const n = ((x.supervisor || {}).name || '').split(' ')[0]; const woman = /^(Emily|Hannah|Jasonya|Sarah|Jess|Kate|Lisa|Rachel|Amy|Chloe|Emma|Olivia)$/i.test(n);
@@ -863,7 +872,7 @@ if (ON_AF) {
       const r = await findJn(jn); if (!r) continue;
       if (!isOpenTask(r)) { await closeFu(t.id); log('To book closed, JN ' + jn + ' is ' + r.status); continue; }
       const ad = await ambroseDates(rec, po.split('-')[0]);
-      if (ad) { const nd = [...new Set(ad.filter(d => d.po == po).map(d => d.day))].sort(); if (nd.length && nd.join(',') != dates.join(',')) {
+      if (ad) { const nd = [...new Set(ad.filter(d => d.po == po || !/-/.test(po)).map(d => d.day))].sort(); if (nd.length && nd.join(',') != dates.join(',')) {
         const was = dates; dates = nd; const o = { jn, po, rec, dates, hold: false, street: (t.content.match(/: (.*?) \(JN/) || [])[1] || '', lines: ['Builder dates: ' + dates.map(dShort).join(', ') + (was.length ? ' (moved from ' + was.map(dShort).join(', ') + ')' : '') + '. Clears itself once each date has a visit booked to anyone but Lisa.'] };
         await td('POST', 'tasks/' + t.id, { content: bookTitle(o), description: bookDesc(o) + afLine(jn, r.href) + '\nfiler: book-' + po });
         log('Builder dates changed for JN ' + jn + ': ' + dates.join(', ')); } }
@@ -895,7 +904,10 @@ if (ON_AF) {
     for (const r of tasks) {
       const list = await sectionTasks(SEC_BOOK); const it = list.find(t => (t.description || '').includes('BOOK | JN ' + r.jn + ' |'));
       const dates = [...new Set((job.x.dates || []).map(d => String(d.start || '').slice(0, 10)).filter(Boolean))].sort();
-      if (!it || !dates.length) continue;
+      if (!dates.length) continue;
+      if (!it) { // no To book item for the job yet (an older job, or one Lisa set up): make one from these dates (20/10)
+        if (job.dry) { out.push('Would add a To book item for JN ' + r.jn + ': ' + dates.map(dShort).join(', ')); continue; }
+        job.x.po_full = job.x.po_full || job.x.po_base || String(r.jn); await addToBook(job, r.jn, '', afLine(r.jn, r.href)); out.push('JN ' + r.jn + ' To book added: ' + dates.map(dShort).join(', ')); continue; }
       if (job.dry) { out.push('Would update JN ' + r.jn + ' To book dates to ' + dates.map(dShort).join(', ') + ' and lift any hold'); continue; }
       const m = it.description.match(BOOK_RE); const o = { jn: r.jn, po: m[2], rec: m[3], dates, hold: false, street: (it.content.match(/: (.*?) \(JN/) || [])[1] || '', lines: ['Builder dates: ' + dates.map(dShort).join(', ') + ' (from the builder\'s email ' + dShort(ymd(new Date())) + '). Clears itself once each date has a visit booked to anyone but Lisa.'] };
       await td('POST', 'tasks/' + it.id, { content: bookTitle(o), description: bookDesc(o) + afLine(r.jn, r.href) + '\nfiler: book-' + m[2] }); out.push('JN ' + r.jn + ' new dates ' + dates.map(dShort).join(', '));
