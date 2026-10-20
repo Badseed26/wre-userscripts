@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.50
+// @version      0.9.51
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Haiku and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -33,12 +33,13 @@ const ON_MAIL = /outlook/.test(HOST), ON_AF = HOST === 'office.aroflo.com';
 
 // ---------- fixed bits ----------
 const VER = (typeof GM_info != 'undefined' && GM_info.script && GM_info.script.version) || '?'; // read off the header so it never goes stale
-const MAX_READS_DAY = 80; // Haiku reads a day before it stops itself (a runaway loop can't burn the budget)
+const MAX_READS_DAY = 200; // reads a day before it stops itself (a runaway loop can't burn the budget). Was 80: schedule updates are reads too now (20/10)
 const PAGE = 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); // this page load
 // Every read goes to Sonnet at high effort (Ethan, 20/10). The email read is the gate: a cancellation or a dates email called
 // "skip" is marked seen and gone, so it's not the place to be stingy, and a plain email is about a cent. A PO PDF is 10 to 20 cents.
 const MODEL = 'claude-sonnet-5-5';
 const MODEL_PO = 'claude-sonnet-5-5';
+const MODEL_SCHED = 'claude-haiku-5-5'; // the repair schedule PDF is a table lookup for WRE's dates: Haiku at high does it for a couple of cents (Ethan, 20/10)
 const PRICE = { 'claude-haiku-5-5': [0.10, 0.50], 'claude-sonnet-5-5': [2, 10] }; // USD per million tokens, in and out
 const TD = 'https://api.todoist.com/api/v1/';
 const FU = '6hfHcM9Gf74fgcJw';          // WRE follow ups
@@ -105,7 +106,8 @@ async function pushLog() {
   const R = gget('wfRules', null) || {}; const st = R.paused ? 'paused' : R.dry ? 'dry run' : 'live';
   // second line: what each tab's chip says and how long ago, so a tab that's quietly stuck shows on the dashboard (19/10)
   const tab = k => { const x = gget('wfState_' + k, {}); return (x.msg || '?') + (x.at ? ' (' + Math.round((now() - x.at) / 60e3) + ' min ago)' : ''); };
-  try { await td('POST', 'tasks/' + LOG_TASK, { description: 'Filer ' + VER + ', ' + st + ', last seen ' + new Date().toLocaleString('en-AU', { hour12: true }).replace(',', '') + (WT.ok() ? '' : ' (slow timers)') + '\nOutlook tab: ' + tab('mail') + ' | AroFlo tab: ' + tab('af') + '\n\n' + l.slice(-25).reverse().join('\n') }); gset('wfLogPushed', last); }
+  const reads = gget('wfReads_' + ymd(new Date()), 0), spend = (gget('wfSpend', {})[ymd(new Date()).slice(0, 7)] || 0);
+  try { await td('POST', 'tasks/' + LOG_TASK, { description: 'Filer ' + VER + ', ' + st + ', ' + reads + ' of ' + MAX_READS_DAY + ' reads today, US$' + spend.toFixed(2) + ' this month, last seen ' + new Date().toLocaleString('en-AU', { hour12: true }).replace(',', '') + (WT.ok() ? '' : ' (slow timers)') + '\nOutlook tab: ' + tab('mail') + ' | AroFlo tab: ' + tab('af') + '\n\n' + l.slice(-25).reverse().join('\n') }); gset('wfLogPushed', last); }
   catch (e) { try { console.log('[WRE filer] log push failed', e.message); } catch (x) {} }
 }
 function log(msg) { const l = gget('wfLog', []); l.push(new Date().toLocaleString('en-AU', { hour12: true }).replace(',', '') + ' ' + (ON_MAIL ? '[mail] ' : '[af] ') + msg); while (l.length > 300) l.shift(); gset('wfLog', l); try { console.log('[WRE filer]', msg); } catch (e) {} paint(); }
@@ -140,7 +142,7 @@ async function upsertFu(o) {
   const desc = (o.desc || '') + '\nfiler: ' + o.key;
   const open = await sectionTasks(sec);
   const hit = open.find(t => (t.description || '').includes('filer: ' + o.key));
-  const body = { content: o.title, description: desc, priority: o.p1 ? 4 : 3 };
+  const body = { content: o.title, description: desc, priority: o.p1 ? 4 : o.low ? 1 : 3 };
   if (o.due) body.due_date = o.due;
   if (hit) { await td('POST', 'tasks/' + hit.id, body); return hit.id; }
   const t = await td('POST', 'tasks', Object.assign({ project_id: FU, section_id: sec }, body));
@@ -387,6 +389,9 @@ if (ON_MAIL) {
     scrollTop(); return null; };
 
   const seen = () => gget('wfSeen', {});
+  // A row's key: subject head plus the minute it arrived (not the day it was seen or how Outlook prints the time), so the same
+  // subject re-sent later is a new email and the key doesn't change at midnight. The old 6 hour fuzzy match swallowed re-sends (20/10).
+  const rowKey2 = p => { const t = rowTime(p.when); return p.head.slice(0, 120) + '|' + (t ? Math.floor(t.getTime() / 60000) : p.when); };
   const markSeen = k => { const s = seen(); s[k] = now(); const cut = now() - 40 * 864e5; Object.keys(s).forEach(x => { if (!(+s[x] > cut)) delete s[x]; }); gset('wfSeen', s); };
   const senderOf = (head, R) => { const h = head.toLowerCase(); return R.senders.find(s => h.includes(s.k) || (s.builder && h.includes(s.builder.toLowerCase().split(' ')[0])) || s.words.some(w => h.includes(w))); };
   const SKIP_SUBJ = /Acceptance Required - Purchase Order|Safety Advice Request Form - Submission|Remittance Advice|Tax Invoice|RCTI/i;
@@ -452,14 +457,17 @@ if (ON_MAIL) {
     const content = [{ type: 'text', text: READ_RULES + (pdfB64 ? '\n\n' + (P.sched ? SCHED_RULES : SCOPE_RULES) : '') + '\n\nEMAIL\nFrom: ' + P.info.from + '\nDate: ' + P.info.date + '\nSubject: ' + P.info.subject + '\nAttachments: ' + (P.info.pdfs.join(', ') || 'none') + '\n\n' + P.info.body }];
     if (pdfB64) content.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdfB64 } });
     // high effort with thinking on for both: the plain email read gets room to think before it answers (1200 was the old Haiku cap)
-    let x; try { x = await ai(content, pdfB64 ? 64000 : 8000, true, 'high', pdfB64 ? MODEL_PO : MODEL); } catch (e) { log('Haiku failed: ' + e.message); status('Haiku: ' + e.message, true); return true; }
+    let x; try { x = await ai(content, pdfB64 ? 64000 : 8000, true, 'high', pdfB64 ? (P.sched ? MODEL_SCHED : MODEL_PO) : MODEL); } catch (e) { log('Haiku failed: ' + e.message); status('Haiku: ' + e.message, true); return true; }
     if (P.as) Object.assign(x, P.as); // test only: pretend it was for another job
     x.po_lines = x.po_lines || []; if (/^(po|updated_po)$/.test(x.kind)) x.cov = coverage(x);
     // ARC jobs go by the PO itself (PO118964-BU01-009, base PO118964-BU01), whatever Haiku made of the "ARC Ref" in the subject
     if (/\barc\b/i.test(P.builder || x.builder || '') && /^PO\d/i.test(x.po_full || '')) { x.ref = ''; x.po_base = x.po_full.replace(/-\d+$/, ''); }
     x.address = x.address || {}; x.dates = x.dates || []; x.blocks = x.blocks || []; x.vague = x.vague || []; x.site_contacts = x.site_contacts || []; x.warn = x.warn || [];
     const job = { id: P.id + Math.random().toString(36).slice(2, 6), at: now(), emailAt: P.emailAt, dry: P.live ? false : (R.dry || !!P.test), test: !!P.test, key: P.key, builder: P.builder || x.builder || '', info: { from: P.info.from, date: P.info.date, subject: P.info.subject, rs: P.info.rs, rec: P.info.rec, img: P.info.img, pdfName: P.pdfName || '' }, pdfKey: P.pdfKey || '', atts: P.atts || [], x, status: 'new' };
-    if (x.kind == 'skip' || !x.kind) { (P.atts || []).forEach(a => gdel(a.key)); if (gget('wfRetryNext', '')) { const tid = gget('wfRetryNext', ''); gdel('wfRetryNext'); closeFu(tid).catch(() => {}); } log('Skip: ' + P.info.subject.slice(0, 70) + ' (' + (x.why || '') + ')'); if (P.pdfKey) gdel(P.pdfKey); if (job.test) await dryNote(job, ['Would skip it: ' + (x.why || '')]); }
+    if (x.kind == 'skip' || !x.kind) { (P.atts || []).forEach(a => gdel(a.key)); if (gget('wfRetryNext', '')) { const tid = gget('wfRetryNext', ''); gdel('wfRetryNext'); closeFu(tid).catch(() => {}); } log('Skip: ' + P.info.subject.slice(0, 70) + ' (' + (x.why || '') + ')'); if (P.pdfKey) gdel(P.pdfKey); if (job.test) await dryNote(job, ['Would skip it: ' + (x.why || '')]);
+      // a skip is final, so the day's skipped emails that carried a PDF go on one low priority item for an eyeball (20/10)
+      if (!P.test && (P.info.pdfs || []).length) { const dk = 'wfSkips_' + ymd(new Date()), sk = gget(dk, []); sk.push(P.info.subject.slice(0, 90) + ' (' + (x.why || 'skip').slice(0, 80) + ')'); gset(dk, sk);
+        await safeFu({ sec: 'check', key: 'skips-' + ymd(new Date()), low: true, due: ymd(new Date()), title: 'Filer skipped ' + sk.length + ' email' + (sk.length == 1 ? '' : 's') + ' with a PDF today, eyeball them', desc: 'Skipped as not a PO, dates or cancellation. Tick it off if they look right.\n' + sk.map(l => '- ' + l).join('\n') }); } }
     else { const q = gget('wfJobs', []); if (!job.test && !gget('wfRetryNext', '') && q.some(j => j.key == job.key && now() - j.at < 30 * 60e3)) log('Already queued, not doubling up: ' + P.info.subject.slice(0, 70)); else { if (!job.test && gget('wfRetryNext', '')) { job.retryTask = gget('wfRetryNext', ''); gdel('wfRetryNext'); } q.push(job); gset('wfJobs', q); log('Queued ' + x.kind + ': ' + P.info.subject.slice(0, 70)); } }
     if (!P.test) markSeen(P.key); gdel('wfPending'); status('idle'); return true;
   }
@@ -473,7 +481,7 @@ if (ON_MAIL) {
     const info = readPane(); const id = 'j' + now().toString(36);
     // Nothing in the reading pane (the click didn't open it, or the list moved under us): leave it for the next scan rather than reading a blank.
     if (!info.subject.trim() && !info.body) { log('Reading pane came up empty, left it: ' + p.head.slice(0, 60)); return test ? 'reading pane came up empty, try again' : false; }
-    if (/wired ?rite/i.test(info.from)) { log('Own email, skipped: ' + p.head.slice(0, 60)); if (wasUnread) { await park(); await markUnread(key); } markSeen(key + '|' + ymd(new Date())); return test ? 'own email, skipped' : false; }
+    if (/wired ?rite/i.test(info.from)) { log('Own email, skipped: ' + p.head.slice(0, 60)); if (wasUnread) { await park(); await markUnread(key); } markSeen(rowKey2(p)); return test ? 'own email, skipped' : false; }
     const fullKey = (info.date || ymd(new Date())) + '|' + p.head.slice(0, 120);
     // Which PDF is the PO: skip schedules, reports and photos, then look for a PO looking name (ARC's are "PO128170-BU01-002.pdf").
     const okPdf = info.pdfs.filter(n => !/repair.?schedule|schedule|invoice|statement|remittance|assessment|report|photo|scope of works/i.test(n));
@@ -486,7 +494,7 @@ if (ON_MAIL) {
     const atts = [], more = []; await grabRest(info.pdfs.filter(n => n != pick).concat(info.imgs || []), id, atts, more);
     if (wasUnread) { await park(); const ok = await markUnread(key); if (!ok) log('!! couldn\'t put back to unread: ' + p.head.slice(0, 60)); }
     gset('wfPending', { tab: tabId(), at: now(), id, key: test ? 'test|' + fullKey : fullKey, rowKey: key, emailAt: test ? 0 : (rowTime(p.when) || new Date()).getTime(), builder: sd.builder, info, pdfKey, pdfName: pick, sched: !!sched, atts, more, moreTries: 0, wasUnread, test: !!test, live: !!(test && test.live), as: (test && test.as) || null });
-    markSeen(key + '|' + ymd(new Date()));
+    markSeen(rowKey2(p));
     if (pdfKey || atts.length || more.length) { reloading = true; status('reloading after the preview'); await sleep(500); location.reload(); return true; }
     return await finishPending();
   }
@@ -496,6 +504,7 @@ if (ON_MAIL) {
     if (busy || reloading || !IS_FILER) return; busy = true;
     try {
       if (await finishPending()) return;
+      { const P1 = gget('wfPending', null); if (P1 && now() - (P1.at || 0) < 5 * 60e3) { status('a read is still going in another tab'); return; } }
       const lk = gget('wfMailLock', null); const me = tabId();
       if (lk && lk.tab !== me && now() - lk.at < 90e3) { status('another Outlook filer tab is running'); return; }
       gset('wfMailLock', { tab: me, at: now() });
@@ -512,12 +521,14 @@ if (ON_MAIL) {
       { const rr = gget('wfReread', []).filter(x => now() - x.at < 15 * 60e3), sp = v => String(v).replace(/\s+/g, ' ').toLowerCase();
         if (rr.length) { let again = null; const el = await findRowDeep(o => { const p = parse(o.getAttribute('aria-label')); if (p.pinned) return false; again = rr.find(x => sp(p.head).includes(sp(x.head))); return !!again; });
           if (el) { const p = parse(el.getAttribute('aria-label')); gset('wfReread', rr.filter(x => x !== again)); gset('wfRetryNext', again.task); log('Reading again: ' + p.head.slice(0, 80)); const r = await takeOne(el, R, false); if (!reloading) later(scan, r ? 1500 : 5000); return; } } }
+      // first run on the new keys: everything on screen now counts as seen, so nothing old gets filed twice
+      if (!gget('wfSeenV2', 0)) { rowsNow().forEach(el => { const p = parse(el.getAttribute('aria-label')); if (!p.pinned) markSeen(rowKey2(p)); }); gset('wfSeenV2', 1); log('Seen keys rebuilt: the rows on screen now count as seen'); }
       const s = seen(); let looked = 0, timed = 0;
       for (const el of rowsNow().slice(0, 40)) {
         const p = parse(el.getAttribute('aria-label')); if (p.pinned) continue;
-        const rk = p.head + ' ' + p.when + '|' + ymd(new Date());
+        const rk = rowKey2(p);
         looked++; const t = rowTime(p.when); if (t) timed++; if (!t || t.getTime() < start - 60e3) continue;
-        if (s[rk] || [...Object.keys(s)].some(k => k.endsWith('|' + p.head.slice(0, 120)) && s[k] && Math.abs((+s[k] || 0) - t.getTime()) < 6 * 3600e3)) continue;
+        if (s[rk]) continue;
         if (!senderOf(p.head, R)) continue;
         if (SKIP_SUBJ.test(p.head)) { markSeen(rk); continue; }
         log('New: ' + p.head.slice(0, 80)); const r = await takeOne(el, R, false); if (!reloading) later(scan, r ? 1500 : 5000); return;
