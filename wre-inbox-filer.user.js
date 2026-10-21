@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.59
+// @version      0.9.60
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Sonnet and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -47,6 +47,9 @@ const SEC_BOOK = '6hmpxJ4FXMvm8p4P';    // WRE follow ups > To book
 const SEC_CHECK = '6hmpxJ488W9GCXpP';   // WRE follow ups > Errors / to check
 const RULES_TASK = '6hmpxM3GFpWCgPvX';  // WRE job tracker > Inbox filer settings > Inbox filer rules
 const LOG_TASK = '6hp9c9X7CPQvgRw5';    // WRE job tracker > Inbox filer settings > Inbox filer log (the dashboard reads it)
+const TRACK = '6hfHgcxH8W9q4qf5';       // WRE job tracker
+const SEC_SET = '6hmpxJ2hr8Hc5MRX';     // WRE job tracker > Inbox filer settings (not jobs)
+const PHONE_TASK = '6hpjJ2vf294Q3wv5';  // WRE job tracker > Inbox filer settings > * Phone list (WRE Capture reads it)
 const AMB_API = 'https://production-reportapi.ambrosebuilding.com.au/ReportData/RepairSchedule?recipientType=Insured&jobRecID=';
 const HOLS = { '2026-10-05': 1, '2026-12-25': 1, '2026-12-28': 1, '2027-01-01': 1, '2027-01-26': 1, '2027-03-26': 1, '2027-03-29': 1, '2027-04-26': 1, '2027-05-03': 1 };
 const TRIAL_DAYS = 14;
@@ -710,6 +713,28 @@ if (ON_AF) {
     return opDone(op, same ? { desc: op.mode } : { descErr: 'saved but the re-read doesn\'t match, check JN ' + op.jn });
   }
 
+  // Op: site info from Ethan's phone on top of the task description (Push to AroFlo on the dashboard). Only ever one plain line on
+  // top, nothing else in the description or header changes. op.test (Claude's own tab) does the checks, puts it back and saves nothing.
+  async function opSite(op) {
+    if (!op.saved) {
+      if (!/^Edit - JN/.test(document.title) && !(await waitFor(() => /^Edit - JN/.test(document.title), 20000))) return siteEnd(op, { err: 'header page did not open' });
+      if (!new RegExp('\\bJN ' + op.jn + '\\b').test(document.title)) return siteEnd(op, { err: 'landed on "' + document.title.slice(0, 40) + '", not JN ' + op.jn + ', nothing saved' });
+      if (!(await ckReady('description'))) return siteEnd(op, { err: 'editor not ready' });
+      const ed = W.CKEDITOR.instances.description; const old = ed.getData(); const f0 = hdrFields();
+      if (plain(old).includes(plain(op.line))) return siteEnd(op, { already: true });
+      const want = P(esc(op.line)) + old;
+      await setData(ed, want);
+      const nw = plain(ed.getData());
+      const ok = nw.startsWith(plain(op.line)) && nw.endsWith(plain(old)) && hdrFields() == f0;
+      if (!ok || op.test) { await setData(ed, old); ed.resetDirty(); if (op.test) return { ok, put: plain(ed.getData()) == plain(old), top: nw.slice(0, 120) }; return siteEnd(op, { err: 'check failed before save, nothing saved' }); }
+      op.saved = true; op.fired = true; ss('wfOp', op); ed.updateElement();
+      later(() => jq()(document.getElementById('updateheader__btn')).trigger('click'), 50); firedWatch(op, 'err'); return;
+    }
+    // after the save: read it back off AroFlo
+    const r = await findJn(op.jn); const d = r && await descOf(r.href);
+    return siteEnd(op, d && plain(d.html).startsWith(plain(op.line)) ? {} : { err: 'saved but the re-read doesn\'t match, check JN ' + op.jn });
+  }
+
   // Op: upload the PDF on the task page (Documents & Photos, Add, file box, Done). Untested end to end, see README.
   // The task's files as AroFlo's server has them (what the Documents & Photos tab loads), or null off a task page.
   const taskDocs = async () => {
@@ -850,7 +875,7 @@ if (ON_AF) {
     // mid job: keep the lock and the job claimed through each page load, or a second filer tab picks the same job up and
     // makes a double (the lock used to lapse 90 s into a create, 19/10)
     gset('wfAfLock', { tab: tabId(), at: now() }); { const j = getJob(op.jobId); if (j) { j.run = { tab: tabId(), at: now() }; saveJob(j); } } status('busy: ' + op.op + (op.name ? ' ' + op.name.slice(0, 40) : ''));
-    if ((op.tries = (op.tries || 0) + 1) > 4) { opDone(op, { [op.op + 'Err']: 'gave up after 4 page loads' }); return true; }
+    if ((op.tries = (op.tries || 0) + 1) > 4) { endOp(op, { [op.op + 'Err']: 'gave up after 4 page loads' }); return true; }
     ss('wfOp', op);
     // The script starts as the page starts loading. AroFlo's pages are big (create task is 500 KB, 59 scripts) and a background tab
     // loads slower, so 1.5 s in the form often wasn't there yet: "create page didn't open". Wait for the page to finish first (19/10).
@@ -858,17 +883,20 @@ if (ON_AF) {
     await sleep(1500);
     try {
       if (op.op == 'desc') await opDesc(op); else if (op.op == 'upload') await opUpload(op); else if (op.op == 'note') await opNote(op); else if (op.op == 'create') await opCreate(op);
+      else if (op.op == 'site') await opSite(op);
       else if (op.op == 'calsrc') { await waitFor(() => !!calSrcNow(), 30000); log(calSrcNow() ? 'Got the calendar settings for the booking plans' : 'Couldn\'t read the calendar settings off the calendar page'); gdel('wfCalSrcWant'); ss('wfOp', null); go(HOME); }
       else ss('wfOp', null);
-    } catch (e) { opDone(op, { [op.op + 'Err']: e.message }); }
+    } catch (e) { endOp(op, { [op.op + 'Err']: e.message }); }
     return true;
   }
+  // A site push isn't an email job, so its end goes to Todoist, not the job queue
+  const endOp = (op, res) => op.op == 'site' ? siteEnd(op, res) : opDone(op, res);
   const startOp = (op, href) => { ss('wfOp', op); go(href); };
   // After an op clicks save or create, the page should move on. If it hasn't in 40s (validation message, confirm box, slow save), report what the page says and go home.
   // fields holding more than their box allows: AroFlo's check fails them without a visible message
   const overLong = () => { const f = document.forms.newwr || document.forms.editwr; return f ? [...f.elements].filter(x => x.name && x.maxLength > 0 && String(x.value || '').length > x.maxLength).map(x => x.name + ' is ' + String(x.value).length + ' characters, the box takes ' + x.maxLength) : []; };
   const pageSays = () => { const e = [...document.querySelectorAll('.ui-dialog:not([style*="display: none"]), .error, .alert, .afError, [class*="error"], [class*="validation"]')].filter(x => x.offsetParent).map(x => x.innerText.replace(/\s+/g, ' ').trim()).filter(Boolean).concat(overLong()); return e.join(' / ').slice(0, 300); };
-  const firedWatch = (op, what) => later(() => { const cur = ss('wfOp'); if (cur && cur.jobId == op.jobId && cur.op == op.op && cur.fired) opDone(op, { [what]: 'clicked but the page didn\'t move on. ' + (pageSays() ? 'Page says: ' + pageSays() : 'No message on the page') + '. Check it by hand' }); }, 40000);
+  const firedWatch = (op, what) => later(() => { const cur = ss('wfOp'); if (cur && cur.jobId == op.jobId && cur.op == op.op && cur.fired) endOp(op, { [what]: 'clicked but the page didn\'t move on. ' + (pageSays() ? 'Page says: ' + pageSays() : 'No message on the page') + '. Check it by hand' }); }, 40000);
 
   // ---------- builder dates ----------
   async function ambroseDates(rec, base) {
@@ -1489,6 +1517,117 @@ if (ON_AF) {
     }
   }
 
+  // ---------- site info push (Ethan, 21/10) ----------
+  // Push to AroFlo on the dashboard puts the filer-site label on a captured site info item in WRE follow ups. Its description
+  // has the tracker header (JN 9440 | ...) and a "SITE INFO: GATE CODE: 4471" line, and that line goes on top of the task
+  // description. Worked: comment and close. Failed: label off and a "Site push failed" line on top of the item.
+  async function siteItems() {
+    let j = null; try { j = await td('GET', 'tasks/filter?query=' + encodeURIComponent('@filer-site') + '&limit=50'); } catch (e) { j = null; }
+    let list = j && Array.isArray(j.results) ? j.results : null;
+    if (!list) { list = []; let cur = null, n = 0; // the filter didn't behave: page through WRE follow ups instead
+      do { const k = await td('GET', 'tasks?project_id=' + FU + '&limit=200' + (cur ? '&cursor=' + encodeURIComponent(cur) : '')); (k && k.results || []).forEach(t => list.push(t)); cur = k && k.next_cursor; n++; } while (cur && n < 5); }
+    return list.filter(t => t.project_id == FU && (t.labels || []).includes('filer-site') && !t.checked);
+  }
+  const siteParse = t => { const d = String(t.description || ''); const jn = (d.match(/\bJN\s?(\d{4,5})\b/) || [])[1] || ''; const line = ((d.match(/^SITE INFO: (.+)$/m) || [])[1] || '').trim();
+    return { jn, line, err: !jn ? 'no JN on it' : !line ? 'no SITE INFO line' : '' }; };
+  const siteTm = () => new Date().toLocaleTimeString('en-AU', { hour: 'numeric', minute: '2-digit' });
+  async function siteFail(id, jn, why, say) {
+    (say || log)('Error: site info ' + (jn ? 'JN ' + jn : '(no JN)') + ': ' + why);
+    const cur = await td('GET', 'tasks/' + id);
+    await td('POST', 'tasks/' + id, { labels: ((cur && cur.labels) || []).filter(l => l != 'filer-site'), description: 'Site push failed (' + siteTm() + '): ' + why + '\n' + String((cur && cur.description) || '').replace(/^Site push failed \(.*(\n|$)/m, '') });
+  }
+  async function siteEnd(op, res) {
+    if (op.test) return res;
+    ss('wfOp', null); const why = res.err || res.siteErr;
+    try {
+      if (why) await siteFail(op.task, op.jn, why);
+      else { const tail = res.already ? ' (already there)' : '';
+        await td('POST', 'comments', { task_id: op.task, content: 'Filer put this on top of JN ' + op.jn + ': ' + op.line + tail }); await closeFu(op.task);
+        log('Done: site info on JN ' + op.jn + ': ' + op.line + tail); }
+    } catch (e) { log('Error: site info JN ' + op.jn + ': Todoist side failed, ' + e.message); }
+    go(HOME);
+  }
+  // One item a tick. Returns 'op' when it's off to the task's header page (the tick stops there). o.test (Claude's own tab): no
+  // throttle, no rules read, no log, and it stops short of the page with the op it would start.
+  async function siteInfo(o) {
+    o = o || {}; const say = o.test ? (m => console.log('[WRE filer test]', m)) : log;
+    if (!o.test) { if (now() - gget('wfSiteAt', 0) < 50e3) return; gset('wfSiteAt', now()); }
+    let t; try { t = (await siteItems())[0]; } catch (e) { return; }
+    if (!t) return;
+    const p = siteParse(t);
+    try {
+      if (p.err) { await siteFail(t.id, p.jn, p.err, say); return 'failed'; }
+      const dry = o.test ? !!o.dry : (await rules()).dry;
+      if (dry) { await td('POST', 'comments', { task_id: t.id, content: 'Dry run: would put on top of JN ' + p.jn + ': ' + p.line }); await td('POST', 'tasks/' + t.id, { labels: (t.labels || []).filter(l => l != 'filer-site') }); say('DRY RUN site info JN ' + p.jn + ': ' + p.line); return 'dry'; }
+      const r = await findJn(p.jn);
+      if (!r) { await siteFail(t.id, p.jn, 'JN ' + p.jn + ' isn\'t in AroFlo', say); return 'failed'; }
+      if (!isOpenTask(r)) { await siteFail(t.id, p.jn, 'JN ' + p.jn + ' is ' + r.status + ', site info only goes on open tasks', say); return 'failed'; }
+      const d = await descOf(r.href); if (!d.hh) { await siteFail(t.id, p.jn, 'couldn\'t find the Edit Task Header link on JN ' + p.jn, say); return 'failed'; }
+      const op = { op: 'site', jobId: 'site-' + t.id, task: t.id, jn: p.jn, line: p.line };
+      if (o.test) return { op, hh: !!d.hh };
+      status('site info: JN ' + p.jn); startOp(op, d.hh); return 'op';
+    } catch (e) { say('Error: site info JN ' + (p.jn || '?') + ': ' + e.message); return 'failed'; }
+  }
+
+  // ---------- phone list for WRE Capture (Ethan, 21/10) ----------
+  // Every open job's phone numbers on the * Phone list task, so Capture can place a note or a screenshot of a text by number.
+  // Read only on AroFlo, no AI. A full refresh at most hourly, 10 jobs a tick, each job's numbers kept 6 hrs.
+  const PHONE_RE = /(?<!\d)(?:\+?61[\s-]?|0)[2-478](?:[\s-]?\d){8}(?!\d)/g;
+  const phoneNorm = s => { let d = String(s).replace(/\D/g, ''); if (/^61/.test(d)) d = '0' + d.slice(2); return /^0[2-478]\d{8}$/.test(d) ? d : ''; };
+  const TAG_RANK = { site: 3, supervisor: 2, other: 1 };
+  // Numbers off the description (line by line, so a SITE CONTACT or SUPERVISOR line tags its own) and the task's location contact.
+  const numsOf = (html, loc) => { const out = new Map();
+    const add = (txt, tag) => { for (const m of String(txt || '').matchAll(PHONE_RE)) { const n = phoneNorm(m[0]); if (n && (!out.has(n) || TAG_RANK[tag] > TAG_RANK[out.get(n)])) out.set(n, tag); } };
+    String(html || '').replace(/<\/(p|div|li|h\d|tr)>|<br\s*\/?>/gi, '\n').split('\n').map(plain).filter(Boolean).forEach(l => add(l, /site contact/i.test(l) ? 'site' : /supervisor/i.test(l) ? 'supervisor' : 'other'));
+    add(loc, 'other');
+    return [...out].sort((a, b) => TAG_RANK[b[1]] - TAG_RANK[a[1]]); };
+  // The task page shows the location's contact under Location (#locationname). The page's other number is "Entered by Phone",
+  // the office's own, so that's left out.
+  const phonesOf = async href => { const d = await getDoc(href); const loc = plain((d.getElementById('locationname') || {}).innerHTML || '');
+    const hh = headerHref(d); const html = hh ? (((await getDoc(hh)).querySelector('textarea[name=description]') || {}).value || '') : ((d.getElementById('taskdesc') || {}).innerHTML || '');
+    return numsOf(html, loc); };
+  const allTasks = async q => { const out = []; let cur = null, n = 0;
+    do { const j = await td('GET', 'tasks?' + q + '&limit=200' + (cur ? '&cursor=' + encodeURIComponent(cur) : '')); (j && j.results || []).forEach(t => out.push(t)); cur = j && j.next_cursor; n++; } while (cur && n < 10);
+    return out; };
+  // Which jobs: every JN on a job tracker header (the address is the tracker title), plus any JN on a To book or check item.
+  async function phoneJns() {
+    const seen = new Map(); const add = (jn, addr) => { if (!seen.has(jn)) seen.set(jn, { jn, addr: addr || '' }); else if (addr && !seen.get(jn).addr) seen.get(jn).addr = addr; };
+    for (const t of await allTasks('project_id=' + TRACK)) { if (t.section_id == SEC_SET) continue;
+      const head = String(t.description || '').split('\n')[0]; for (const m of head.matchAll(/\bJN\s?(\d{4,5})\b/g)) add(m[1], String(t.content || '').replace(/\s*\([^)]*\)\s*$/, '').trim()); }
+    for (const sec of [SEC_BOOK, SEC_CHECK]) for (const t of await sectionTasks(sec)) for (const m of (t.content + '\n' + (t.description || '')).matchAll(/\bJN\s?(\d{4,5})\b/g)) add(m[1], '');
+    return [...seen.values()];
+  }
+  const phoneStamp = () => { const d = new Date(); return d.getDate() + '/' + (d.getMonth() + 1) + '/' + d.getFullYear() + ' ' + d.toLocaleTimeString('en-AU', { hour12: true }); };
+  // The task's description: a header line, then one line per open job, newest JN first, kept under 15,000 characters.
+  const phoneText = (list, cache) => { const lines = list.filter(j => cache[j.jn] && cache[j.jn].open).sort((a, b) => b.jn - a.jn)
+      .map(j => ('JN ' + j.jn + ' | ' + (j.addr || cache[j.jn].name || '') + ' | ' + (cache[j.jn].nums || []).map(x => x[0] + ' ' + x[1]).join(', ')).trim());
+    let s; while ((s = 'Phone list ' + VER + ', ' + lines.length + ' jobs, updated ' + phoneStamp() + '\n' + lines.join('\n')).length > 15000) lines.pop();
+    return { s, n: lines.length }; };
+  async function phones() {
+    let run = gget('wfPhoneRun', null); if (run && now() - run.at > 2 * 3600e3) run = null; // a refresh that never finished starts over
+    if (!run) {
+      if (now() - gget('wfPhonesAt', 0) < 60 * 60e3) return;
+      let list; try { list = await phoneJns(); } catch (e) { log('Error: phone list: couldn\'t read the jobs off Todoist, ' + e.message); gset('wfPhonesAt', now()); return; }
+      run = { at: now(), list, i: 0, bad: 0 }; gset('wfPhoneRun', run);
+    }
+    const cache = gget('wfPhoneCache', {}); let fetched = 0;
+    while (run.i < run.list.length && fetched < 10) {
+      const j = run.list[run.i]; const c = cache[j.jn];
+      if (!c || now() - c.at > 6 * 3600e3) { fetched++;
+        try { const r = await findJn(j.jn); cache[j.jn] = !r || !isOpenTask(r) ? { at: now(), open: false } : { at: now(), open: true, name: String(r.name || '').replace(/^\S+ - /, ''), nums: await phonesOf(r.href) }; }
+        catch (e) { run.bad++; } } // an old entry stays for this list, a new one waits for the next refresh
+      run.i++;
+    }
+    gset('wfPhoneCache', cache); gset('wfPhoneRun', run);
+    if (run.i < run.list.length) return;
+    // done: JNs off the lists come out of the cache, closed ones stay there so they aren't looked up every hour
+    const keep = {}; run.list.forEach(j => { if (cache[j.jn]) keep[j.jn] = cache[j.jn]; }); gset('wfPhoneCache', keep);
+    const out = phoneText(run.list, keep);
+    try { await td('POST', 'tasks/' + PHONE_TASK, { description: out.s }); log('Phone list updated: ' + out.n + ' open jobs' + (run.bad ? ', ' + run.bad + ' couldn\'t be read this time' : '')); }
+    catch (e) { log('Error: phone list write failed, trying again next hour: ' + e.message); }
+    gset('wfPhonesAt', now()); gdel('wfPhoneRun');
+  }
+
   let running = false;
   async function tick() {
     if (running || !IS_FILER) return; running = true;
@@ -1510,6 +1649,8 @@ if (ON_AF) {
         if (now() - gget('wfBookAt', 0) > 5 * 60e3 && !R.dry) { gset('wfBookAt', now()); await checkToBook(); }
         if (!R.dry) await doubleUps();
         await retries(); await bookings(); await linkTopUp();
+        if ((await siteInfo()) == 'op') return; // off to the task's header page
+        try { await phones(); } catch (e) { log('Error: phone list: ' + e.message); } // never holds up the rest of the tick
         // the booking plans need the calendar's settings: pop over to the calendar once for them (at most every 30 min)
         if (gget('wfCalSrcWant', 0) && !gget('wfCalSrc', null) && now() - gget('wfCalSrcGo', 0) > 30 * 60e3) { gset('wfCalSrcGo', now()); log('Opening the calendar for its settings (booking plans)'); startOp({ op: 'calsrc', jobId: '' }, '/ims/Site/Calendar/index.cfm?viewfullcalendar=1&tid=IMS.CAL'); return; }
         // tidy: finished jobs older than 7 days
@@ -1525,6 +1666,9 @@ if (ON_AF) {
   if (/\/Calendar\//.test(location.pathname)) waitFor(() => !!calSrcNow(), 60000);
   // Claude's test runs in its own tab (never the filer tabs): the planner and booking calls, with Todoist going to a stand in.
   if (!IS_FILER) W.wfBook = { check: checkToBook, go: bookings, plan: planItem, book: bookVisit, scheds: taskScheds, cal: calDays, busy: busyOf, slot: findSlot, kind: kindOf, mins: lineMins, src: calSrcNow };
+  // and the site push and phone list pieces: run stops short of AroFlo, check does the header page checks without saving
+  if (!IS_FILER) W.wfSite = { find: siteItems, parse: siteParse, run: o => siteInfo(Object.assign({}, o, { test: true })), check: op => opSite(Object.assign({}, op, { test: true })) };
+  if (!IS_FILER) W.wfPhones = { jns: phoneJns, of: phonesOf, nums: numsOf, norm: phoneNorm, text: phoneText, run: phones };
   const boot = async () => {
     await waitFor(() => !!document.body, 10000); if (!IS_FILER) return; mountChip();
     status('starting');
