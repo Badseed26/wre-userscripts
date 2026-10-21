@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Pull
 // @namespace    wre
-// @version      1.4
+// @version      1.5
 // @description  Reads a day's Inbox and Sent Items in the shared Outlook (read only, unread emails go back to unread) and hands one compact bundle to the WRE Dashboard's inbox check. The Pull button on the dashboard starts it.
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -100,8 +100,20 @@ const sig = () => rowsNow().map(o => o.getAttribute('aria-label').slice(0, 24)).
 const go = async y => { const sc = getSc(); if (!sc) return; const s0 = sig(); const y0 = sc.scrollTop; sc.scrollTop = y; sc.dispatchEvent(new Event('scroll')); if (sc.scrollTop != y0) await waitFor(() => sig() != s0, 1500); };
 const atEnd = () => { const sc = getSc(); return !sc || sc.scrollTop + sc.clientHeight >= sc.scrollHeight - 5; };
 const FL = ['Unread', 'Has attachments', 'Flagged', 'Pinned', 'Replied', 'Forwarded', 'Important', 'Meeting request'];
-const TM = / ((?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{1,2}:\d{2} [AP]M|\d{1,2}:\d{2} [AP]M|(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{2}-\d{2}|\d{1,2}\/\d{1,2}\/\d{4}) /;
-const parse = l => { l = l.replace(/\s+/g, ' '); const f = []; let s = l, hit = true; while (hit) { hit = false; for (const k of FL) if (s.startsWith(k + ' ')) { f.push(k); s = s.slice(k.length + 1); hit = true; } } const m = s.match(TM); return { unread: f.includes('Unread'), replied: f.includes('Replied') || f.includes('Forwarded'), att: f.includes('Has attachments'), flag: f.includes('Flagged'), pinned: f.includes('Pinned'), head: m ? s.slice(0, m.index) : s.slice(0, 120), when: m ? m[1] : '?', pre: m ? s.slice(m.index + m[0].length, m.index + m[0].length + 220) : '' }; };
+// Row time. A date or time in the subject (e.g. "Invoices Approved for Payment 27/10/2026") used to win and cut the day short (22/10).
+// Now the row's own date tooltip ("Thu 2026-10-22 2:51 AM") picks which match is the real time. listDay reads every row with its
+// element first and caches the time by sender and subject (flags like Unread change once read), so keys made later from the label alone match.
+const TMA = / ((?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{1,2}:\d{2} [AP]M|\d{1,2}:\d{2} [AP]M|(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{2}-\d{2}|\d{1,2}\/\d{1,2}\/\d{4})(?= )/g;
+const ROWDT = /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{4}-(\d{2})-(\d{2}) (\d{1,2}:\d{2} [AP]M)$/;
+const PC = new Map();
+const rowDate = el => { if (!el) return null; for (const x of el.querySelectorAll('[title]')) { const m = (x.getAttribute('title') || '').match(ROWDT); if (m) return m; } return null; };
+const parse = (l, el) => { l = l.replace(/\s+/g, ' '); const f = []; let s = l, hit = true; while (hit) { hit = false; for (const k of FL) if (s.startsWith(k + ' ')) { f.push(k); s = s.slice(k.length + 1); hit = true; } }
+ const c = PC.get(s); if (c) return { ...c, unread: f.includes('Unread'), replied: f.includes('Replied') || f.includes('Forwarded'), att: f.includes('Has attachments'), flag: f.includes('Flagged'), pinned: f.includes('Pinned') };
+ const ms = [...s.matchAll(TMA)]; const dt = rowDate(el);
+ const byTip = dt ? ms.find(m => m[1].endsWith(' ' + dt[4]) || m[1] == dt[4] || m[1] == dt[1] + ' ' + dt[2] + '-' + dt[3]) : null;
+ const m = byTip || ms.find(x => /:/.test(x[1])) || ms[0];
+ const r = { unread: f.includes('Unread'), replied: f.includes('Replied') || f.includes('Forwarded'), att: f.includes('Has attachments'), flag: f.includes('Flagged'), pinned: f.includes('Pinned'), head: m ? s.slice(0, m.index) : s.slice(0, 120), when: m ? m[1] : '?', pre: m ? s.slice(m.index + m[0].length + 1, m.index + m[0].length + 221) : '' };
+ if (byTip) PC.set(s, { head: r.head, when: r.when, pre: r.pre }); return r; };
 const keyOf = l => { const p = parse(l); return p.head + ' ' + p.when; };
 const vis = key => rowsNow().find(o => keyOf(o.getAttribute('aria-label')) == key);
 const isSel = o => o.getAttribute('aria-selected') == 'true';
@@ -119,8 +131,10 @@ const moreLoaded = async () => { const sc = getSc(); if (!sc) return false; cons
 const listDay = async DAY => { const t0 = Date.now(); const want = DAY == 'today' ? 0 : ((new Date().getDay() - WDN.indexOf(DAY) + 7) % 7 || 7); const seen = new Map(); await go(0); let stop = '';
  for (let i = 0; i < 200; i++) {
   let newest = 99;
-  rowsNow().forEach(o => { const l = o.getAttribute('aria-label'); if (!seen.has(l)) seen.set(l, parse(l)); const v = seen.get(l); const a = ageOf(v.when); if (!v.pinned && a >= 0) newest = Math.min(newest, a); });
-  if ([...seen.values()].some(v => !v.pinned && ageOf(v.when) > want)) { stop = 'older'; break; }
+  rowsNow().forEach(o => { const l = o.getAttribute('aria-label'); if (!seen.has(l)) seen.set(l, parse(l, o)); const v = seen.get(l); const a = ageOf(v.when); if (!v.pinned && a >= 0) newest = Math.min(newest, a); });
+  // Stop on 2 rows older than the day (1 odd row can't cut it short), or 1 once the list is at its end
+  const old = [...seen.values()].filter(v => !v.pinned && ageOf(v.when) > want).length;
+  if (old >= 2 || (old && atEnd())) { stop = 'older'; break; }
   if (Date.now() - t0 > 60000) { stop = 'time'; break; }
   if (atEnd() && !(await moreLoaded())) { stop = 'end'; break; }
   await go(getSc().scrollTop + getSc().clientHeight * (newest < want ? 0.95 : 0.7)); }
