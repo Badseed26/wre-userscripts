@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Calendar NPT
 // @namespace    wre
-// @version      3.0.2
+// @version      3.1.0
 // @description  Notes, photos and timesheet badges on the AroFlo calendar for the days in view, kept in step with the WRE daily check issue list in Todoist, plus an A letter on Ambrose jobs for photos or the report being up on Ambrose
 // @match        https://office.aroflo.com/ims/Site/Calendar/*
 // @match        https://tradiesadmin.ambroseconstruct.com.au/*
@@ -390,7 +390,7 @@
     s.id = 'wre-npt-css';
     s.textContent = '.wre-npt{position:absolute;top:1px;right:1px;z-index:6;display:flex;gap:1px;font:700 9px/11px Arial,sans-serif;cursor:help}' +
       '.wre-npt i{font-style:normal;width:11px;text-align:center;border-radius:2px;color:#fff;background:#9aa0a6}' +
-      '.wre-npt i.g{background:#1e8e3e}.wre-npt i.r{background:#d93025}.wre-npt i.a{background:#e37400}.wre-npt i.m{background:#1a73e8}' +
+      '.wre-npt i.g{background:#1e8e3e}.wre-npt i.r{background:#d93025}.wre-npt i.a{background:#e37400}.wre-npt i.m{background:#1a73e8}.wre-npt i.o{background:#8e24aa}' +
       '.wre-npt i.r,.wre-npt i.a,.wre-npt i.m{cursor:pointer}.wre-npt i.r:hover,.wre-npt i.a:hover,.wre-npt i.m:hover{outline:1px solid #fff}' +
       '.wre-npt.pend i{cursor:help!important;outline:0!important}' +
       '.wre-npt-h{margin-left:10px;font:600 12px Arial,sans-serif;color:#555;cursor:pointer;white-space:nowrap}.wre-npt-h b,.wre-npt-h small.bad{color:#d93025}.wre-npt-h small{font-weight:400;margin-left:6px}.wre-npt-tok{margin-left:8px;font-weight:600;color:#c9501a;text-decoration:underline}';
@@ -425,16 +425,22 @@
     const nA = J.n && (J.n.d[v.date] || []).filter(x => v.crew.includes(x)).map(first);
     const pO = J.p && J.p.d[v.date] || {};
     const pTxt = 'in (' + Object.keys(pO).map(first).join(', ') + ')';
+    // Shared job: a crew mate put photos in that day and this person didn't. Still counts as in (no issue, no text, no
+    // follow up), the P just goes purple so you can see who didn't add their own (Ethan, 21/10).
+    const sameP = (a, b) => String(a).toLowerCase().replace(/\s+/g, ' ').trim() === String(b).toLowerCase().replace(/\s+/g, ' ').trim();
+    const ups = Object.keys(pO), pShared = !v.pending && s.p === true && v.crew.length > 1 &&
+      !ups.some(u => sameP(u, v.who)) && ups.some(u => v.crew.some(c => !sameP(c, v.who) && sameP(u, c)));
     const me = ini(v.who), lab = J.l && J.l.d[v.date] || [], tr = lab.includes(me + '|travel'), si = lab.includes(me + '|site');
     const tMiss = (tr ? 'travel in, ' : si ? 'on site in, ' : '') + [!tr && 'travel', !si && 'on site (NTT/NTA)'].filter(Boolean).join(' and ') + ' missing (' + me + ')';
     const t = Math.min(...['n', 'l', 'p'].map(k => (J[k] ? J[k].t : Infinity)));
     const text = (v.pending ? 'Pending: starts ' + hm(v.ev.start) + ', checked once it starts\n' : err ? "Couldn't check: " + err + '\n' : '') +
       'Notes: ' + (s.n === 'm' ? "none, OK'd by you" : s.n === true ? 'in (' + nA.join(', ') + ')' : no(s.n, 'none from the crew')) + '\n' +
-      'Photos: ' + (s.p === 'm' ? "none, OK'd by you" : s.p === true ? pTxt : no(s.p, 'none that day')) + '\n' +
+      'Photos: ' + (s.p === 'm' ? "none, OK'd by you" : pShared ? pTxt + ', none from ' + first(v.who) + ' (shared job, purple, not chased)' : s.p === true ? pTxt : no(s.p, 'none that day')) + '\n' +
       'Timesheet: ' + (s.t === 'm' ? "not all in, OK'd by you" : s.t === true ? 'travel and on site in' : no(s.t, tMiss)) + '\n' +
       'Crew: ' + crewTxt + (isFinite(t) && !v.pending ? '\nChecked ' + hm(t) : '') +
       (!v.pending && [s.n, s.p, s.t].some(x => x === false || x === 'm') ? '\n' + (PHONE ? 'Tap' : 'Click') + ' a red letter to OK it, a blue one to undo' : '');
     const a = aState(v), out = [s.n, s.p, s.t].map(cls);
+    if (pShared) out[1] = 'o';
     if (a && a.s !== undefined) out.push(err && a.s === null ? '' : aCls(v, a, s));
     return { cls: out, text: a ? text + '\n' + a.line : text };
   }
