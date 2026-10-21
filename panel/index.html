@@ -108,6 +108,7 @@
   .job .jt { font-size: 17px; font-weight: 600; }
   .job .js { font-size: 13px; color: var(--muted); margin-top: 3px; }
   .job .js .late { color: var(--bad); font-weight: 600; }
+  .job .js .shared { color: #C9A2FF; font-weight: 600; }
   .job { -webkit-flex-wrap: wrap; flex-wrap: wrap; cursor: pointer; }
   .job.open { border-color: #3A4250; }
   .jacts { width: 100%; display: -webkit-flex; display: flex; -webkit-flex-wrap: wrap; flex-wrap: wrap; margin-top: 12px; }
@@ -417,16 +418,31 @@
     });
     return h + "</span>";
   }
+  // Visits two or more lads both still owe notes or photos on (either of them can put those in). The dashboard sends
+  // those as one group text; here the job just says who it's shared with (21/10).
+  function sharedVisits() {
+    var at = {};
+    (npt.items || []).forEach(function (x) {
+      if (x.who === "You" || !x.wrid) return;
+      var owes = x.missing.some(function (m) { return (m === "notes" || m === "photos") && x.ok.indexOf(m) < 0; });
+      if (!owes) return;
+      var k = x.wrid + "|" + x.visit;
+      if (!at[k]) at[k] = [];
+      if (at[k].indexOf(x.who) < 0) at[k].push(x.who);
+    });
+    return at;
+  }
   function ladsHtml() {
     if (!npt) return '<div class="msg">Loading from Todoist</div>';
     if (npt.setup) return '<div class="msg">' + (npt.error ? esc(npt.error) + ". " : "") + 'Connect Todoist to see what the lads still owe.<br><br><button class="btn light" data-act="tok">Connect Todoist</button></div>';
     if (npt.error) return '<div class="msg">' + esc(npt.error) + "</div>";
     if (!npt.items.length) return '<div class="msg">Nobody owes notes, photos or timesheets.</div>';
-    var w = byWho(), h = "";
+    var w = byWho(), h = "", at = sharedVisits();
     w.order.forEach(function (n) {
       h += '<div class="ladhead">' + esc(n) + "</div>";
       w.g[n].forEach(function (x) {
         var a = daysAgo(x.visit), age = a <= 0 ? "today" : a === 1 ? "yesterday" : a + " days ago";
+        var on = at[x.wrid + "|" + x.visit] || [], mates = on.indexOf(x.who) >= 0 ? on.filter(function (m) { return m !== x.who; }) : [];
         var open = openJob === x.id, acts = "";
         if (open) {
           acts = '<div class="jacts">';
@@ -434,7 +450,8 @@
           acts += '<button class="btn light" data-ndone="' + esc(x.id) + '"' + (busyJob ? " disabled" : "") + ">Tick off</button></div>";
         }
         h += '<div class="job' + (open ? " open" : "") + '" data-npt="' + esc(x.id) + '"><div class="jm"><div class="jt">' + esc(x.place) + '</div><div class="js">' + esc(dayLbl(x.visit)) +
-          ' &middot; <span class="' + (a >= 2 ? "late" : "") + '">' + esc(age) + "</span>" + (x.jn ? " &middot; JN " + esc(x.jn) : "") + "</div></div>" + nptBadges(x) + acts + "</div>";
+          ' &middot; <span class="' + (a >= 2 ? "late" : "") + '">' + esc(age) + "</span>" + (x.jn ? " &middot; JN " + esc(x.jn) : "") +
+          (mates.length ? ' &middot; <span class="shared">shared with ' + esc(mates.join(" and ")) + "</span>" : "") + "</div></div>" + nptBadges(x) + acts + "</div>";
       });
     });
     return h + '<div class="sub" style="text-align:center;margin-top:14px">Tap a job to OK an item or tick it off. Red = missing, green = in, blue = OK\'d by you. From Todoist ' + esc(npt.at || "") + "</div>";

@@ -25,7 +25,7 @@ import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-VERSION = "2.6"
+VERSION = "2.7"
 HERE = os.path.dirname(os.path.abspath(__file__))
 RAW = "https://raw.githubusercontent.com/Badseed26/wre-userscripts/%s/"
 LATEST = "https://api.github.com/repos/Badseed26/wre-userscripts/commits/main"
@@ -580,7 +580,7 @@ def npt_list(force=False):
                 place = re.sub(r"\s*\(\d{1,2}/\d{1,2}\).*$", "", title.split(",", 1)[1] if who_kind == "lads" and "," in title else title)
                 place = re.sub(r"^Put in .*? for ", "", place).strip()
                 ok = NPT_OK.search(t.get("description") or "")
-                items.append({"id": t.get("id"), "who": who, "place": place, "visit": m.group(3), "jn": m.group(1),
+                items.append({"id": t.get("id"), "who": who, "place": place, "visit": m.group(3), "jn": m.group(1), "wrid": m.group(2),
                               "missing": npt_split(m.group(5)), "ok": npt_split(ok.group(1) if ok else "")})
             cursor = j.get("next_cursor")
             if not cursor:
