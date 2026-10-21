@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.61
+// @version      0.9.62
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Sonnet and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -1597,7 +1597,10 @@ if (ON_AF) {
   async function phoneJns() {
     const seen = new Map(); const add = (jn, addr) => { if (!seen.has(jn)) seen.set(jn, { jn, addr: addr || '' }); else if (addr && !seen.get(jn).addr) seen.get(jn).addr = addr; };
     for (const t of await allTasks('project_id=' + TRACK)) { if (t.section_id == SEC_SET) continue;
-      const head = String(t.description || '').split('\n')[0]; for (const m of head.matchAll(/\bJN\s?(\d{4,5})\b/g)) add(m[1], String(t.content || '').replace(/\s*\([^)]*\)\s*$/, '').trim()); }
+      const head = String(t.description || '').split('\n')[0], addr = String(t.content || '').replace(/\s*\([^)]*\)\s*$/, '').trim();
+      for (const m of head.matchAll(/\bJN\s?(\d{4,5})\b/g)) add(m[1], addr);
+      // a header that starts with the job number on its own counts too ("9473 | 20309263-12 | ...", 48A Gordon St missed out, 21/10)
+      const bare = head.match(/^\s*(\d{4,5})\s*\|/); if (bare) add(bare[1], addr); }
     for (const sec of [SEC_BOOK, SEC_CHECK]) for (const t of await sectionTasks(sec)) for (const m of (t.content + '\n' + (t.description || '')).matchAll(/\bJN\s?(\d{4,5})\b/g)) add(m[1], '');
     return [...seen.values()];
   }
