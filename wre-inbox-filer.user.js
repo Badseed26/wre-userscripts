@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.62
+// @version      0.9.63
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Sonnet and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -1528,7 +1528,8 @@ if (ON_AF) {
       do { const k = await td('GET', 'tasks?project_id=' + FU + '&limit=200' + (cur ? '&cursor=' + encodeURIComponent(cur) : '')); (k && k.results || []).forEach(t => list.push(t)); cur = k && k.next_cursor; n++; } while (cur && n < 5); }
     return list.filter(t => t.project_id == FU && (t.labels || []).includes('filer-site') && !t.checked);
   }
-  const siteParse = t => { const d = String(t.description || ''); const jn = (d.match(/\bJN\s?(\d{4,5})\b/) || [])[1] || ''; const line = ((d.match(/^SITE INFO: (.+)$/m) || [])[1] || '').trim();
+  // the JN, or a header line starting with the job number on its own ("9473 | ...", 48A Gordon St, 21/10)
+  const siteParse = t => { const d = String(t.description || ''); const jn = (d.match(/\bJN\s?(\d{4,5})\b/) || d.match(/^\s*(\d{4,5})\s*\|/m) || [])[1] || ''; const line = ((d.match(/^SITE INFO: (.+)$/m) || [])[1] || '').trim();
     return { jn, line, err: !jn ? 'no JN on it' : !line ? 'no SITE INFO line' : '' }; };
   const siteTm = () => new Date().toLocaleTimeString('en-AU', { hour: 'numeric', minute: '2-digit' });
   async function siteFail(id, jn, why, say) {
