@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.60
+// @version      0.9.61
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Sonnet and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -1575,15 +1575,19 @@ if (ON_AF) {
   const PHONE_RE = /(?<!\d)(?:\+?61[\s-]?|0)[2-478](?:[\s-]?\d){8}(?!\d)/g;
   const phoneNorm = s => { let d = String(s).replace(/\D/g, ''); if (/^61/.test(d)) d = '0' + d.slice(2); return /^0[2-478]\d{8}$/.test(d) ? d : ''; };
   const TAG_RANK = { site: 3, supervisor: 2, other: 1 };
-  // Numbers off the description (line by line, so a SITE CONTACT or SUPERVISOR line tags its own) and the task's location contact.
+  const PHONE_V = 2; // bump when what's read off a job changes, so the cached jobs get read again
+  // Numbers off the description (line by line, so a SITE CONTACT or SUPERVISOR line tags its own; a plain CONTACT: line is the
+  // site contact too, Lisa writes it that way, JN 9442) and the task's location and Contact field.
   const numsOf = (html, loc) => { const out = new Map();
     const add = (txt, tag) => { for (const m of String(txt || '').matchAll(PHONE_RE)) { const n = phoneNorm(m[0]); if (n && (!out.has(n) || TAG_RANK[tag] > TAG_RANK[out.get(n)])) out.set(n, tag); } };
-    String(html || '').replace(/<\/(p|div|li|h\d|tr)>|<br\s*\/?>/gi, '\n').split('\n').map(plain).filter(Boolean).forEach(l => add(l, /site contact/i.test(l) ? 'site' : /supervisor/i.test(l) ? 'supervisor' : 'other'));
+    String(html || '').replace(/<\/(p|div|li|h\d|tr)>|<br\s*\/?>/gi, '\n').split('\n').map(plain).filter(Boolean).forEach(l => add(l, /site contact|^contact\s*:/i.test(l) ? 'site' : /supervisor/i.test(l) ? 'supervisor' : 'other'));
     add(loc, 'other');
     return [...out].sort((a, b) => TAG_RANK[b[1]] - TAG_RANK[a[1]]); };
-  // The task page shows the location's contact under Location (#locationname). The page's other number is "Entered by Phone",
-  // the office's own, so that's left out.
-  const phonesOf = async href => { const d = await getDoc(href); const loc = plain((d.getElementById('locationname') || {}).innerHTML || '');
+  // The task page shows the location's contact under Location (#locationname) and the task's own Contact in the cell holding
+  // #contactPage (JN 9428's only number was there, 21/10). The page's other number is "Entered by Phone", the office's own, so
+  // that's left out.
+  const phonesOf = async href => { const d = await getDoc(href); const cp = d.getElementById('contactPage'); const ct = cp && cp.closest('td');
+    const loc = plain((d.getElementById('locationname') || {}).innerHTML || '') + ' | ' + plain(ct ? ct.innerHTML : '');
     const hh = headerHref(d); const html = hh ? (((await getDoc(hh)).querySelector('textarea[name=description]') || {}).value || '') : ((d.getElementById('taskdesc') || {}).innerHTML || '');
     return numsOf(html, loc); };
   const allTasks = async q => { const out = []; let cur = null, n = 0;
@@ -1606,6 +1610,7 @@ if (ON_AF) {
   async function phones() {
     let run = gget('wfPhoneRun', null); if (run && now() - run.at > 2 * 3600e3) run = null; // a refresh that never finished starts over
     if (!run) {
+      if (gget('wfPhonesVer', '') != VER) { gset('wfPhonesAt', 0); gset('wfPhonesVer', VER); } // a new version refreshes straight away
       if (now() - gget('wfPhonesAt', 0) < 60 * 60e3) return;
       let list; try { list = await phoneJns(); } catch (e) { log('Error: phone list: couldn\'t read the jobs off Todoist, ' + e.message); gset('wfPhonesAt', now()); return; }
       run = { at: now(), list, i: 0, bad: 0 }; gset('wfPhoneRun', run);
@@ -1613,8 +1618,8 @@ if (ON_AF) {
     const cache = gget('wfPhoneCache', {}); let fetched = 0;
     while (run.i < run.list.length && fetched < 10) {
       const j = run.list[run.i]; const c = cache[j.jn];
-      if (!c || now() - c.at > 6 * 3600e3) { fetched++;
-        try { const r = await findJn(j.jn); cache[j.jn] = !r || !isOpenTask(r) ? { at: now(), open: false } : { at: now(), open: true, name: String(r.name || '').replace(/^\S+ - /, ''), nums: await phonesOf(r.href) }; }
+      if (!c || c.v != PHONE_V || now() - c.at > 6 * 3600e3) { fetched++;
+        try { const r = await findJn(j.jn); cache[j.jn] = !r || !isOpenTask(r) ? { at: now(), v: PHONE_V, open: false } : { at: now(), v: PHONE_V, open: true, name: String(r.name || '').replace(/^\S+ - /, ''), nums: await phonesOf(r.href) }; }
         catch (e) { run.bad++; } } // an old entry stays for this list, a new one waits for the next refresh
       run.i++;
     }
