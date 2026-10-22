@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Calendar NPT
 // @namespace    wre
-// @version      3.1.0
+// @version      3.2.0
 // @description  Notes, photos and timesheet badges on the AroFlo calendar for the days in view, kept in step with the WRE daily check issue list in Todoist, plus an A letter on Ambrose jobs for photos or the report being up on Ambrose
 // @match        https://office.aroflo.com/ims/Site/Calendar/*
 // @match        https://tradiesadmin.ambroseconstruct.com.au/*
@@ -228,7 +228,9 @@
       if (!J.u || J.u < old) { delete C.j[w]; delete C.wc[w]; delete C.ad[w]; continue; }
       ['n', 'l', 'p'].forEach(k => { if (J[k] && J[k].d) for (const dt in J[k].d) if (dt < cut) delete J[k].d[dt]; });
       if (J.l && Object.values(J.l.d || {}).some(a => !Array.isArray(a) || a.some(x => !String(x).includes('|')))) delete J.l;
+      if (C.lv !== 2) delete J.l; // 3.2.0: labour read before then missed lines with a note, read it again
     }
+    C.lv = 2;
   })();
   let saveT;
   const save = () => { clearTimeout(saveT); saveT = setTimeout(() => { try { W.localStorage.setItem(KEY, JSON.stringify(C)); } catch (e) {} }, 500); };
@@ -268,7 +270,8 @@
     const d = {};
     rows.forEach(r => {
       if (r.length > 300 || !/Hrs @/.test(r)) return;
-      const n = r.match(/^([A-Z]) ([A-Z][\w'-]+) \d{1,2}:\d{2}[ap]m/);
+      // a line can carry a note between the name and the time ("E Callaghan Polyaire pickup 6:30am - 8:45am", 22/10)
+      const n = r.match(/^([A-Z]) ([A-Z][\w'-]+)\b.*?\d{1,2}:\d{2}[ap]m\s*-\s*\d{1,2}:\d{2}[ap]m/);
       const ds = r.match(/\d{1,2}\/\d{1,2}\/\d{4}/g);
       if (!n || !ds) return;
       const ty = r.match(/Hrs @ (\w+)/);
@@ -381,7 +384,8 @@
     return s;
   }
   // All three in: nothing more to read for that visit, today or any day.
-  const isDone = v => { const s = status(v); return !!(s.n && s.p && s.t); };
+  // Only really in counts: an OK'd item keeps getting read so it goes green once the real thing turns up (22/10).
+  const isDone = v => { const s = raw(v); return s.n === true && s.p === true && s.t === true; };
 
   // ---------- badges ----------
   function css() {
@@ -531,13 +535,13 @@
     // Only read what's still missing for a visit in view (a recheck reads all three).
     const need = k => force || !J[k] || now - J[k].t > TTL || (k === 'p' && J.p.from > from);
     const missing = { n: force, l: force, p: force };
-    open.forEach(v => { const s = status(v); if (!s.n) missing.n = true; if (!s.t) missing.l = true; if (!s.p) missing.p = true; });
+    open.forEach(v => { const s = raw(v); if (s.n !== true) missing.n = true; if (s.t !== true) missing.l = true; if (s.p !== true) missing.p = true; });
     const E = encodeURIComponent(await code(w));
     const jobs = [];
     if (missing.n && need('n')) jobs.push(readNotes(E).then(d => { J.n = { t: Date.now(), d }; }));
     if (missing.l && need('l')) jobs.push(readLabour(E).then(d => { J.l = { t: Date.now(), d }; }));
     const want = {};
-    open.forEach(v => { if (!status(v).p || force) want[v.date] = new Set(v.crew); });
+    open.forEach(v => { if (raw(v).p !== true || force) want[v.date] = new Set(v.crew); });
     if (missing.p && need('p')) jobs.push(readPhotos(E, from, J.p, force, want).then(P => { J.p = Object.assign(P, { t: Date.now() }); }));
     await Promise.all(jobs);
   }
@@ -635,7 +639,9 @@
         cur = j && j.next_cursor; n++;
       } while (cur && n < 5);
     }
-    // Ticked off in the last ~2 months: never added again, and whatever was still on them counts as OK'd by you.
+    // Ticked off in the last ~2 months: never added again. On the lads' list, whatever was still on it counts as OK'd by you
+    // (clearing it is you saying it's fine). One of your own "Put in ..." follow ups ticked off just means you've done it,
+    // so only its ok line counts (22/10: a ticked timesheet reminder showed as OK'd).
     for (const P of [ISSUES, FU]) {
       let cur = null, n = 0;
       do {
@@ -649,7 +655,7 @@
     loadApplied = my;
     OV.clear();
     open.forEach((r, k) => { if (r.ok.length) OV.set(k, new Set(r.ok)); });
-    done.forEach((r, k) => OV.set(k, new Set(splitL(r.missing).concat(r.ok))));
+    done.forEach((r, k) => { const s = new Set((r.pid === FU ? [] : splitL(r.missing)).concat(r.ok)); if (s.size) OV.set(k, s); });
     applyLocal();
     AOK.clear();
     aOpen.forEach((r, k) => { if (r.ok) AOK.add(k); });
