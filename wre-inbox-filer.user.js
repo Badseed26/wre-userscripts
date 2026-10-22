@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.63
+// @version      0.9.64
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Sonnet and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -112,7 +112,7 @@ async function pushLog() {
   // second line: what each tab's chip says and how long ago, so a tab that's quietly stuck shows on the dashboard (19/10)
   const tab = k => { const x = gget('wfState_' + k, {}); return (x.msg || '?') + (x.at ? ' (' + Math.round((now() - x.at) / 60e3) + ' min ago' + (x.lag || '') + ')' : ''); };
   const reads = gget('wfReads_' + ymd(new Date()), 0), spend = (gget('wfSpend', {})[ymd(new Date()).slice(0, 7)] || 0);
-  try { await td('POST', 'tasks/' + LOG_TASK, { description: 'Filer ' + VER + ', ' + st + ', ' + reads + ' of ' + MAX_READS_DAY + ' reads today, US$' + spend.toFixed(2) + ' this month, last seen ' + new Date().toLocaleString('en-AU', { hour12: true }).replace(',', '') + (WT.ok() ? '' : ' (worker timers off)') + '\nOutlook tab: ' + tab('mail') + ' | AroFlo tab: ' + tab('af') + '\n\n' + l.slice(-25).reverse().join('\n') }); gset('wfLogPushed', last); }
+  try { await td('POST', 'tasks/' + LOG_TASK, { description: 'Filer ' + VER + ', ' + st + ', ' + reads + ' of ' + MAX_READS_DAY + ' reads today, US$' + spend.toFixed(2) + ' this month, last seen ' + new Date().toLocaleString('en-AU', { hour12: true }).replace(',', '') + (WT.ok() ? '' : ' (worker timers off)') + '\nOutlook tab: ' + tab('mail') + ' | AroFlo tab: ' + tab('af') + (gget('wfNewest', 0) ? ' | Newest email: ' + new Date(gget('wfNewest', 0)).toLocaleString('en-AU', { hour12: true }).replace(',', '') : '') + '\n\n' + l.slice(-25).reverse().join('\n') }); gset('wfLogPushed', last); }
   catch (e) { try { console.log('[WRE filer] log push failed', e.message); } catch (x) {} }
 }
 function log(msg) { const l = gget('wfLog', []); l.push(new Date().toLocaleString('en-AU', { hour12: true }).replace(',', '') + ' ' + (ON_MAIL ? '[mail] ' : '[af] ') + msg); while (l.length > 300) l.shift(); gset('wfLog', l); try { console.log('[WRE filer]', msg); } catch (e) {} paint(); }
@@ -357,7 +357,7 @@ async function keepAwake() {
     const o = await a.createOffer(); await a.setLocalDescription(o); await b.setRemoteDescription(o);
     const an = await b.createAnswer(); await b.setLocalDescription(an); await a.setRemoteDescription(an);
     awake.pcs = [a, b, ch];
-    ch.onopen = () => log('Keep awake on: WebRTC link open in this tab');
+    ch.onopen = () => { const k = 'wfAwakeLog_' + (ON_MAIL ? 'mail' : 'af'); if (now() - gget(k, 0) > 6 * 3600e3) { gset(k, now()); log('Keep awake on: WebRTC link open in this tab'); } }; // once in 6 hrs, the tabs reload a lot now
     setInterval(() => { try { if (ch.readyState == 'open') ch.send('.'); } catch (e) {} }, 20e3);
   } catch (e) { log('Keep awake didn\'t start: ' + e.message); }
   // How late the page's own timers run (the ones AroFlo's code uses), worst in the last 10 min, so the log shows if it works.
@@ -562,6 +562,8 @@ if (ON_MAIL) {
         if (SKIP_SUBJ.test(p.head)) { markSeen(rk); continue; }
         log('New: ' + p.head.slice(0, 80)); const r = await takeOne(el, R, false); if (!reloading) later(scan, r ? 1500 : 5000); return;
       }
+      // newest email in the list, any sender: the dashboard flags it when it's gone stale in work hours (22/10)
+      { let nw = 0; rowsNow().slice(0, 15).forEach(el => { const p = parse(el.getAttribute('aria-label')); if (p.pinned) return; const t = rowTime(p.when); if (t && t.getTime() > nw) nw = t.getTime(); }); if (nw) gset('wfNewest', nw); }
       gset('wfMailPass', now()); // a full pass got through the list (the watchdog in boot reloads the tab if none has in 10 min)
       if (looked && !timed) status('rows have no times, can\'t tell what\'s new. First row: ' + ((rowsNow()[0] || {}).getAttribute ? rowsNow()[0].getAttribute('aria-label') : '').slice(0, 60), true);
       else status('watching, ' + new Date().toLocaleTimeString('en-AU', { hour: 'numeric', minute: '2-digit' }));
@@ -606,6 +608,11 @@ if (ON_MAIL) {
     let deb = null; const mo = new MutationObserver(() => { cancel(deb); deb = later(scan, 4000); });
     const list = rowsNow()[0] && rowsNow()[0].parentElement; if (list) mo.observe(list, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-label'] });
     every(scan, 60e3); scan(); every(pushLog, 30e3); every(buddyCheck, 60e3);
+    // 22/10: Outlook's list can freeze in a tab left open all day. The scan still got through it every minute, so it said
+    // watching while nothing new showed (missed every email from 8:48 pm 21/10 till a reload at 7 pm 22/10). So the tab
+    // reloads every 30 min when it's idle and you're not in it.
+    const loadedAt = now();
+    every(() => { if (reloading || busy || now() - loadedAt < 30 * 60e3 || gget('wfPending', null) || gget('wfTestQ', []).length || (document.visibilityState == 'visible' && document.hasFocus())) return; reloading = true; status('reloading (every 30 min)'); gset('wfMailPass', now()); location.reload(); }, 60e3);
     // Watchdog: no filer tab has got through the list in 10 min and nothing's half read, so this tab is stuck somewhere it can't
     // see (19/10: the Outlook tab went quiet after a reload at 3:28 pm and missed Jai's PO). Reload it and say so.
     gset('wfMailPass', now());
@@ -1644,7 +1651,10 @@ if (ON_AF) {
       const lk = gget('wfAfLock', null); const me = tabId();
       if (lk && lk.tab !== me && now() - lk.at < 180e3) { status('another AroFlo filer tab is running'); return; }
       gset('wfAfLock', { tab: me, at: now() });
-      if (/login|signin/i.test(location.pathname) || !document.querySelector('a[href*="Calendar"],#topMenu,.afTopNav,nav')) { status('AroFlo looks signed out', true); await safeFu({ sec: 'check', key: 'af-signed-out-' + ymd(new Date()), p1: true, due: ymd(new Date()), title: 'Filer: AroFlo is signed out on your PC', desc: 'Sign back in on the filer tab. Nothing gets filed till then.' }); return; }
+      // 22/10: the page can still look signed in after AroFlo's session has timed out, so ask AroFlo itself every 15 min
+      if (now() - gget('wfSessAt', 0) > 15 * 60e3) { gset('wfSessAt', now());
+        try { const r = await fetch('/ims/Site/Home/index.cfm', { credentials: 'include' }); const h = await r.text(); gset('wfSessOut', /login|signin|logon/i.test(r.url) || (/type=["']?password/i.test(h) && !/Calendar/.test(h)) ? 1 : 0); } catch (e) {} }
+      if (gget('wfSessOut', 0) || /login|signin/i.test(location.pathname) || !document.querySelector('a[href*="Calendar"],#topMenu,.afTopNav,nav')) { if (gget('wfSessOut', 0)) gset('wfSessAt', now() - 13 * 60e3); /* signed out: look again in 2 min */ status('AroFlo looks signed out', true); await safeFu({ sec: 'check', key: 'af-signed-out-' + ymd(new Date()), p1: true, due: ymd(new Date()), title: 'Filer: AroFlo is signed out on your PC', desc: 'Sign back in on the filer tab. Nothing gets filed till then.' }); return; }
       const R = await rules(); if (R.paused) { status('paused'); return; }
       if (R.dry === false && !gget('wfLiveAt', 0)) gset('wfLiveAt', now());
       // a job another tab picked up in the last 3 min is theirs (resumeOp keeps the claim fresh while its pages load)
