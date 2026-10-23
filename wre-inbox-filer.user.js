@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.66
+// @version      0.9.67
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Sonnet and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -19,10 +19,61 @@
 // @connect      api.todoist.com
 // @connect      files.todoist.com
 // @connect      production-reportapi.ambrosebuilding.com.au
+// @connect      api.github.com
+// @connect      raw.githubusercontent.com
 // @run-at       document-start
 // @updateURL    https://raw.githubusercontent.com/Badseed26/wre-userscripts/main/wre-inbox-filer.user.js
 // @downloadURL  https://raw.githubusercontent.com/Badseed26/wre-userscripts/main/wre-inbox-filer.user.js
 // ==/UserScript==
+
+// Built from src/wre-inbox-filer.js by build.py. Change src/wre-inbox-filer.js, not this file.
+(function () {
+  // Live updates (23/10): Tampermonkey only checks for a new version every few hours. This checks the repo's latest commit every
+  // 2 min (free when nothing's changed) and keeps the newest code here, so a push runs on the next page load. If the new code needs
+  // a permission this install hasn't got, or this browser won't run it, the built in copy below runs like before.
+  const __wreName = "wre-inbox-filer", __wreVer = "0.9.67", __wreHave = new Set(["// @connect api.anthropic.com", "// @connect api.github.com", "// @connect api.todoist.com", "// @connect files.todoist.com", "// @connect production-reportapi.ambrosebuilding.com.au", "// @connect raw.githubusercontent.com", "// @grant GM_deleteValue", "// @grant GM_getValue", "// @grant GM_listValues", "// @grant GM_openInTab", "// @grant GM_registerMenuCommand", "// @grant GM_setValue", "// @grant GM_xmlhttpRequest", "// @grant unsafeWindow", "// @match https://office.aroflo.com/*", "// @match https://outlook.cloud.microsoft/*", "// @match https://outlook.office.com/*", "// @match https://outlook.office365.com/*", "// @run-at document-start"]);
+  const __wreInfo0 = typeof GM_info != 'undefined' ? GM_info : null;
+  const __wreSay = m => { try { console.log('[WRE live update] ' + __wreName + ': ' + m); } catch (e) {} };
+  const __wreCmp = (a, b) => { const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number); for (let i = 0; i < Math.max(x.length, y.length); i++) { const d = (x[i] || 0) - (y[i] || 0); if (d) return d; } return 0; };
+  const __wreMeta = c => { const h = (String(c).match(/==UserScript==([\s\S]*?)==\/UserScript==/) || [])[1] || ''; return { v: (h.match(/^\/\/ @version\s+(\S+)/m) || [])[1] || '', need: (h.match(/^\/\/ @(grant|connect|match|exclude|include|run-at|sandbox)\s+.+$/gm) || []).map(s => s.replace(/\s+/g, ' ').trim()) }; };
+  const __wreMissing = need => need.filter(x => !__wreHave.has(x) && !(/^\/\/ @connect /.test(x) && __wreHave.has('// @connect *')));
+  // the newer code, run with GM_info saying its own version
+  function __wreRun(__wreCode, __wreV) { const GM_info = __wreInfo0 ? Object.assign({}, __wreInfo0, { script: Object.assign({}, __wreInfo0.script, { version: __wreV }) }) : undefined; eval(__wreCode); }
+  function __wreLive() {
+    let c = null; try { c = GM_getValue('wreLiveCode', null); } catch (e) { return false; }
+    if (!c || !c.code || __wreCmp(c.v, __wreVer) <= 0) return false;
+    const miss = __wreMissing(__wreMeta(c.code).need); if (miss.length) { __wreSay(c.v + ' needs ' + miss.join(', ') + ', running the built in ' + __wreVer + ' till Tampermonkey updates'); return false; }
+    try { eval('0'); } catch (e) { __wreSay('this browser won\'t run live code (' + e.message + '), running the built in ' + __wreVer); return false; }
+    try { __wreRun(c.code, c.v); } catch (e) { if (e instanceof SyntaxError) { __wreSay(c.v + ' won\'t parse, running the built in ' + __wreVer); return false; } __wreSay(c.v + ' threw: ' + e.message); }
+    __wreSay('running ' + c.v + ' (built in is ' + __wreVer + ')'); return true;
+  }
+  function __wreCheck() {
+    try {
+      if (Date.now() - GM_getValue('wreLiveAt', 0) < 2 * 60e3) return; GM_setValue('wreLiveAt', Date.now());
+      const et = GM_getValue('wreLiveEtag', ''), hd = { Accept: 'application/vnd.github+json' }; if (et) hd['If-None-Match'] = et;
+      GM_xmlhttpRequest({ method: 'GET', url: 'https://api.github.com/repos/Badseed26/wre-userscripts/commits/main', headers: hd, timeout: 20000, onload: r => {
+        try {
+          if (r.status != 200) return; // 304: nothing new, and it doesn't count against GitHub's limit
+          const sha = (JSON.parse(r.responseText) || {}).sha, tag = (((r.responseHeaders || '').match(/^etag:\s*(.+)$/mi) || [])[1] || '').trim();
+          if (!sha) return; if (sha == GM_getValue('wreLiveSha', '')) { if (tag) GM_setValue('wreLiveEtag', tag); return; }
+          GM_xmlhttpRequest({ method: 'GET', url: 'https://raw.githubusercontent.com/Badseed26/wre-userscripts/' + sha + '/src/' + __wreName + '.js', timeout: 30000, onload: q => {
+            try {
+              const code = q.responseText || ''; if (q.status != 200 || !/==\/UserScript==/.test(code)) return;
+              const m = __wreMeta(code); if (!m.v) return;
+              if (__wreCmp(m.v, __wreVer) > 0) {
+                let ok = true; try { new Function(code); } catch (e) { ok = !(e instanceof SyntaxError); }
+                if (!ok) { __wreSay(m.v + ' won\'t parse, not keeping it'); GM_setValue('wreLiveSha', sha); return; }
+                const old = GM_getValue('wreLiveCode', null); if (!old || old.v != m.v) __wreSay('got ' + m.v + ', it runs on the next page load');
+                GM_setValue('wreLiveCode', { v: m.v, code, sha, at: Date.now() });
+              } else GM_setValue('wreLiveCode', null); // Tampermonkey's copy has caught up
+              GM_setValue('wreLiveSha', sha); if (tag) GM_setValue('wreLiveEtag', tag);
+            } catch (e) {} } });
+        } catch (e) {} } });
+    } catch (e) {}
+  }
+  if (window.top === window.self) { __wreCheck(); setInterval(__wreCheck, 2 * 60e3 + 5000); }
+  if (__wreLive()) return;
+  // ---------- the built in copy (src/wre-inbox-filer.js at 0.9.67) ----------
 
 (function () {
 'use strict';
@@ -1774,4 +1825,5 @@ if (ON_AF) {
   };
   if (document.readyState == 'loading') document.addEventListener('DOMContentLoaded', boot); else boot();
 }
+})();
 })();
