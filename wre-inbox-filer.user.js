@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.64
+// @version      0.9.65
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Sonnet and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -342,6 +342,9 @@ try {
 if (/#wre-filer/.test(location.hash)) { try { sessionStorage.setItem('wfRole', '1'); } catch (e) {} }
 const tabId = () => { let t = ss('wfTabId'); if (!t) { t = 't' + now() + Math.random().toString(36).slice(2, 6); ss('wfTabId', t); } return t; };
 const IS_FILER = (() => { try { return sessionStorage.getItem('wfRole') === '1'; } catch (e) { return false; } })();
+// A "Leave site?" box stops the filer's own reloads dead and the tab sits there for hours. The filer tabs are only for the
+// filer, so the page doesn't get to ask (23/10).
+if (IS_FILER) { try { const ael = W.EventTarget.prototype.addEventListener; W.EventTarget.prototype.addEventListener = function (t, f, o) { if (t === 'beforeunload' && (this === W || this === window)) return; return ael.call(this, t, f, o); }; Object.defineProperty(W, 'onbeforeunload', { configurable: true, get: () => null, set: () => {} }); } catch (e) {} }
 
 // Chrome holds a tab that's been hidden 5 min to waking its timers once a minute, unless the tab is using WebRTC. So each
 // filer tab keeps a tiny WebRTC link to itself: nothing leaves the PC, it's only in the two filer tabs, and Chrome's settings
@@ -371,19 +374,31 @@ if (IS_FILER) keepAwake();
 // =====================================================================
 if (ON_MAIL) {
   // Catch PDFs Outlook downloads for its own attachment preview (same trick the PO setup uses). Nothing is saved to the PC.
-  let lastPdf = null, catching = false;
+  let lastPdf = null, catching = false, lastPart = null, of = null;
+  const kb = n => Math.max(1, Math.round(n / 1024)) + ' KB';
+  // A PDF is only kept whole: Outlook's viewer can fetch a big one in pieces, and the first piece starts with %PDF too, so a
+  // cut short copy went to Claude and got "The PDF specified was not valid" three times (23/10, Bentino 17465).
+  const pdfWhole = async blob => { try { return (await blob.slice(Math.max(0, blob.size - 4096)).text()).includes('%%EOF'); } catch (e) { return false; } };
+  const hdrs = src => { const o = {}; try { if (src && typeof src.forEach == 'function' && !Array.isArray(src)) src.forEach((v, k) => { o[k] = v; }); else if (Array.isArray(src)) src.forEach(kv => { o[kv[0]] = kv[1]; }); else if (src) Object.assign(o, src); } catch (e) {} Object.keys(o).forEach(k => { if (/^range$/i.test(k)) delete o[k]; }); return o; };
+  // Fetch the whole PDF from where the viewer got its piece, same sign in, no Range header.
+  const fetchWhole = async lp => { try { const req = lp.input && typeof lp.input == 'object' && lp.input.url ? lp.input : null; const url = req ? req.url : String(lp.input);
+      const r = await of.call(W, url, { credentials: 'include', headers: hdrs((lp.init && lp.init.headers) || (req && req.headers)) });
+      if (!r.ok || r.status == 206) return null; const b = await r.blob(); if (b.size < 500) return null;
+      const h = String.fromCharCode(...new Uint8Array(await b.slice(0, 8).arrayBuffer())); return h.startsWith('%PDF') && (await pdfWhole(b)) ? b : null; } catch (e) { return null; } };
   if (IS_FILER) {
     // Images only count while the filer has a preview open (catching), or every avatar and icon Outlook loads would land here.
     // Only keep a file that really is what the grab is after (first bytes), or a freshly opened tab's avatars and icons land
     // here first, the grab takes one of those, calls it the wrong type and gives up in seconds (19/10, both re-reads at 4:51 and 5:03).
-    const keep = async (blob, at) => { if (!blob || blob.size < 500) return; try { const h = String.fromCharCode(...new Uint8Array(await blob.slice(0, 12).arrayBuffer()));
+    const keep = async (blob, at, part) => { if (!blob || blob.size < 500) return; try { const h = String.fromCharCode(...new Uint8Array(await blob.slice(0, 12).arrayBuffer()));
       const isPdf = h.startsWith('%PDF'), isImg = h.startsWith('\xFF\xD8') || h.startsWith('\x89PNG') || h.startsWith('GIF8') || h.startsWith('RIFF') || h.slice(4, 8) == 'ftyp';
-      if ((catching == 'image' ? isImg : isPdf)) lastPdf = { blob, at }; } catch (e) {} };
+      if (catching == 'image' ? (isImg && !part) : (isPdf && !part && (await pdfWhole(blob)))) lastPdf = { blob, at }; } catch (e) {} };
     const want = ct => /pdf|octet-stream/i.test(ct) || (catching && /^image\//i.test(ct));
-    const of = W.fetch;
-    W.fetch = function () { const p = of.apply(this, arguments); p.then(r => { try { const ct = r.headers.get('content-type') || ''; if (want(ct)) r.clone().blob().then(b => keep(b, now())); } catch (e) {} }).catch(() => {}); return p; };
-    const os = W.XMLHttpRequest.prototype.send;
-    W.XMLHttpRequest.prototype.send = function () { this.addEventListener('load', () => { try { const ct = this.getResponseHeader('content-type') || ''; if (want(ct) && this.response instanceof W.Blob) keep(this.response, now()); } catch (e) {} }); return os.apply(this, arguments); };
+    of = W.fetch;
+    W.fetch = function (input, init) { const p = of.apply(this, arguments); p.then(r => { try { const ct = r.headers.get('content-type') || ''; if (want(ct)) { const part = r.status == 206 || !!r.headers.get('content-range'); if (part && catching == 'pdf') lastPart = { input, init, at: now() }; r.clone().blob().then(b => keep(b, now(), part)); } } catch (e) {} }).catch(() => {}); return p; };
+    const os = W.XMLHttpRequest.prototype.send, oo = W.XMLHttpRequest.prototype.open, oh = W.XMLHttpRequest.prototype.setRequestHeader;
+    W.XMLHttpRequest.prototype.open = function (m, u) { try { this.__wfU = u; this.__wfH = {}; } catch (e) {} return oo.apply(this, arguments); };
+    W.XMLHttpRequest.prototype.setRequestHeader = function (k, v) { try { if (this.__wfH) this.__wfH[k] = v; } catch (e) {} return oh.apply(this, arguments); };
+    W.XMLHttpRequest.prototype.send = function () { this.addEventListener('load', () => { try { const ct = this.getResponseHeader('content-type') || ''; if (want(ct) && this.response instanceof W.Blob) { const part = this.status == 206 || !!this.getResponseHeader('content-range'); if (part && catching == 'pdf') lastPart = { input: this.__wfU, init: { headers: this.__wfH }, at: now() }; keep(this.response, now(), part); } } catch (e) {} }); return os.apply(this, arguments); };
   }
 
   const rowsNow = () => [...document.querySelectorAll('div[role=option][data-convid]')];
@@ -444,9 +459,12 @@ if (ON_MAIL) {
     const findCard = () => { const R = rp(); return R && [...R.querySelectorAll('[title]')].find(x => x.getAttribute('title') == name); };
     // the card can be a beat behind the reading pane's text (Outlook fills the attachment well last), so give it a few seconds (19/10)
     await waitFor(() => !!findCard(), 6000); const card = findCard(); if (!card) { log('No card for ' + name + ' in the reading pane'); return null; }
-    lastPdf = null; catching = /\.pdf$/i.test(name) ? 'pdf' : 'image'; const t0 = now(); (card.closest('[role=button],button,[role=option]') || card).click();
-    await waitFor(() => !!(lastPdf && lastPdf.at >= t0), 20000);
-    const got = lastPdf; catching = false; await sleep(800);
+    lastPdf = null; lastPart = null; catching = /\.pdf$/i.test(name) ? 'pdf' : 'image'; const t0 = now(); (card.closest('[role=button],button,[role=option]') || card).click();
+    await waitFor(() => !!((lastPdf && lastPdf.at >= t0) || (lastPart && lastPart.at >= t0)), 20000);
+    // only pieces came through: give the viewer a few more seconds, then fetch the whole file from the same place (23/10)
+    if (!(lastPdf && lastPdf.at >= t0) && lastPart && lastPart.at >= t0 && of) { await sleep(3000);
+      if (!(lastPdf && lastPdf.at >= t0)) { const b = await fetchWhole(lastPart); if (b) { lastPdf = { blob: b, at: now() }; log('PDF came in pieces, fetched it whole: ' + name); } else log('PDF came in pieces and the whole file wouldn\'t come: ' + name); } }
+    const got = lastPdf && lastPdf.at >= t0 ? lastPdf : null; catching = false; await sleep(800);
     const close = [...document.querySelectorAll('button')].find(b => /^Close$/i.test(b.getAttribute('aria-label') || b.title || b.innerText.trim()) && b.offsetParent);
     if (close) close.click(); await sleep(800);
     if (!got) return null;
@@ -474,25 +492,50 @@ if (ON_MAIL) {
     P.atts = atts; if (P.wasUnread) { await park(); await markUnread(P.rowKey); }
     gset('wfPending', P); reloading = true; status('reloading after the preview'); await sleep(500); location.reload(); return true;
   }
+  // What's wrong with a PDF in plain words, or '' when it looks whole (23/10). deep also looks for a password lock.
+  const pdfFault = (b64, deep) => { try { const n = Math.floor(b64.length * 3 / 4); if (!atob(b64.slice(0, 12)).startsWith('%PDF')) return 'not a PDF, ' + kb(n);
+      if (!atob(b64.slice(-5464)).includes('%%EOF')) return 'cut short, ' + kb(n) + ' with no end to it';
+      if (deep && atob(b64).includes('/Encrypt')) return 'password locked, ' + kb(n); return deep ? 'looks whole, ' + kb(n) + ', Claude still won\'t open it' : ''; } catch (e) { return 'unreadable (' + e.message + ')'; } };
+  // A PDF that won't open: open the email again on a fresh page and grab the PDF again, once. Then it reads on (23/10).
+  async function regrabPdf(P) {
+    P.regrab = 0; gset('wfPending', P);
+    await goInbox(); const el = await findRowDeep(o => keyOf(o) == P.rowKey);
+    if (el) { const b0 = bodyOf(); el.click(); await waitFor(() => bodyOf().length > 0 && bodyOf() != b0, 8000); await quiet(300, 3000);
+      const b64 = P.pdfName ? await grabPdf(P.pdfName) : null; const f = b64 ? pdfFault(b64) : 'a second grab got nothing';
+      if (b64 && !f) { P.pdfKey = 'wfPdf_' + P.id; gset(P.pdfKey, b64); log('Grabbed the PDF again, it\'s whole this time: ' + P.pdfName); } else { P.pdfBad = P.pdfBad || f; log('Grabbed the PDF again and it\'s still no good (' + f + '): ' + P.pdfName); }
+      if (P.wasUnread) { await park(); await markUnread(P.rowKey); } }
+    else { P.pdfBad = P.pdfBad || 'couldn\'t find the email again to grab it'; log('Couldn\'t find the email again to grab its PDF: ' + P.info.subject.slice(0, 60)); }
+    gset('wfPending', P); reloading = true; status('reloading after the preview'); await sleep(500); location.reload(); return true;
+  }
   async function finishPending() {
     const P = gget('wfPending', null); if (!P) return false;
     if ((P.more || []).length && (P.moreTries || 0) < 12 && (!P.tab || P.tab === tabId()) && !P.run) return await grabMore(P);
+    if (P.regrab && (!P.tab || P.tab === tabId()) && !P.run) return await regrabPdf(P);
     if (P.tab && P.tab !== tabId() && now() - (P.at || 0) < 5 * 60e3) return false; // another tab's, give it 5 min
     if ((P.tries || 0) >= 3) { gdel('wfPending'); markSeen(P.key); await safeFu({ sec: 'check', key: 'err-read-' + P.key.slice(0, 60), title: 'Filer couldn\'t read an email: ' + P.info.subject.slice(0, 60), desc: 'From ' + P.info.from + ', ' + P.info.date + '. Check it by hand.', p1: false, due: ymd(new Date()) }); return true; }
     if (P.run && P.run.page !== PAGE && now() - P.run.at < 3 * 60e3) return false; // already being read (this tab, before or after a reload)
     P.tries = (P.tries || 0) + 1; P.run = { page: PAGE, at: now() }; gset('wfPending', P);
-    const R = await rules(); const pdfB64 = P.pdfKey ? gget(P.pdfKey, '') : '';
+    const R = await rules(); const pdfB64 = P.pdfKey ? gget(P.pdfKey, '') : ''; const bad = pdfB64 ? pdfFault(pdfB64) : '';
     status('reading ' + P.info.subject.slice(0, 40));
+    // A PDF that won't open goes back for a fresh grab once, then the email's read without it and the error says why, rather than
+    // the same broken copy going to Claude three times (23/10, Bentino 17465).
+    const pdfNoGood = why => { P.tries = Math.max(0, (P.tries || 1) - 1); P.run = null; gdel(P.pdfKey); P.pdfKey = '';
+      if (!P.regrabbed) { P.regrab = 1; P.regrabbed = 1; log('PDF on ' + P.info.subject.slice(0, 50) + ' won\'t open (' + why + '), grabbing it again'); }
+      else { P.pdfBad = why; log('PDF on ' + P.info.subject.slice(0, 50) + ' still won\'t open (' + why + '), reading the email without it'); }
+      gset('wfPending', P); return true; };
+    if (bad) return pdfNoGood(bad);
     const content = [{ type: 'text', text: READ_RULES + (pdfB64 ? '\n\n' + (P.sched ? SCHED_RULES : SCOPE_RULES) : '') + '\n\nEMAIL\nFrom: ' + P.info.from + '\nDate: ' + P.info.date + '\nSubject: ' + P.info.subject + '\nAttachments: ' + (P.info.pdfs.join(', ') || 'none') + '\n\n' + P.info.body }];
     if (pdfB64) content.push({ type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: pdfB64 } });
     // high effort with thinking on for both: the plain email read gets room to think before it answers (1200 was the old Haiku cap)
-    let x; try { x = await ai(content, pdfB64 ? 64000 : 8000, true, 'high', pdfB64 ? (P.sched ? MODEL_SCHED : MODEL_PO) : MODEL); } catch (e) { log('Haiku failed: ' + e.message); status('Haiku: ' + e.message, true); return true; }
+    let x; try { x = await ai(content, pdfB64 ? 64000 : 8000, true, 'high', pdfB64 ? (P.sched ? MODEL_SCHED : MODEL_PO) : MODEL); } catch (e) {
+      if (pdfB64 && /pdf/i.test(e.message) && /not valid|invalid|encrypt|password|corrupt|could not|unable to/i.test(e.message)) return pdfNoGood(pdfFault(pdfB64, true));
+      log('Haiku failed: ' + e.message); status('Haiku: ' + e.message, true); return true; }
     if (P.as) Object.assign(x, P.as); // test only: pretend it was for another job
     x.po_lines = x.po_lines || []; if (/^(po|updated_po)$/.test(x.kind)) x.cov = coverage(x);
     // ARC jobs go by the PO itself (PO118964-BU01-009, base PO118964-BU01), whatever Haiku made of the "ARC Ref" in the subject
     if (/\barc\b/i.test(P.builder || x.builder || '') && /^PO\d/i.test(x.po_full || '')) { x.ref = ''; x.po_base = x.po_full.replace(/-\d+$/, ''); }
     x.address = x.address || {}; x.dates = x.dates || []; x.blocks = x.blocks || []; x.vague = x.vague || []; x.site_contacts = x.site_contacts || []; x.warn = x.warn || [];
-    const job = { id: P.id + Math.random().toString(36).slice(2, 6), at: now(), emailAt: P.emailAt, dry: P.live ? false : (R.dry || !!P.test), test: !!P.test, key: P.key, builder: P.builder || x.builder || '', info: { from: P.info.from, date: P.info.date, subject: P.info.subject, rs: P.info.rs, rec: P.info.rec, img: P.info.img, pdfName: P.pdfName || '', sched: !!P.sched }, pdfKey: P.pdfKey || '', atts: P.atts || [], x, status: 'new' };
+    const job = { id: P.id + Math.random().toString(36).slice(2, 6), at: now(), emailAt: P.emailAt, dry: P.live ? false : (R.dry || !!P.test), test: !!P.test, key: P.key, builder: P.builder || x.builder || '', info: { from: P.info.from, date: P.info.date, subject: P.info.subject, rs: P.info.rs, rec: P.info.rec, img: P.info.img, pdfName: P.pdfName || '', sched: !!P.sched }, pdfKey: P.pdfKey || '', pdfBad: P.pdfBad || '', atts: P.atts || [], x, status: 'new' };
     if (x.kind == 'skip' || !x.kind) { (P.atts || []).forEach(a => gdel(a.key)); if (gget('wfRetryNext', '')) { const tid = gget('wfRetryNext', ''); gdel('wfRetryNext'); closeFu(tid).catch(() => {}); } log('Skip: ' + P.info.subject.slice(0, 70) + ' (' + (x.why || '') + ')'); if (P.pdfKey) gdel(P.pdfKey); if (job.test) await dryNote(job, ['Would skip it: ' + (x.why || '')]);
       // a skip is final, so the day's skipped emails that carried a PDF go on one low priority item for an eyeball (20/10)
       if (!P.test && (P.info.pdfs || []).length) { const dk = 'wfSkips_' + ymd(new Date()), sk = gget(dk, []); sk.push(P.info.subject.slice(0, 90) + ' (' + (x.why || 'skip').slice(0, 80) + ')'); gset(dk, sk);
@@ -528,7 +571,27 @@ if (ON_MAIL) {
     return await finishPending();
   }
 
-  let busy = false, reloading = false;
+  let busy = false, reloading = false, testing = false, lastInput = 0;
+  const loadedAt = now(), tm = t => new Date(t).toLocaleTimeString('en-AU', { hour: 'numeric', minute: '2-digit' });
+  ['mousedown', 'keydown', 'wheel', 'touchstart'].forEach(ev => document.addEventListener(ev, e => { if (e.isTrusted) lastInput = now(); }, true));
+  // 23/10: the list froze again with the 30 min reload in, so the newest email it could see sat at the morning till Ethan
+  // reloaded at 5:54 pm. The reload waited on things that can hang about (a scan going at that exact minute, a leftover test
+  // queue, the tab counting as in use while it's only on screen). Now it only waits for a read under way (10 min at most), a
+  // test going in this tab, or you clicking or typing in the tab in the last 2 min. If the page doesn't go within 90 s (a
+  // "Leave site?" box), it loads the mail page fresh from its address instead.
+  const reloadDue = () => { if (reloading || testing || now() - loadedAt < 30 * 60e3 || now() - lastInput < 2 * 60e3) return false; const P = gget('wfPending', null); return !(P && now() - (P.at || 0) < 10 * 60e3); };
+  const freshLoad = () => location.replace(location.origin + '/mail/?wfr=' + now() + '#wre-filer');
+  const reloadNow = why => { if (reloading) return; reloading = true; status('reloading (' + why + ')'); gset('wfMailPass', now()); gset('wfPreReload', { at: now(), why, newest: gget('wfNewest', 0) });
+    later(() => { log('Outlook tab didn\'t reload (' + why + ') in 90 s, loading it fresh'); freshLoad(); }, 90e3); location.reload(); };
+  // After a reload: the newest email is still the same one, over 3 hours old in work hours. Outlook may have loaded an old copy of
+  // the list, so load the mail page fresh from its address, once for that email, and say so in the log either way (23/10).
+  const workHrs = () => { const d = new Date(), h = d.getHours(); return working(ymd(d)) && h >= 7 && h < 18; };
+  function afterReload(pre, nw) {
+    if (!nw || nw > (pre.newest || 0) || !workHrs() || now() - nw < 3 * 3600e3) return false;
+    if (gget('wfFreshFor', 0) != nw) { gset('wfFreshFor', nw); log('Reloaded (' + pre.why + ') and the newest email is still ' + tm(nw) + ', loading the mail page fresh'); reloading = true; gset('wfPreReload', { at: now(), why: 'fresh load', newest: nw }); freshLoad(); return true; }
+    if (pre.why == 'fresh load') log('Loaded the mail page fresh and the newest email is still ' + tm(nw) + '. Nothing new has come in, or Outlook is showing an old list');
+    return false;
+  }
   async function scan() {
     if (busy || reloading || !IS_FILER) return; busy = true;
     try {
@@ -563,12 +626,13 @@ if (ON_MAIL) {
         log('New: ' + p.head.slice(0, 80)); const r = await takeOne(el, R, false); if (!reloading) later(scan, r ? 1500 : 5000); return;
       }
       // newest email in the list, any sender: the dashboard flags it when it's gone stale in work hours (22/10)
-      { let nw = 0; rowsNow().slice(0, 15).forEach(el => { const p = parse(el.getAttribute('aria-label')); if (p.pinned) return; const t = rowTime(p.when); if (t && t.getTime() > nw) nw = t.getTime(); }); if (nw) gset('wfNewest', nw); }
+      { let nw = 0; rowsNow().slice(0, 15).forEach(el => { const p = parse(el.getAttribute('aria-label')); if (p.pinned) return; const t = rowTime(p.when); if (t && t.getTime() > nw) nw = t.getTime(); }); if (nw) gset('wfNewest', nw);
+        const pre = gget('wfPreReload', null); if (pre && pre.at < loadedAt) { gdel('wfPreReload'); if (afterReload(pre, nw)) return; } }
       gset('wfMailPass', now()); // a full pass got through the list (the watchdog in boot reloads the tab if none has in 10 min)
       if (looked && !timed) status('rows have no times, can\'t tell what\'s new. First row: ' + ((rowsNow()[0] || {}).getAttribute ? rowsNow()[0].getAttribute('aria-label') : '').slice(0, 60), true);
-      else status('watching, ' + new Date().toLocaleTimeString('en-AU', { hour: 'numeric', minute: '2-digit' }));
+      else status('watching, ' + tm(now()) + ', page loaded ' + tm(loadedAt));
     } catch (e) { log('Outlook side error: ' + e.message); status(e.message, true); }
-    finally { busy = false; }
+    finally { busy = false; if (reloadDue()) reloadNow('every 30 min'); }
   }
 
   // Test run: search Outlook and run each hit through Haiku in dry run (nothing written anywhere but the test log).
@@ -579,7 +643,7 @@ if (ON_MAIL) {
     // hold the scan off for the whole test, or it clears the search and clicks back to the Inbox under us (18/10)
     for (let i = 0; busy && i < 30; i++) await sleep(1000);
     if (busy) return 'the scan is busy, try again in a minute';
-    busy = true;
+    busy = true; testing = true; gset('wfTestAt', now());
     const inp = document.querySelector('input[aria-label="Search"],#topSearchInput'); inp.focus(); inp.click();
     Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(inp, q); inp.dispatchEvent(new Event('input', { bubbles: true }));
     inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
@@ -587,7 +651,7 @@ if (ON_MAIL) {
     const list = rowsNow().map(o => o.getAttribute('aria-label')).filter(l => !/^Unread/.test(l)).slice(0, n || 1);
     gset('wfTestQ', list); gset('wfTestQuery', q); gset('wfTestOpt', opt || null); if (!list.length) busy = false; W.wreFilerTestNext(); return 'testing ' + list.length + (opt && opt.live ? ' LIVE' : '');
   };
-  W.wreFilerTestNext = async () => { busy = true; try { return await testNext(); } finally { busy = false; } };
+  W.wreFilerTestNext = async () => { busy = true; testing = true; try { return await testNext(); } finally { busy = false; testing = !!gget('wfTestQ', []).length; } };
   const testNext = async () => {
     const list = gget('wfTestQ', []); if (!list.length) return 'test queue empty';
     const lab = list.shift(); gset('wfTestQ', list);
@@ -604,6 +668,8 @@ if (ON_MAIL) {
     await waitFor(() => rowsNow().length > 0, 30000);
     // a test run in progress carries on after each reload
     if (gget('wfPending', null)) { await finishPending(); }
+    // a test queue left over from a test that stopped part way (over 30 min old) would stop the scan for good, so it goes (23/10)
+    if (gget('wfTestQ', []).length && now() - gget('wfTestAt', 0) > 30 * 60e3) { log('Dropped a test queue left over from ' + tm(gget('wfTestAt', 0) || now())); gset('wfTestQ', []); }
     if (gget('wfTestQ', []).length) { await sleep(1500); await W.wreFilerTestNext(); return; }
     let deb = null; const mo = new MutationObserver(() => { cancel(deb); deb = later(scan, 4000); });
     const list = rowsNow()[0] && rowsNow()[0].parentElement; if (list) mo.observe(list, { childList: true, subtree: true, attributes: true, attributeFilter: ['aria-label'] });
@@ -611,12 +677,12 @@ if (ON_MAIL) {
     // 22/10: Outlook's list can freeze in a tab left open all day. The scan still got through it every minute, so it said
     // watching while nothing new showed (missed every email from 8:48 pm 21/10 till a reload at 7 pm 22/10). So the tab
     // reloads every 30 min when it's idle and you're not in it.
-    const loadedAt = now();
-    every(() => { if (reloading || busy || now() - loadedAt < 30 * 60e3 || gget('wfPending', null) || gget('wfTestQ', []).length || (document.visibilityState == 'visible' && document.hasFocus())) return; reloading = true; status('reloading (every 30 min)'); gset('wfMailPass', now()); location.reload(); }, 60e3);
+    // 23/10: the gates are in reloadDue above. A scan going right then reloads at its end instead.
+    every(() => { if (!busy && reloadDue()) reloadNow('every 30 min'); }, 60e3);
     // Watchdog: no filer tab has got through the list in 10 min and nothing's half read, so this tab is stuck somewhere it can't
     // see (19/10: the Outlook tab went quiet after a reload at 3:28 pm and missed Jai's PO). Reload it and say so.
     gset('wfMailPass', now());
-    every(() => { if (reloading || gget('wfPending', null) || now() - gget('wfMailPass', 0) < 10 * 60e3) return; log('Outlook tab hasn\'t got through the list in 10 min (chip said: ' + (gget('wfState_mail', {}).msg || '?') + '), reloading it'); reloading = true; gset('wfMailPass', now()); location.reload(); }, 60e3);
+    every(() => { if (reloading || gget('wfPending', null) || now() - gget('wfMailPass', 0) < 10 * 60e3) return; log('Outlook tab hasn\'t got through the list in 10 min (chip said: ' + (gget('wfState_mail', {}).msg || '?') + '), reloading it'); reloadNow('stuck 10 min'); }, 60e3);
   };
   if (document.readyState == 'loading') document.addEventListener('DOMContentLoaded', boot); else boot();
 }
@@ -1317,7 +1383,7 @@ if (ON_AF) {
     const errFu = async msg => { if (!job.dry) await safeFu({ sec: 'check', key: 'err-' + job.id, p1: true, due: ymd(new Date()), title: 'Filer: ' + msg.slice(0, 80), desc: 'Email: ' + job.info.subject + '\nFrom ' + job.info.from + ', ' + job.info.date + (job.pdfKey ? '\nPDF attached below.' : '') + (job.target ? afLine(job.target.jn, job.target.href) : ''), pdf: job.pdfKey && gget(job.pdfKey, '') ? { name: fileName(job), b64: gget(job.pdfKey, '') } : null }); return fin([msg], true); };
 
     if (/^(po|updated_po)$/.test(x.kind) && !job.pdfKey && /^\s*(re|fw|fwd)\s*:/i.test(job.info.subject || '')) return errFu('Builder reply on PO ' + (x.po_full || '') + ' thread with no PDF, read it: ' + (x.summary || '').slice(0, 60));
-    if (/^(po|updated_po|esa)$/.test(x.kind) && !job.pdfKey) return errFu((x.kind == 'esa' ? 'Energex safety advice' : 'PO ' + (x.po_full || '')) + ': couldn\'t grab the PDF out of the email');
+    if (/^(po|updated_po|esa)$/.test(x.kind) && !job.pdfKey) return errFu((x.kind == 'esa' ? 'Energex safety advice' : 'PO ' + (x.po_full || '')) + (job.pdfBad ? ': the PDF came through broken (' + job.pdfBad + ')' : ': couldn\'t grab the PDF out of the email'));
     if (x.kind == 'esa') {
       const st = x.address && x.address.street; if (!st) return errFu('ESA with no address I could read');
       if (!job.target) {
