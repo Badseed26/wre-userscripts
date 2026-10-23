@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.65
+// @version      0.9.66
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Sonnet and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -1554,7 +1554,9 @@ if (ON_AF) {
     const old = gget('wfReread', []).filter(x => now() - x.at >= 15 * 60e3);
     if (old.length) { gset('wfReread', gget('wfReread', []).filter(x => now() - x.at < 15 * 60e3)); for (const x of old) await td('POST', 'tasks/' + x.task, { content: 'Filer couldn\'t find the email again, do it by hand: ' + x.head.slice(0, 50) }).catch(() => {}); }
     for (const t of ts) {
-      const key = ((t.description || '').match(/^filer: (\S+)/m) || [])[1] || '';
+      // the whole key line: a read error's key has the email's date in it, spaces and all, so stopping at the first space left
+      // "err-read-Fri" and Try again said it couldn't tell which email it was (23/10, Bentino 17465)
+      const key = (((t.description || '').match(/^filer: (.+)$/m) || [])[1] || '').trim();
       const note = msg => td('POST', 'tasks/' + t.id, { labels: (t.labels || []).filter(l => l != 'filer-retry'), description: 'Try again (' + tm + '): ' + msg + '\n' + String(t.description || '').replace(/^Try again \(.*\n?/m, '') }).catch(e => log('Try again note failed: ' + e.message));
       const reread = async head => { const r = gget('wfReread', []).filter(x => now() - x.at < 15 * 60e3 && x.task != t.id); r.push({ head, at: now(), task: t.id }); gset('wfReread', r); await note('reading the email again'); log('Try again: reading the email again: ' + head.slice(0, 50)); };
       let m;
