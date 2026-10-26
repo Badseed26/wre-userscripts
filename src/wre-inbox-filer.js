@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.68
+// @version      0.9.69
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Sonnet and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -49,6 +49,7 @@ const RULES_TASK = '6hmpxM3GFpWCgPvX';  // WRE job tracker > Inbox filer setting
 const LOG_TASK = '6hp9c9X7CPQvgRw5';    // WRE job tracker > Inbox filer settings > Inbox filer log (the dashboard reads it)
 const TRACK = '6hfHgcxH8W9q4qf5';       // WRE job tracker
 const SEC_SET = '6hmpxJ2hr8Hc5MRX';     // WRE job tracker > Inbox filer settings (not jobs)
+const SEC_TRACK_NEW = '6hfHgfXrQrWxV3GX'; // WRE job tracker > Booked / in progress (where the filer's new jobs go)
 const PHONE_TASK = '6hpjJ2vf294Q3wv5';  // WRE job tracker > Inbox filer settings > * Phone list (WRE Capture reads it)
 const AMB_API = 'https://production-reportapi.ambrosebuilding.com.au/ReportData/RepairSchedule?recipientType=Insured&jobRecID=';
 const HOLS = { '2026-10-05': 1, '2026-12-25': 1, '2026-12-28': 1, '2027-01-01': 1, '2027-01-26': 1, '2027-03-26': 1, '2027-03-29': 1, '2027-04-26': 1, '2027-05-03': 1 };
@@ -1546,6 +1547,29 @@ if (ON_AF) {
     if (issues.length || trialOn()) await safeFu({ sec: 'check', key: 'chk-' + x.po_full, p1: !!(R.upErr || R.descErr || (x.cov && (x.cov.missing.length || x.cov.dvMissing))), due: ymd(new Date()), title: (issues.length ? 'Check ' : 'Check the description on ') + 'JN ' + jn + ', ' + st + (isNew ? ' (new task)' : ' (PO -' + x.po_full.split('-')[1] + ' added)'), desc: (issues.join('\n\n') || 'Trial run: eyeball what the filer wrote.') + (R.upErr ? '\nTry again redoes the upload.' : '') + '\nEmail: ' + job.info.subject + link,
       pdf: R.upErr && job.pdfKey && gget(job.pdfKey, '') ? { name: fileName(job), b64: gget(job.pdfKey, '') } : null });
     const b = gget('wfBases', {}); b[jobKey(x) || x.po_full] = now(); gset('wfBases', b);
+    await trackCard(job, jn, isNew).catch(e => log('Job tracker card failed: ' + e.message));
+  }
+
+  // 26/10: a job the filer sets up gets its job tracker card too, so the dashboard's Jobs tab and WRE Capture can find it
+  // straight away (82 Hindes St sat with no card till the next Claude run, so a phone note on it had nothing to match).
+  // A job that already has a card just gets a comment when a PO lands on it.
+  async function trackCard(job, jn, isNew) {
+    if (!jn) return;
+    const x = job.x, list = []; let cur = null, n = 0;
+    do { const j = await td('GET', 'tasks?project_id=' + TRACK + '&limit=200' + (cur ? '&cursor=' + encodeURIComponent(cur) : '')); (j && j.results || []).forEach(t => list.push(t)); cur = j && j.next_cursor; n++; } while (cur && n < 5);
+    const re = new RegExp('^\\s*(?:JN\\s?)?' + jn + '\\b');
+    const hit = list.find(t => t.section_id !== SEC_SET && re.test(String(t.description || '').split('\n')[0]));
+    const dm = dmy(new Date()).slice(0, 5);
+    if (hit) {
+      await td('POST', 'comments', { task_id: hit.id, content: dm + ': PO ' + x.po_full + (isNew ? ' set up' : ' added') + ' by the filer' + (x.summary ? ': ' + x.summary : '') });
+      return;
+    }
+    const a = x.address || {}, sup = (x.supervisor || {}).name, site = (x.site_contacts || [])[0];
+    const head = 'JN ' + jn + ' | PO ' + (x.po_full || x.ref || '?') + ' | ' + addrLine(a) + ' | ' + (job.builder || '?') + (sup ? ' (' + sup.split(' ')[0] + ')' : '');
+    const pts = [x.summary && '- ' + x.summary, site && (site.name || site.phone) && '- Site contact ' + [site.name, site.phone].filter(Boolean).join(' '),
+      '- Set up by the filer ' + dm + (isNew ? '' : ' (PO added to JN ' + jn + ')') + ', see the To book item for dates'].filter(Boolean);
+    await td('POST', 'tasks', { project_id: TRACK, section_id: SEC_TRACK_NEW, content: [a.street, a.suburb].filter(Boolean).join(' ') || ('JN ' + jn), description: head + '\n' + pts.join('\n'), labels: ['close-invoiced'] });
+    log('Job tracker card added: JN ' + jn);
   }
 
   // Open To book and check items with no AroFlo link (from before 0.9.43, or made before the task was in the search) get one (20/10).
