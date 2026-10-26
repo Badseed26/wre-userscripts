@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.70
+// @version      0.9.71
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Sonnet and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -31,7 +31,7 @@
   // Live updates (23/10): Tampermonkey only checks for a new version every few hours. This checks the repo's latest commit every
   // 2 min (free when nothing's changed) and keeps the newest code here, so a push runs on the next page load. If the new code needs
   // a permission this install hasn't got, or this browser won't run it, the built in copy below runs like before.
-  const __wreName = "wre-inbox-filer", __wreVer = "0.9.70", __wreHave = new Set(["// @connect api.anthropic.com", "// @connect api.github.com", "// @connect api.todoist.com", "// @connect files.todoist.com", "// @connect production-reportapi.ambrosebuilding.com.au", "// @connect raw.githubusercontent.com", "// @grant GM_deleteValue", "// @grant GM_getValue", "// @grant GM_listValues", "// @grant GM_openInTab", "// @grant GM_registerMenuCommand", "// @grant GM_setValue", "// @grant GM_xmlhttpRequest", "// @grant unsafeWindow", "// @match https://office.aroflo.com/*", "// @match https://outlook.cloud.microsoft/*", "// @match https://outlook.office.com/*", "// @match https://outlook.office365.com/*", "// @run-at document-start"]);
+  const __wreName = "wre-inbox-filer", __wreVer = "0.9.71", __wreHave = new Set(["// @connect api.anthropic.com", "// @connect api.github.com", "// @connect api.todoist.com", "// @connect files.todoist.com", "// @connect production-reportapi.ambrosebuilding.com.au", "// @connect raw.githubusercontent.com", "// @grant GM_deleteValue", "// @grant GM_getValue", "// @grant GM_listValues", "// @grant GM_openInTab", "// @grant GM_registerMenuCommand", "// @grant GM_setValue", "// @grant GM_xmlhttpRequest", "// @grant unsafeWindow", "// @match https://office.aroflo.com/*", "// @match https://outlook.cloud.microsoft/*", "// @match https://outlook.office.com/*", "// @match https://outlook.office365.com/*", "// @run-at document-start"]);
   const __wreInfo0 = typeof GM_info != 'undefined' ? GM_info : null;
   const __wreSay = m => { try { console.log('[WRE live update] ' + __wreName + ': ' + m); } catch (e) {} };
   const __wreCmp = (a, b) => { const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number); for (let i = 0; i < Math.max(x.length, y.length); i++) { const d = (x[i] || 0) - (y[i] || 0); if (d) return d; } return 0; };
@@ -73,7 +73,7 @@
   }
   if (window.top === window.self) { __wreCheck(); setInterval(__wreCheck, 2 * 60e3 + 5000); }
   if (__wreLive()) return;
-  // ---------- the built in copy (src/wre-inbox-filer.js at 0.9.70) ----------
+  // ---------- the built in copy (src/wre-inbox-filer.js at 0.9.71) ----------
 
 (function () {
 'use strict';
@@ -429,6 +429,17 @@ async function keepAwake() {
 }
 const lagTxt = () => { const m = Math.max(0, ...awake.lag.map(x => x[1])); return !awake.lag.length ? '' : m > 10e3 ? ', page timers held back up to ' + Math.round(m / 1000) + 's' : ', page timers ok'; };
 if (IS_FILER) keepAwake();
+// 26/10: the filer only seemed to work with the tab open or freshly refreshed, and the log didn't say why. So each filer tab
+// now logs when it's been out to it: Chrome threw the tab out to save memory (Memory Saver, the page comes back as new),
+// Chrome froze it, or nothing ran for a while (the PC asleep, or the tab frozen without saying). Then the log shows which.
+if (IS_FILER) {
+  const tab = ON_MAIL ? 'Outlook' : 'AroFlo', hmT = t => new Date(t).toLocaleTimeString('en-AU', { hour: 'numeric', minute: '2-digit' });
+  try { if (document.wasDiscarded) log(tab + ' tab was thrown out by Chrome to save memory (Memory Saver) and has just come back'); } catch (e) {}
+  try { document.addEventListener('freeze', () => gset('wfFroze_' + tab, Date.now())); document.addEventListener('resume', () => { const f = gget('wfFroze_' + tab, 0); if (f) log(tab + ' tab was frozen by Chrome from ' + hmT(f) + ' to ' + hmT(Date.now())); gset('wfFroze_' + tab, 0); }); } catch (e) {}
+  let lastBeat = Date.now();
+  setInterval(() => { const t = Date.now(), gap = t - lastBeat; lastBeat = t;
+    if (gap > 3 * 60e3) log(tab + ' tab did nothing from ' + hmT(t - gap) + ' to ' + hmT(t) + ' (' + Math.round(gap / 60e3) + ' min). PC asleep, or Chrome froze the tab'); }, 30e3);
+}
 
 // =====================================================================
 // OUTLOOK SIDE
