@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.69
+// @version      0.9.70
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Sonnet and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -879,6 +879,8 @@ if (ON_AF) {
 
   // Op: Internal Only HTML note (same checks as the house rules' _addNote).
   async function opNote(op) {
+    const opDone = endOp; // 26/10: also runs the dashboard's Note to AroFlo (op anote), which ends in Todoist, not the job queue
+    if (op.op == 'anote' && !(await waitFor(() => new RegExp('\\bJN ' + op.jn + '\\b').test(document.title) && !!document.getElementById('btnAddNoteHTML'), 20000))) return opDone(op, { noteErr: 'landed on "' + document.title.slice(0, 40) + '", not JN ' + op.jn + ', nothing saved' });
     const notesPart = () => { const t = document.body.innerText.replace(/\s+/g, ' '); const i = t.indexOf('Task Notes'), j = t.indexOf('Add Note (Text)'); return i < 0 ? '' : t.slice(i, j > i ? j : i + 400); };
     if (notesPart().includes(op.text.slice(0, 60))) return opDone(op, { note: 'already noted' });
     const b = document.getElementById('btnAddNoteHTML'); if (!b) return opDone(op, { noteErr: 'no Add Note (HTML) button' });
@@ -966,14 +968,14 @@ if (ON_AF) {
     await sleep(1500);
     try {
       if (op.op == 'desc') await opDesc(op); else if (op.op == 'upload') await opUpload(op); else if (op.op == 'note') await opNote(op); else if (op.op == 'create') await opCreate(op);
-      else if (op.op == 'site') await opSite(op);
+      else if (op.op == 'site') await opSite(op); else if (op.op == 'anote') await opNote(op);
       else if (op.op == 'calsrc') { await waitFor(() => !!calSrcNow(), 30000); log(calSrcNow() ? 'Got the calendar settings for the booking plans' : 'Couldn\'t read the calendar settings off the calendar page'); gdel('wfCalSrcWant'); ss('wfOp', null); go(HOME); }
       else ss('wfOp', null);
     } catch (e) { endOp(op, { [op.op + 'Err']: e.message }); }
     return true;
   }
   // A site push isn't an email job, so its end goes to Todoist, not the job queue
-  const endOp = (op, res) => op.op == 'site' ? siteEnd(op, res) : opDone(op, res);
+  const endOp = (op, res) => op.op == 'site' ? siteEnd(op, res) : op.op == 'anote' ? noteEnd(op, res) : opDone(op, res);
   const startOp = (op, href) => { ss('wfOp', op); go(href); };
   // After an op clicks save or create, the page should move on. If it hasn't in 40s (validation message, confirm box, slow save), report what the page says and go home.
   // fields holding more than their box allows: AroFlo's check fails them without a visible message
@@ -1695,6 +1697,56 @@ if (ON_AF) {
     } catch (e) { say('Error: site info JN ' + (p.jn || '?') + ': ' + e.message); return 'failed'; }
   }
 
+  // ---------- Note to AroFlo (Ethan, 26/10) ----------
+  // The dashboard's Note to AroFlo button (on a job's history line) adds an item to WRE follow ups > Errors / to check with
+  // the filer-note label, the tracker header, "NOTE: <text>" and "job: <tracker task id>". The filer puts the text on the task
+  // as an Internal Only HTML note. Worked: a dated "In AroFlo:" comment on the tracker job (the dashboard shows the line as in),
+  // then the item closes. Failed: label off and a "Note push failed" line on top, so it shows up to check.
+  async function noteItems() {
+    let j = null; try { j = await td('GET', 'tasks/filter?query=' + encodeURIComponent('@filer-note') + '&limit=50'); } catch (e) { j = null; }
+    let list = j && Array.isArray(j.results) ? j.results : null;
+    if (!list) list = await sectionTasks(SEC_CHECK);
+    return list.filter(t => t.project_id == FU && (t.labels || []).includes('filer-note') && !t.checked);
+  }
+  const noteParse = t => { const d = String(t.description || ''); const jn = (d.match(/\bJN\s?(\d{4,5})\b/) || d.match(/^\s*(\d{4,5})\s*\|/m) || [])[1] || '';
+    const text = ((d.match(/^NOTE: (.+)$/m) || [])[1] || '').trim(), job = ((d.match(/^job: (\S+)$/m) || [])[1] || '');
+    return { jn, text, job, err: !jn ? 'no JN on it' : !text ? 'no NOTE line' : '' }; };
+  async function noteFail(id, jn, why, say) {
+    (say || log)('Error: AroFlo note ' + (jn ? 'JN ' + jn : '(no JN)') + ': ' + why);
+    const cur = await td('GET', 'tasks/' + id);
+    await td('POST', 'tasks/' + id, { labels: ((cur && cur.labels) || []).filter(l => l != 'filer-note'), description: 'Note push failed (' + siteTm() + '): ' + why + '\n' + String((cur && cur.description) || '').replace(/^Note push failed \(.*(\n|$)/m, '') });
+  }
+  async function noteEnd(op, res) {
+    ss('wfOp', null); const why = res.noteErr;
+    try {
+      if (why) await noteFail(op.task, op.jn, why);
+      else { const tail = res.note === 'already noted' ? ' (already there)' : '';
+        if (op.job) await td('POST', 'comments', { task_id: op.job, content: dmy(new Date()).slice(0, 5) + ': In AroFlo: ' + op.text });
+        await td('POST', 'comments', { task_id: op.task, content: 'Filer put this on JN ' + op.jn + ' as a note' + tail }); await closeFu(op.task);
+        log('Done: note on JN ' + op.jn + ': ' + op.text.slice(0, 60) + tail); }
+    } catch (e) { log('Error: AroFlo note JN ' + op.jn + ': Todoist side failed, ' + e.message); }
+    go(HOME);
+  }
+  // One item a tick. Returns 'op' when it's off to the task page.
+  async function noteToAf(o) {
+    o = o || {}; const say = o.test ? (m => console.log('[WRE filer test]', m)) : log;
+    if (!o.test) { if (now() - gget('wfNoteAt', 0) < 50e3) return; gset('wfNoteAt', now()); }
+    let t; try { t = (await noteItems())[0]; } catch (e) { return; }
+    if (!t) return;
+    const p = noteParse(t);
+    try {
+      if (p.err) { await noteFail(t.id, p.jn, p.err, say); return 'failed'; }
+      const dry = o.test ? !!o.dry : (await rules()).dry;
+      if (dry) { await td('POST', 'comments', { task_id: t.id, content: 'Dry run: would note on JN ' + p.jn + ': ' + p.text }); await td('POST', 'tasks/' + t.id, { labels: (t.labels || []).filter(l => l != 'filer-note') }); say('DRY RUN note JN ' + p.jn + ': ' + p.text); return 'dry'; }
+      const r = await findJn(p.jn);
+      if (!r || !r.href) { await noteFail(t.id, p.jn, 'JN ' + p.jn + ' isn\'t in AroFlo', say); return 'failed'; }
+      if (/Archived/i.test(r.status || '')) { await noteFail(t.id, p.jn, 'JN ' + p.jn + ' is archived, AroFlo won\'t take notes on it', say); return 'failed'; }
+      const op = { op: 'anote', jobId: 'anote-' + t.id, task: t.id, jn: p.jn, text: p.text, job: p.job };
+      if (o.test) return { op };
+      status('note: JN ' + p.jn); startOp(op, r.href); return 'op';
+    } catch (e) { say('Error: AroFlo note JN ' + (p.jn || '?') + ': ' + e.message); return 'failed'; }
+  }
+
   // ---------- phone list for WRE Capture (Ethan, 21/10) ----------
   // Every open job's phone numbers on the * Phone list task, so Capture can place a note or a screenshot of a text by number.
   // Read only on AroFlo, no AI. A full refresh at most hourly, 10 jobs a tick, each job's numbers kept 6 hrs.
@@ -1787,6 +1839,7 @@ if (ON_AF) {
         if (!R.dry) await doubleUps();
         await retries(); await bookings(); await linkTopUp();
         if ((await siteInfo()) == 'op') return; // off to the task's header page
+        if ((await noteToAf()) == 'op') return; // off to the task page for a note
         try { await phones(); } catch (e) { log('Error: phone list: ' + e.message); } // never holds up the rest of the tick
         // the booking plans need the calendar's settings: pop over to the calendar once for them (at most every 30 min)
         if (gget('wfCalSrcWant', 0) && !gget('wfCalSrc', null) && now() - gget('wfCalSrcGo', 0) > 30 * 60e3) { gset('wfCalSrcGo', now()); log('Opening the calendar for its settings (booking plans)'); startOp({ op: 'calsrc', jobId: '' }, '/ims/Site/Calendar/index.cfm?viewfullcalendar=1&tid=IMS.CAL'); return; }
@@ -1804,6 +1857,7 @@ if (ON_AF) {
   // Claude's test runs in its own tab (never the filer tabs): the planner and booking calls, with Todoist going to a stand in.
   if (!IS_FILER) W.wfBook = { check: checkToBook, go: bookings, plan: planItem, book: bookVisit, scheds: taskScheds, cal: calDays, busy: busyOf, slot: findSlot, kind: kindOf, mins: lineMins, src: calSrcNow };
   // and the site push and phone list pieces: run stops short of AroFlo, check does the header page checks without saving
+  if (!IS_FILER) W.wfNote = { find: noteItems, parse: noteParse, run: o => noteToAf(Object.assign({}, o, { test: true })) };
   if (!IS_FILER) W.wfSite = { find: siteItems, parse: siteParse, run: o => siteInfo(Object.assign({}, o, { test: true })), check: op => opSite(Object.assign({}, op, { test: true })) };
   if (!IS_FILER) W.wfPhones = { jns: phoneJns, of: phonesOf, nums: numsOf, norm: phoneNorm, text: phoneText, run: phones };
   const boot = async () => {
