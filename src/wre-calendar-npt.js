@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Calendar NPT
 // @namespace    wre
-// @version      3.2.1
+// @version      3.2.2
 // @description  Notes, photos and timesheet badges on the AroFlo calendar for the days in view, kept in step with the WRE daily check issue list in Todoist, plus an A letter on Ambrose jobs for photos or the report being up on Ambrose
 // @match        https://office.aroflo.com/ims/Site/Calendar/*
 // @match        https://tradiesadmin.ambroseconstruct.com.au/*
@@ -664,6 +664,31 @@
     return (tdState = { at: now, open, done, aOpen, aDone, acache, acacheId, acacheAt });
   }
 
+  // 26/10: a visit moved to someone else (8 Meadow Way, Lachie's 23/10 went to Pearce) left the old person's issue sitting
+  // there forever, since only visits in view get rechecked. Now an open issue for a day in view, where that task is still
+  // on the calendar but that person isn't booked on it that day any more, gets a comment and ticked off.
+  async function movedOff(L, today) {
+    let n = 0;
+    try {
+      const v = cal.fullCalendar('getView'), d0 = v.intervalStart || v.visStart || v.start, d1 = v.intervalEnd || v.visEnd || v.end;
+      if (!d0 || !d1) return 0;
+      const from = ymd(new Date(+d0)), to = ymd(new Date(+d1 - 1));
+      const evs = cal.fullCalendar('clientEvents').filter(e => e.type === 'task' && !isCancel(e));
+      const dayHas = {}, booked = new Set(), onTask = {};
+      evs.forEach(e => { const dt = ymd(new Date(e.start)); dayHas[dt] = true; booked.add(e.wrid + '|' + dt + '|' + e.resourcename); (onTask[e.wrid] = onTask[e.wrid] || new Set()).add(dt); });
+      for (const [k, ex] of [...L.open]) {
+        const [wrid, date, who] = k.split('|');
+        if (date < from || date > to || date >= today || !dayHas[date]) continue; // that day isn't loaded on screen
+        if (!onTask[wrid] || booked.has(k)) continue;                             // task not in view, or still theirs
+        const now = [...evs].filter(e => e.wrid == wrid && ymd(new Date(e.start)) === date).map(e => nick(e.resourcename));
+        await td('POST', 'comments', { task_id: ex.id, content: dmS(today) + ': ' + nick(who) + ' isn\'t booked on this one that day any more' + (now.length ? ' (it\'s ' + listed([...new Set(now)]) + ' now)' : '') + ', ticked off' });
+        await td('POST', 'tasks/' + ex.id + '/close');
+        L.open.delete(k); L.done.set(k, ex); n++;
+      }
+    } catch (e) { if (/token/.test(e.message)) throw e; }
+    return n;
+  }
+
   async function sync() {
     if (!token() || paused()) return;
     if (syncing || busyOk) { syncAgain = true; return; } // never runs alongside an OK being saved
@@ -687,6 +712,7 @@
       });
       if (all.some(v => isAmb(v.ev))) setTimeout(ambSync, 0);
       if (!want.size) {
+        if (tdState && tdState.open.size) { const c = await movedOff(await loadList(), today); if (c) sy.msg = 'list ' + hm(Date.now()) + ' (' + c + ' ticked off)'; }
         if (/token saved/.test(sy.msg)) { await loadList(); sy.bad = false; sy.msg = 'list on ' + hm(Date.now()); } // proves the token works
         return;
       }
@@ -721,6 +747,7 @@
           L.open.delete(k); L.done.set(k, ex); closed++;
         }
       }
+      closed += await movedOff(L, today);
       sy.bad = false;
       sy.msg = 'list ' + hm(Date.now()) + (added || changed || closed ? ' (' + [added && added + ' added', changed && changed + ' updated', closed && closed + ' ticked off'].filter(Boolean).join(', ') + ')' : '');
     } catch (e) {
