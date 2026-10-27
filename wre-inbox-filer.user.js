@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.73
+// @version      0.9.74
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Sonnet and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -31,7 +31,7 @@
   // Live updates (23/10): Tampermonkey only checks for a new version every few hours. This checks the repo's latest commit every
   // 2 min (free when nothing's changed) and keeps the newest code here, so a push runs on the next page load. If the new code needs
   // a permission this install hasn't got, or this browser won't run it, the built in copy below runs like before.
-  const __wreName = "wre-inbox-filer", __wreVer = "0.9.73", __wreHave = new Set(["// @connect api.anthropic.com", "// @connect api.github.com", "// @connect api.todoist.com", "// @connect files.todoist.com", "// @connect production-reportapi.ambrosebuilding.com.au", "// @connect raw.githubusercontent.com", "// @grant GM_deleteValue", "// @grant GM_getValue", "// @grant GM_listValues", "// @grant GM_openInTab", "// @grant GM_registerMenuCommand", "// @grant GM_setValue", "// @grant GM_xmlhttpRequest", "// @grant unsafeWindow", "// @match https://office.aroflo.com/*", "// @match https://outlook.cloud.microsoft/*", "// @match https://outlook.office.com/*", "// @match https://outlook.office365.com/*", "// @run-at document-start"]);
+  const __wreName = "wre-inbox-filer", __wreVer = "0.9.74", __wreHave = new Set(["// @connect api.anthropic.com", "// @connect api.github.com", "// @connect api.todoist.com", "// @connect files.todoist.com", "// @connect production-reportapi.ambrosebuilding.com.au", "// @connect raw.githubusercontent.com", "// @grant GM_deleteValue", "// @grant GM_getValue", "// @grant GM_listValues", "// @grant GM_openInTab", "// @grant GM_registerMenuCommand", "// @grant GM_setValue", "// @grant GM_xmlhttpRequest", "// @grant unsafeWindow", "// @match https://office.aroflo.com/*", "// @match https://outlook.cloud.microsoft/*", "// @match https://outlook.office.com/*", "// @match https://outlook.office365.com/*", "// @run-at document-start"]);
   const __wreInfo0 = typeof GM_info != 'undefined' ? GM_info : null;
   const __wreSay = m => { try { console.log('[WRE live update] ' + __wreName + ': ' + m); } catch (e) {} };
   const __wreCmp = (a, b) => { const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number); for (let i = 0; i < Math.max(x.length, y.length); i++) { const d = (x[i] || 0) - (y[i] || 0); if (d) return d; } return 0; };
@@ -73,7 +73,7 @@
   }
   if (window.top === window.self) { __wreCheck(); setInterval(__wreCheck, 2 * 60e3 + 5000); }
   if (__wreLive()) return;
-  // ---------- the built in copy (src/wre-inbox-filer.js at 0.9.73) ----------
+  // ---------- the built in copy (src/wre-inbox-filer.js at 0.9.74) ----------
 
 (function () {
 'use strict';
@@ -498,7 +498,10 @@ if (ON_MAIL) {
     W.XMLHttpRequest.prototype.send = function () { this.addEventListener('load', () => { try { const ct = this.getResponseHeader('content-type') || ''; if (want(ct) && this.response instanceof W.Blob) { const part = this.status == 206 || !!this.getResponseHeader('content-range'); if (part && catching == 'pdf') lastPart = { input: this.__wfU, init: { headers: this.__wfH }, at: now() }; keep(this.response, now(), part); } } catch (e) {} }); return os.apply(this, arguments); };
   }
 
-  const rowsNow = () => [...document.querySelectorAll('div[role=option][data-convid]')];
+  // 27/10: Ethan could see the new mail on screen while the filer did nothing till a refresh. In case Outlook keeps an old copy
+  // of the list in the page as well, only rows that are actually laid out count (all of them if none are).
+  const rowsAll = () => [...document.querySelectorAll('div[role=option][data-convid]')];
+  const rowsNow = () => { const a = rowsAll(), v = a.filter(el => el.getClientRects().length > 0); return v.length ? v : a; };
   const waitFor = (cond, max) => new Promise(res => { if (cond()) return res(true); let done = false; const mo = new MutationObserver(() => { if (!done && cond()) { done = true; mo.disconnect(); res(true); } }); mo.observe(document.body, { subtree: true, childList: true, attributes: true, characterData: true }); later(() => { if (!done) { done = true; mo.disconnect(); res(cond()); } }, max); });
   const FL = ['Unread', 'Has attachments', 'Flagged', 'Pinned', 'Replied', 'Forwarded', 'Important', 'Meeting request'];
   const TM = / ((?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{1,2}:\d{2} [AP]M|\d{1,2}:\d{2} [AP]M|(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun) \d{2}-\d{2}|\d{1,2}\/\d{1,2}\/\d{4}|\d{4}-\d{2}-\d{2}) /;
@@ -668,7 +671,7 @@ if (ON_MAIL) {
     return await finishPending();
   }
 
-  let busy = false, reloading = false, testing = false, lastInput = 0;
+  let busy = false, reloading = false, testing = false, lastInput = 0, busyAt = 0, lastScan = 0, reloadAt = 0;
   const loadedAt = now(), tm = t => new Date(t).toLocaleTimeString('en-AU', { hour: 'numeric', minute: '2-digit' });
   ['mousedown', 'keydown', 'wheel', 'touchstart'].forEach(ev => document.addEventListener(ev, e => { if (e.isTrusted) lastInput = now(); }, true));
   // 23/10: the list froze again with the 30 min reload in, so the newest email it could see sat at the morning till Ethan
@@ -678,7 +681,7 @@ if (ON_MAIL) {
   // "Leave site?" box), it loads the mail page fresh from its address instead.
   const reloadDue = () => { if (reloading || testing || now() - loadedAt < 30 * 60e3 || now() - lastInput < 2 * 60e3) return false; const P = gget('wfPending', null); return !(P && now() - (P.at || 0) < 10 * 60e3); };
   const freshLoad = () => location.replace(location.origin + '/mail/?wfr=' + now() + '#wre-filer');
-  const reloadNow = why => { if (reloading) return; reloading = true; status('reloading (' + why + ')'); gset('wfMailPass', now()); gset('wfPreReload', { at: now(), why, newest: gget('wfNewest', 0) });
+  const reloadNow = why => { if (reloading) return; reloading = true; reloadAt = now(); status('reloading (' + why + ')'); gset('wfMailPass', now()); gset('wfPreReload', { at: now(), why, newest: gget('wfNewest', 0) });
     later(() => { log('Outlook tab didn\'t reload (' + why + ') in 90 s, loading it fresh'); freshLoad(); }, 90e3); location.reload(); };
   // After a reload: the newest email is still the same one, over 3 hours old in work hours. Outlook may have loaded an old copy of
   // the list, so load the mail page fresh from its address, once for that email, and say so in the log either way (23/10).
@@ -690,7 +693,7 @@ if (ON_MAIL) {
     return false;
   }
   async function scan() {
-    if (busy || reloading || !IS_FILER) return; busy = true;
+    if (busy || reloading || !IS_FILER) return; busy = true; busyAt = now(); lastScan = now();
     try {
       if (await finishPending()) return;
       { const P1 = gget('wfPending', null); if (P1 && now() - (P1.at || 0) < 5 * 60e3) { status('a read is still going in another tab'); return; } }
@@ -781,6 +784,22 @@ if (ON_MAIL) {
     // see (19/10: the Outlook tab went quiet after a reload at 3:28 pm and missed Jai's PO). Reload it and say so.
     gset('wfMailPass', now());
     every(() => { if (reloading || gget('wfPending', null) || now() - gget('wfMailPass', 0) < 10 * 60e3) return; log('Outlook tab hasn\'t got through the list in 10 min (chip said: ' + (gget('wfState_mail', {}).msg || '?') + '), reloading it'); reloadNow('stuck 10 min'); }, 60e3);
+    // 27/10 heartbeat: every 10 min, what this tab actually sees, so a stuck tab shows in the log with the reason, not just
+    // silence. Rows = laid out / in the page, the newest time in each, and anything holding the scan back.
+    const newestIn = list => { let nw = 0; list.slice(0, 15).forEach(el => { const p = parse(el.getAttribute('aria-label') || ''); if (p.pinned) return; const t = rowTime(p.when); if (t && t.getTime() > nw) nw = t.getTime(); }); return nw; };
+    every(() => {
+      const all = rowsAll(), vis = rowsNow(), P = gget('wfPending', null), lk = gget('wfMailLock', null), nv = newestIn(vis), na = newestIn(all);
+      const bits = ['rows ' + vis.length + '/' + all.length, 'newest seen ' + (nv ? tm(nv) : 'none') + (na != nv ? ' (whole page ' + (na ? tm(na) : 'none') + ')' : ''),
+        'last scan ' + (lastScan ? Math.round((now() - lastScan) / 60e3) + ' min ago' : 'never'), busy ? 'BUSY ' + Math.round((now() - busyAt) / 60e3) + ' min' : '', reloading ? 'RELOADING ' + Math.round((now() - reloadAt) / 60e3) + ' min' : '',
+        P ? 'read pending ' + Math.round((now() - (P.at || 0)) / 60e3) + ' min' : '', lk && lk.tab !== tabId() && now() - lk.at < 90e3 ? 'ANOTHER OUTLOOK FILER TAB has the lock' : '', testing ? 'TEST' : '', 'page ' + tm(loadedAt), document.hasFocus() ? 'in front' : 'behind'];
+      // only when something looks off, or once an hour, so it doesn't push everything else off the log
+      const odd = busy || reloading || (P && now() - (P.at || 0) > 10 * 60e3) || (lk && lk.tab !== tabId() && now() - lk.at < 90e3) || na != nv || (lastScan && now() - lastScan > 5 * 60e3) || (nv && workHrs() && now() - nv > 45 * 60e3);
+      if (odd || now() - gget('wfHbAt', 0) > 60 * 60e3) { gset('wfHbAt', now()); log('Heartbeat: ' + bits.filter(Boolean).join(', ')); }
+      // a scan stuck over 5 min (something it waited on never came back): let go so the next one runs
+      if (busy && !testing && now() - busyAt > 5 * 60e3) { log('Scan stuck ' + Math.round((now() - busyAt) / 60e3) + ' min, letting go of it'); busy = false; }
+      // a reload that never happened (over 3 min): load the mail page fresh
+      if (reloading && now() - reloadAt > 3 * 60e3) { log('Reload never happened, loading the mail page fresh'); freshLoad(); }
+    }, 10 * 60e3);
   };
   if (document.readyState == 'loading') document.addEventListener('DOMContentLoaded', boot); else boot();
 }
