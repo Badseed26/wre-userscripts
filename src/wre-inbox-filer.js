@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.72
+// @version      0.9.73
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Sonnet and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -360,6 +360,18 @@ if (IS_FILER) { try { const ael = W.EventTarget.prototype.addEventListener; W.Ev
 // The filer's Outlook tab now always tells Outlook it's on screen. Only that tab, nothing else changes.
 if (IS_FILER && ON_MAIL) { try {
   const D = W.Document.prototype;
+  // 27/10 pm: the visibility fix alone didn't do it. The newest email it could see sat at 1:33 pm all afternoon, through its own
+  // reloads, till Ethan refreshed at 4:49 pm. Chrome doesn't draw a background tab at all (no animation frames), and Outlook
+  // only puts new mail into the list on a frame, so the list never changed. While the tab's really in the background, frames
+  // now run off a 50 ms timer instead (the WebRTC link keeps those timers going), so Outlook keeps drawing new mail in.
+  const realHidden = (Object.getOwnPropertyDescriptor(D, 'hidden') || {}).get;
+  const isHidden = () => { try { return realHidden ? realHidden.call(W.document) : false; } catch (e) { return false; } };
+  const rAF = W.requestAnimationFrame && W.requestAnimationFrame.bind(W), cAF = W.cancelAnimationFrame && W.cancelAnimationFrame.bind(W);
+  const st = W.setTimeout.bind(W), ct = W.clearTimeout.bind(W);
+  if (rAF) {
+    W.requestAnimationFrame = cb => { if (!isHidden()) return rAF(cb); return -st(() => { try { cb(W.performance.now()); } catch (e) { st(() => { throw e; }); } }, 50); };
+    W.cancelAnimationFrame = id => (id < 0 ? ct(-id) : cAF(id));
+  }
   Object.defineProperty(D, 'hidden', { configurable: true, get: () => false });
   Object.defineProperty(D, 'visibilityState', { configurable: true, get: () => 'visible' });
   Object.defineProperty(D, 'webkitHidden', { configurable: true, get: () => false });
@@ -661,6 +673,7 @@ if (ON_MAIL) {
       }
       // newest email in the list, any sender: the dashboard flags it when it's gone stale in work hours (22/10)
       { let nw = 0; rowsNow().slice(0, 15).forEach(el => { const p = parse(el.getAttribute('aria-label')); if (p.pinned) return; const t = rowTime(p.when); if (t && t.getTime() > nw) nw = t.getTime(); }); if (nw) gset('wfNewest', nw);
+        if (nw && workHrs() && now() - nw > 60 * 60e3 && gget('wfStaleLog', 0) != nw) { gset('wfStaleLog', nw); log('Nothing newer than ' + tm(nw) + ' in the list for an hour (page loaded ' + tm(loadedAt) + '). Quiet inbox, or Outlook not drawing new mail'); }
         const pre = gget('wfPreReload', null); if (pre && pre.at < loadedAt) { gdel('wfPreReload'); if (afterReload(pre, nw)) return; } }
       gset('wfMailPass', now()); // a full pass got through the list (the watchdog in boot reloads the tab if none has in 10 min)
       if (looked && !timed) status('rows have no times, can\'t tell what\'s new. First row: ' + ((rowsNow()[0] || {}).getAttribute ? rowsNow()[0].getAttribute('aria-label') : '').slice(0, 60), true);
