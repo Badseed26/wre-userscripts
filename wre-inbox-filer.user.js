@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.71
+// @version      0.9.72
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Sonnet and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -31,7 +31,7 @@
   // Live updates (23/10): Tampermonkey only checks for a new version every few hours. This checks the repo's latest commit every
   // 2 min (free when nothing's changed) and keeps the newest code here, so a push runs on the next page load. If the new code needs
   // a permission this install hasn't got, or this browser won't run it, the built in copy below runs like before.
-  const __wreName = "wre-inbox-filer", __wreVer = "0.9.71", __wreHave = new Set(["// @connect api.anthropic.com", "// @connect api.github.com", "// @connect api.todoist.com", "// @connect files.todoist.com", "// @connect production-reportapi.ambrosebuilding.com.au", "// @connect raw.githubusercontent.com", "// @grant GM_deleteValue", "// @grant GM_getValue", "// @grant GM_listValues", "// @grant GM_openInTab", "// @grant GM_registerMenuCommand", "// @grant GM_setValue", "// @grant GM_xmlhttpRequest", "// @grant unsafeWindow", "// @match https://office.aroflo.com/*", "// @match https://outlook.cloud.microsoft/*", "// @match https://outlook.office.com/*", "// @match https://outlook.office365.com/*", "// @run-at document-start"]);
+  const __wreName = "wre-inbox-filer", __wreVer = "0.9.72", __wreHave = new Set(["// @connect api.anthropic.com", "// @connect api.github.com", "// @connect api.todoist.com", "// @connect files.todoist.com", "// @connect production-reportapi.ambrosebuilding.com.au", "// @connect raw.githubusercontent.com", "// @grant GM_deleteValue", "// @grant GM_getValue", "// @grant GM_listValues", "// @grant GM_openInTab", "// @grant GM_registerMenuCommand", "// @grant GM_setValue", "// @grant GM_xmlhttpRequest", "// @grant unsafeWindow", "// @match https://office.aroflo.com/*", "// @match https://outlook.cloud.microsoft/*", "// @match https://outlook.office.com/*", "// @match https://outlook.office365.com/*", "// @run-at document-start"]);
   const __wreInfo0 = typeof GM_info != 'undefined' ? GM_info : null;
   const __wreSay = m => { try { console.log('[WRE live update] ' + __wreName + ': ' + m); } catch (e) {} };
   const __wreCmp = (a, b) => { const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number); for (let i = 0; i < Math.max(x.length, y.length); i++) { const d = (x[i] || 0) - (y[i] || 0); if (d) return d; } return 0; };
@@ -73,7 +73,7 @@
   }
   if (window.top === window.self) { __wreCheck(); setInterval(__wreCheck, 2 * 60e3 + 5000); }
   if (__wreLive()) return;
-  // ---------- the built in copy (src/wre-inbox-filer.js at 0.9.71) ----------
+  // ---------- the built in copy (src/wre-inbox-filer.js at 0.9.72) ----------
 
 (function () {
 'use strict';
@@ -406,6 +406,19 @@ const IS_FILER = (() => { try { return sessionStorage.getItem('wfRole') === '1';
 // A "Leave site?" box stops the filer's own reloads dead and the tab sits there for hours. The filer tabs are only for the
 // filer, so the page doesn't get to ask (23/10).
 if (IS_FILER) { try { const ael = W.EventTarget.prototype.addEventListener; W.EventTarget.prototype.addEventListener = function (t, f, o) { if (t === 'beforeunload' && (this === W || this === window)) return; return ael.call(this, t, f, o); }; Object.defineProperty(W, 'onbeforeunload', { configurable: true, get: () => null, set: () => {} }); } catch (e) {} }
+// 27/10: still only filing after a refresh, with Memory Saver off and the tab never asleep. Outlook's own code holds off
+// syncing the mail list while its tab is hidden, so new mail didn't land in the list till the tab was on screen or reloaded.
+// The filer's Outlook tab now always tells Outlook it's on screen. Only that tab, nothing else changes.
+if (IS_FILER && ON_MAIL) { try {
+  const D = W.Document.prototype;
+  Object.defineProperty(D, 'hidden', { configurable: true, get: () => false });
+  Object.defineProperty(D, 'visibilityState', { configurable: true, get: () => 'visible' });
+  Object.defineProperty(D, 'webkitHidden', { configurable: true, get: () => false });
+  Object.defineProperty(D, 'webkitVisibilityState', { configurable: true, get: () => 'visible' });
+  const ael2 = W.EventTarget.prototype.addEventListener;
+  W.EventTarget.prototype.addEventListener = function (t, f, o) { if ((t === 'visibilitychange' || t === 'webkitvisibilitychange') && (this === W.document || this === W || this === document || this === window)) return; return ael2.call(this, t, f, o); };
+  Object.defineProperty(W.document, 'onvisibilitychange', { configurable: true, get: () => null, set: () => {} });
+} catch (e) {} }
 
 // Chrome holds a tab that's been hidden 5 min to waking its timers once a minute, unless the tab is using WebRTC. So each
 // filer tab keeps a tiny WebRTC link to itself: nothing leaves the PC, it's only in the two filer tabs, and Chrome's settings
@@ -695,7 +708,7 @@ if (ON_MAIL) {
         if (s[rk]) continue;
         if (!senderOf(p.head, R)) continue;
         if (SKIP_SUBJ.test(p.head)) { markSeen(rk); continue; }
-        log('New: ' + p.head.slice(0, 80)); const r = await takeOne(el, R, false); if (!reloading) later(scan, r ? 1500 : 5000); return;
+        log('New: ' + p.head.slice(0, 80) + ' (came in ' + tm(t) + ', ' + Math.max(0, Math.round((now() - t.getTime()) / 60e3)) + ' min ago, page loaded ' + tm(loadedAt) + ')'); const r = await takeOne(el, R, false); if (!reloading) later(scan, r ? 1500 : 5000); return;
       }
       // newest email in the list, any sender: the dashboard flags it when it's gone stale in work hours (22/10)
       { let nw = 0; rowsNow().slice(0, 15).forEach(el => { const p = parse(el.getAttribute('aria-label')); if (p.pinned) return; const t = rowTime(p.when); if (t && t.getTime() > nw) nw = t.getTime(); }); if (nw) gset('wfNewest', nw);
