@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.76
+// @version      0.9.77
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Sonnet and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -793,6 +793,8 @@ function buddyCheck() {
 // AROFLO SIDE
 // =====================================================================
 if (ON_AF) {
+  // 28/10: the AroFlo filer tab's title starts with [WRE filer AF] so the WRE Filer launcher (AutoHotkey) can find its window
+  if (IS_FILER) { const markAf = () => { if (!document.title.startsWith('[WRE filer AF] ')) document.title = '[WRE filer AF] ' + document.title.replace(/^\[WRE filer AF\]\s*/, ''); }; every(markAf, 2e3); markAf(); }
   const waitFor = (cond, max) => new Promise(res => { if (cond()) return res(true); let done = false; const mo = new MutationObserver(() => { if (!done && cond()) { done = true; mo.disconnect(); res(true); } }); mo.observe(document.documentElement, { subtree: true, childList: true, attributes: true }); later(() => { if (!done) { done = true; mo.disconnect(); res(cond()); } }, max); });
   const jq = () => W.jQuery;
   // Task search: the dashboard's own Search Tasks form, no page load. field = JobNo | CustOn | Location | Desc | Client
@@ -854,7 +856,7 @@ if (ON_AF) {
   // Op: description. mode 'set' (new task with TBC) or 'append' (another PO under the existing description).
   async function opDesc(op) {
     if (!op.saved) {
-      if (!/^Edit - JN/.test(document.title) && !(await waitFor(() => /^Edit - JN/.test(document.title), 20000))) return opDone(op, { descErr: 'header page did not open' });
+      if (!/^(?:\[WRE filer AF\] )?Edit - JN/.test(document.title) && !(await waitFor(() => /^(?:\[WRE filer AF\] )?Edit - JN/.test(document.title), 20000))) return opDone(op, { descErr: 'header page did not open' });
       if (!(await ckReady('description'))) return opDone(op, { descErr: 'editor not ready' });
       const ed = W.CKEDITOR.instances.description; const old = ed.getData(); const f0 = hdrFields();
       if (op.mode == 'set' && plain(old) && plain(old) != 'TBC') return opDone(op, { descErr: 'description already has text, left it' });
@@ -876,7 +878,7 @@ if (ON_AF) {
   // top, nothing else in the description or header changes. op.test (Claude's own tab) does the checks, puts it back and saves nothing.
   async function opSite(op) {
     if (!op.saved) {
-      if (!/^Edit - JN/.test(document.title) && !(await waitFor(() => /^Edit - JN/.test(document.title), 20000))) return siteEnd(op, { err: 'header page did not open' });
+      if (!/^(?:\[WRE filer AF\] )?Edit - JN/.test(document.title) && !(await waitFor(() => /^(?:\[WRE filer AF\] )?Edit - JN/.test(document.title), 20000))) return siteEnd(op, { err: 'header page did not open' });
       if (!new RegExp('\\bJN ' + op.jn + '\\b').test(document.title)) return siteEnd(op, { err: 'landed on "' + document.title.slice(0, 40) + '", not JN ' + op.jn + ', nothing saved' });
       if (!(await ckReady('description'))) return siteEnd(op, { err: 'editor not ready' });
       const ed = W.CKEDITOR.instances.description; const old = ed.getData(); const f0 = hdrFields();
