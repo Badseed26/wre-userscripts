@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.74
+// @version      0.9.75
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Sonnet and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -31,7 +31,7 @@
   // Live updates (23/10): Tampermonkey only checks for a new version every few hours. This checks the repo's latest commit every
   // 2 min (free when nothing's changed) and keeps the newest code here, so a push runs on the next page load. If the new code needs
   // a permission this install hasn't got, or this browser won't run it, the built in copy below runs like before.
-  const __wreName = "wre-inbox-filer", __wreVer = "0.9.74", __wreHave = new Set(["// @connect api.anthropic.com", "// @connect api.github.com", "// @connect api.todoist.com", "// @connect files.todoist.com", "// @connect production-reportapi.ambrosebuilding.com.au", "// @connect raw.githubusercontent.com", "// @grant GM_deleteValue", "// @grant GM_getValue", "// @grant GM_listValues", "// @grant GM_openInTab", "// @grant GM_registerMenuCommand", "// @grant GM_setValue", "// @grant GM_xmlhttpRequest", "// @grant unsafeWindow", "// @match https://office.aroflo.com/*", "// @match https://outlook.cloud.microsoft/*", "// @match https://outlook.office.com/*", "// @match https://outlook.office365.com/*", "// @run-at document-start"]);
+  const __wreName = "wre-inbox-filer", __wreVer = "0.9.75", __wreHave = new Set(["// @connect api.anthropic.com", "// @connect api.github.com", "// @connect api.todoist.com", "// @connect files.todoist.com", "// @connect production-reportapi.ambrosebuilding.com.au", "// @connect raw.githubusercontent.com", "// @grant GM_deleteValue", "// @grant GM_getValue", "// @grant GM_listValues", "// @grant GM_openInTab", "// @grant GM_registerMenuCommand", "// @grant GM_setValue", "// @grant GM_xmlhttpRequest", "// @grant unsafeWindow", "// @match https://office.aroflo.com/*", "// @match https://outlook.cloud.microsoft/*", "// @match https://outlook.office.com/*", "// @match https://outlook.office365.com/*", "// @run-at document-start"]);
   const __wreInfo0 = typeof GM_info != 'undefined' ? GM_info : null;
   const __wreSay = m => { try { console.log('[WRE live update] ' + __wreName + ': ' + m); } catch (e) {} };
   const __wreCmp = (a, b) => { const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number); for (let i = 0; i < Math.max(x.length, y.length); i++) { const d = (x[i] || 0) - (y[i] || 0); if (d) return d; } return 0; };
@@ -73,7 +73,7 @@
   }
   if (window.top === window.self) { __wreCheck(); setInterval(__wreCheck, 2 * 60e3 + 5000); }
   if (__wreLive()) return;
-  // ---------- the built in copy (src/wre-inbox-filer.js at 0.9.74) ----------
+  // ---------- the built in copy (src/wre-inbox-filer.js at 0.9.75) ----------
 
 (function () {
 'use strict';
@@ -409,6 +409,8 @@ if (IS_FILER) { try { const ael = W.EventTarget.prototype.addEventListener; W.Ev
 // 27/10: still only filing after a refresh, with Memory Saver off and the tab never asleep. Outlook's own code holds off
 // syncing the mail list while its tab is hidden, so new mail didn't land in the list till the tab was on screen or reloaded.
 // The filer's Outlook tab now always tells Outlook it's on screen. Only that tab, nothing else changes.
+// Whether the tab is really behind (the page itself is told it's on screen, below). Grabbed before that's changed.
+const reallyHidden = (() => { let g = null; try { g = (Object.getOwnPropertyDescriptor(W.Document.prototype, 'hidden') || {}).get; } catch (e) {} return () => { try { return g ? g.call(W.document) : false; } catch (e) { return false; } }; })();
 if (IS_FILER && ON_MAIL) { try {
   const D = W.Document.prototype;
   // 27/10 pm: the visibility fix alone didn't do it. The newest email it could see sat at 1:33 pm all afternoon, through its own
@@ -671,7 +673,9 @@ if (ON_MAIL) {
     return await finishPending();
   }
 
-  let busy = false, reloading = false, testing = false, lastInput = 0, busyAt = 0, lastScan = 0, reloadAt = 0;
+  let busy = false, reloading = false, testing = false, lastInput = 0, busyAt = 0, lastScan = 0, reloadAt = 0, noRowsLogged = false;
+  // the moment the tab comes on screen with no list drawn, reload it there and then, so clicking the tab is all it takes
+  every(() => { if (IS_FILER && !reloading && !reallyHidden() && !rowsAll().length && now() - loadedAt > 45e3 && !gget('wfPending', null) && now() - gget('wfNoRowsReload', 0) > 5 * 60e3) { gset('wfNoRowsReload', now()); reloading = true; log('Tab is on screen with no list drawn, reloading it'); location.reload(); } }, 5e3);
   const loadedAt = now(), tm = t => new Date(t).toLocaleTimeString('en-AU', { hour: 'numeric', minute: '2-digit' });
   ['mousedown', 'keydown', 'wheel', 'touchstart'].forEach(ev => document.addEventListener(ev, e => { if (e.isTrusted) lastInput = now(); }, true));
   // 23/10: the list froze again with the 30 min reload in, so the newest email it could see sat at the morning till Ethan
@@ -679,9 +683,12 @@ if (ON_MAIL) {
   // queue, the tab counting as in use while it's only on screen). Now it only waits for a read under way (10 min at most), a
   // test going in this tab, or you clicking or typing in the tab in the last 2 min. If the page doesn't go within 90 s (a
   // "Leave site?" box), it loads the mail page fresh from its address instead.
-  const reloadDue = () => { if (reloading || testing || now() - loadedAt < 30 * 60e3 || now() - lastInput < 2 * 60e3) return false; const P = gget('wfPending', null); return !(P && now() - (P.at || 0) < 10 * 60e3); };
+  // 28/10, from the heartbeat: every reload the filer did while the tab was behind came back with 0 rows. Chrome doesn't draw a
+  // tab that's behind, so Outlook never builds the list, and the filer sat there saying watching with nothing to look at. A load
+  // with the tab on screen always worked. So the timed reloads (every 30 min, stuck, fresh load) only happen while it's on screen.
+  const reloadDue = () => { if (reallyHidden()) return false; if (reloading || testing || now() - loadedAt < 30 * 60e3 || now() - lastInput < 2 * 60e3) return false; const P = gget('wfPending', null); return !(P && now() - (P.at || 0) < 10 * 60e3); };
   const freshLoad = () => location.replace(location.origin + '/mail/?wfr=' + now() + '#wre-filer');
-  const reloadNow = why => { if (reloading) return; reloading = true; reloadAt = now(); status('reloading (' + why + ')'); gset('wfMailPass', now()); gset('wfPreReload', { at: now(), why, newest: gget('wfNewest', 0) });
+  const reloadNow = why => { if (reloading) return; if (reallyHidden()) { status('reload waiting till this tab is on screen (' + why + ')'); return; } reloading = true; reloadAt = now(); status('reloading (' + why + ')'); gset('wfMailPass', now()); gset('wfPreReload', { at: now(), why, newest: gget('wfNewest', 0) });
     later(() => { log('Outlook tab didn\'t reload (' + why + ') in 90 s, loading it fresh'); freshLoad(); }, 90e3); location.reload(); };
   // After a reload: the newest email is still the same one, over 3 hours old in work hours. Outlook may have loaded an old copy of
   // the list, so load the mail page fresh from its address, once for that email, and say so in the log either way (23/10).
@@ -709,6 +716,9 @@ if (ON_MAIL) {
       const start = gget('wfStartAt', now());
       await exitSearch();
       if (!(await goInbox())) { status('can\'t find the Inbox', true); return; }
+      if (!rowsAll().length) { // nothing drawn: say so in red, and on the log once a page load
+        if (!noRowsLogged) { noRowsLogged = true; log('Outlook hasn\'t drawn the mail list (page loaded ' + tm(loadedAt) + ' with the tab behind). Nothing can be filed till this tab is on screen'); }
+        status('mail list not drawn. Click this tab, or keep it in its own window that\'s showing', true); return; }
       scrollTop();
       { const rr = gget('wfReread', []).filter(x => now() - x.at < 15 * 60e3), sp = v => String(v).replace(/\s+/g, ' ').toLowerCase();
         if (rr.length) { let again = null; const el = await findRowDeep(o => { const p = parse(o.getAttribute('aria-label')); if (p.pinned) return false; again = rr.find(x => sp(p.head).includes(sp(x.head))); return !!again; });
