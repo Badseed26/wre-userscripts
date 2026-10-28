@@ -1,5 +1,5 @@
 ; WRE Filer (AutoHotkey v2)
-; Version 1.0
+; Version 1.1
 ; One click starts the Inbox Filer: opens the Outlook and AroFlo filer tabs in their own Chrome windows and parks both out of
 ; the way. Chrome stops drawing a window that's minimised or covered, and then Outlook never builds the mail list (28/10), so
 ; each window sits in a corner of the screen with only a few pixels showing, pinned on top. Chrome counts them as on screen.
@@ -20,7 +20,8 @@ TABS := [
 ]
 INI := A_Temp "\wre-filer.ini"   ; the two windows, so a restart of this script takes them back instead of opening more
 SHOW := 4                        ; pixels left on screen each way
-W := 900, H := 700               ; each window's real size (mostly off screen), big enough for a proper mail list
+W := 1700, H := 1050             ; each window's real size (mostly off screen). 1.1: 900 wide folded Outlook's folder list away
+                                 ; (29/10), so it's wide enough now for Outlook's full layout even with Windows scaling up
 parked := true
 
 ; Stop WRE Filer shortcut runs this with "stop"

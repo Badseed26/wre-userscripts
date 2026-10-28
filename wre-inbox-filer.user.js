@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.77
+// @version      0.9.78
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Sonnet and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -31,7 +31,7 @@
   // Live updates (23/10): Tampermonkey only checks for a new version every few hours. This checks the repo's latest commit every
   // 2 min (free when nothing's changed) and keeps the newest code here, so a push runs on the next page load. If the new code needs
   // a permission this install hasn't got, or this browser won't run it, the built in copy below runs like before.
-  const __wreName = "wre-inbox-filer", __wreVer = "0.9.77", __wreHave = new Set(["// @connect api.anthropic.com", "// @connect api.github.com", "// @connect api.todoist.com", "// @connect files.todoist.com", "// @connect production-reportapi.ambrosebuilding.com.au", "// @connect raw.githubusercontent.com", "// @grant GM_deleteValue", "// @grant GM_getValue", "// @grant GM_listValues", "// @grant GM_openInTab", "// @grant GM_registerMenuCommand", "// @grant GM_setValue", "// @grant GM_xmlhttpRequest", "// @grant unsafeWindow", "// @match https://office.aroflo.com/*", "// @match https://outlook.cloud.microsoft/*", "// @match https://outlook.office.com/*", "// @match https://outlook.office365.com/*", "// @run-at document-start"]);
+  const __wreName = "wre-inbox-filer", __wreVer = "0.9.78", __wreHave = new Set(["// @connect api.anthropic.com", "// @connect api.github.com", "// @connect api.todoist.com", "// @connect files.todoist.com", "// @connect production-reportapi.ambrosebuilding.com.au", "// @connect raw.githubusercontent.com", "// @grant GM_deleteValue", "// @grant GM_getValue", "// @grant GM_listValues", "// @grant GM_openInTab", "// @grant GM_registerMenuCommand", "// @grant GM_setValue", "// @grant GM_xmlhttpRequest", "// @grant unsafeWindow", "// @match https://office.aroflo.com/*", "// @match https://outlook.cloud.microsoft/*", "// @match https://outlook.office.com/*", "// @match https://outlook.office365.com/*", "// @run-at document-start"]);
   const __wreInfo0 = typeof GM_info != 'undefined' ? GM_info : null;
   const __wreSay = m => { try { console.log('[WRE live update] ' + __wreName + ': ' + m); } catch (e) {} };
   const __wreCmp = (a, b) => { const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number); for (let i = 0; i < Math.max(x.length, y.length); i++) { const d = (x[i] || 0) - (y[i] || 0); if (d) return d; } return 0; };
@@ -73,7 +73,7 @@
   }
   if (window.top === window.self) { __wreCheck(); setInterval(__wreCheck, 2 * 60e3 + 5000); }
   if (__wreLive()) return;
-  // ---------- the built in copy (src/wre-inbox-filer.js at 0.9.77) ----------
+  // ---------- the built in copy (src/wre-inbox-filer.js at 0.9.78) ----------
 
 (function () {
 'use strict';
@@ -520,7 +520,19 @@ if (ON_MAIL) {
   const findRow = key => rowsNow().find(o => keyOf(o) == key);
   const park = async () => { const el = rowsNow().find(o => !isSel(o) && !/^Unread/.test(o.getAttribute('aria-label'))); if (!el) return false; const b0 = bodyOf(); el.click(); await waitFor(() => bodyOf() != b0 || isSel(el), 4000); await quiet(250, 2000); return true; };
   const markUnread = async key => { const el = findRow(key); if (!el) return false; const b = [...el.querySelectorAll('button,[role=button]')].find(x => (x.getAttribute('aria-label') || x.title || '') == 'Mark as unread'); if (!b) return /^Unread/.test(el.getAttribute('aria-label')); b.click(); return await waitFor(() => { const x = findRow(key); return !!x && /^Unread/.test(x.getAttribute('aria-label')); }, 4000); };
-  const goInbox = async () => { const ti = [...document.querySelectorAll('[role=treeitem]')].find(t => /^Inbox( - |$)/.test(t.getAttribute('title') || '')); if (!ti) return false; if (ti.getAttribute('aria-selected') == 'true') return true; ti.click(); await waitFor(() => rowsNow().length > 0, 8000); await quiet(300, 3000); return true; };
+  // 29/10: the launcher's window was only 900 wide, so Outlook folded the folder list away and there was no Inbox to find all
+  // morning. Now: no Inbox in the folder list, try opening the folder list once; still none, go by the address (Outlook's own
+  // /mail/ or /mail/inbox/ is the Inbox), else load the Inbox by its address.
+  const inboxItem = () => [...document.querySelectorAll('[role=treeitem]')].find(t => /^Inbox( - |$)/.test(t.getAttribute('title') || ''));
+  const onInboxUrl = () => /^\/mail\/(inbox(\/|$)|$)/i.test(location.pathname);
+  let navTried = 0, foldLogged = false;
+  const goInbox = async () => { let ti = inboxItem();
+    if (!ti && now() - navTried > 10 * 60e3) { navTried = now(); const nb = [...document.querySelectorAll('button[aria-label]')].find(b => /navigation pane|folder pane/i.test(b.getAttribute('aria-label')));
+      if (nb) { nb.click(); await waitFor(() => !!inboxItem(), 3000); ti = inboxItem(); } }
+    if (!ti) {
+      if (onInboxUrl() && rowsAll().length) { if (!foldLogged) { foldLogged = true; log('Folder list is folded away (window too narrow?), going by the address: this is the Inbox'); } return true; }
+      if (!onInboxUrl() && !reloading) { reloading = true; log('No folder list and not on the Inbox, loading the Inbox by its address'); location.assign(location.origin + '/mail/inbox/#wre-filer'); }
+      return false; } if (ti.getAttribute('aria-selected') == 'true') return true; ti.click(); await waitFor(() => rowsNow().length > 0, 8000); await quiet(300, 3000); return true; };
   // Leave any search (a test run uses the search box) so the list is the Inbox again.
   const exitSearch = async () => { const inp = document.querySelector('input[aria-label="Search"],#topSearchInput'); if (!inp || !inp.value) return; inp.focus(); Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(inp, ''); inp.dispatchEvent(new Event('input', { bubbles: true })); inp.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true })); await sleep(1500); const ti = [...document.querySelectorAll('[role=treeitem]')].find(t => /^Inbox( - |$)/.test(t.getAttribute('title') || '')); if (ti) { ti.click(); await sleep(2500); } };
   const scrollTop = () => { let e = rowsNow()[0]; while (e && e !== document.body) { if (e.scrollHeight > e.clientHeight + 50 && /auto|scroll/.test(getComputedStyle(e).overflowY)) { if (e.scrollTop) { e.scrollTop = 0; e.dispatchEvent(new Event('scroll')); } return; } e = e.parentElement; } };
