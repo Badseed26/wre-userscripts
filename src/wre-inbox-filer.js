@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.75
+// @version      0.9.76
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Sonnet and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -623,6 +623,16 @@ if (ON_MAIL) {
   }
 
   let busy = false, reloading = false, testing = false, lastInput = 0, busyAt = 0, lastScan = 0, reloadAt = 0, noRowsLogged = false;
+  // 28/10: the tab's title starts with [WRE filer] so WRE Outlook Park (AutoHotkey) can find this window and park it in a corner
+  // where Chrome keeps drawing it. Outlook keeps changing the title, so it's put back each time. Also logs when Chrome stops or
+  // starts drawing the tab, so the log shows whether the parking works.
+  if (IS_FILER) {
+    const mark = () => { if (!document.title.startsWith('[WRE filer] ')) document.title = '[WRE filer] ' + document.title.replace(/^\[WRE filer\]\s*/, ''); };
+    every(mark, 2e3); mark();
+    let wasHid = null, hidSince = 0;
+    every(() => { const h = reallyHidden(); if (h === wasHid) return; if (wasHid !== null) { if (h) hidSince = now(); else if (hidSince && now() - hidSince > 60e3) log('Tab back on screen after ' + Math.round((now() - hidSince) / 60e3) + ' min behind'); }
+      if (h && wasHid === false) gset('wfHidAt', now()); wasHid = h; }, 5e3);
+  }
   // the moment the tab comes on screen with no list drawn, reload it there and then, so clicking the tab is all it takes
   every(() => { if (IS_FILER && !reloading && !reallyHidden() && !rowsAll().length && now() - loadedAt > 45e3 && !gget('wfPending', null) && now() - gget('wfNoRowsReload', 0) > 5 * 60e3) { gset('wfNoRowsReload', now()); reloading = true; log('Tab is on screen with no list drawn, reloading it'); location.reload(); } }, 5e3);
   const loadedAt = now(), tm = t => new Date(t).toLocaleTimeString('en-AU', { hour: 'numeric', minute: '2-digit' });
@@ -750,9 +760,9 @@ if (ON_MAIL) {
       const all = rowsAll(), vis = rowsNow(), P = gget('wfPending', null), lk = gget('wfMailLock', null), nv = newestIn(vis), na = newestIn(all);
       const bits = ['rows ' + vis.length + '/' + all.length, 'newest seen ' + (nv ? tm(nv) : 'none') + (na != nv ? ' (whole page ' + (na ? tm(na) : 'none') + ')' : ''),
         'last scan ' + (lastScan ? Math.round((now() - lastScan) / 60e3) + ' min ago' : 'never'), busy ? 'BUSY ' + Math.round((now() - busyAt) / 60e3) + ' min' : '', reloading ? 'RELOADING ' + Math.round((now() - reloadAt) / 60e3) + ' min' : '',
-        P ? 'read pending ' + Math.round((now() - (P.at || 0)) / 60e3) + ' min' : '', lk && lk.tab !== tabId() && now() - lk.at < 90e3 ? 'ANOTHER OUTLOOK FILER TAB has the lock' : '', testing ? 'TEST' : '', 'page ' + tm(loadedAt), document.hasFocus() ? 'in front' : 'behind'];
+        P ? 'read pending ' + Math.round((now() - (P.at || 0)) / 60e3) + ' min' : '', lk && lk.tab !== tabId() && now() - lk.at < 90e3 ? 'ANOTHER OUTLOOK FILER TAB has the lock' : '', testing ? 'TEST' : '', 'page ' + tm(loadedAt), reallyHidden() ? 'NOT DRAWN (behind, minimised or covered)' : 'drawn'];
       // only when something looks off, or once an hour, so it doesn't push everything else off the log
-      const odd = busy || reloading || (P && now() - (P.at || 0) > 10 * 60e3) || (lk && lk.tab !== tabId() && now() - lk.at < 90e3) || na != nv || (lastScan && now() - lastScan > 5 * 60e3) || (nv && workHrs() && now() - nv > 45 * 60e3);
+      const odd = busy || reloading || (P && now() - (P.at || 0) > 10 * 60e3) || (lk && lk.tab !== tabId() && now() - lk.at < 90e3) || na != nv || (lastScan && now() - lastScan > 5 * 60e3) || (nv && workHrs() && now() - nv > 45 * 60e3) || reallyHidden();
       if (odd || now() - gget('wfHbAt', 0) > 60 * 60e3) { gset('wfHbAt', now()); log('Heartbeat: ' + bits.filter(Boolean).join(', ')); }
       // a scan stuck over 5 min (something it waited on never came back): let go so the next one runs
       if (busy && !testing && now() - busyAt > 5 * 60e3) { log('Scan stuck ' + Math.round((now() - busyAt) / 60e3) + ' min, letting go of it'); busy = false; }
