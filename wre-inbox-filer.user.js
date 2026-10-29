@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.78
+// @version      0.9.79
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Sonnet and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -31,7 +31,7 @@
   // Live updates (23/10): Tampermonkey only checks for a new version every few hours. This checks the repo's latest commit every
   // 2 min (free when nothing's changed) and keeps the newest code here, so a push runs on the next page load. If the new code needs
   // a permission this install hasn't got, or this browser won't run it, the built in copy below runs like before.
-  const __wreName = "wre-inbox-filer", __wreVer = "0.9.78", __wreHave = new Set(["// @connect api.anthropic.com", "// @connect api.github.com", "// @connect api.todoist.com", "// @connect files.todoist.com", "// @connect production-reportapi.ambrosebuilding.com.au", "// @connect raw.githubusercontent.com", "// @grant GM_deleteValue", "// @grant GM_getValue", "// @grant GM_listValues", "// @grant GM_openInTab", "// @grant GM_registerMenuCommand", "// @grant GM_setValue", "// @grant GM_xmlhttpRequest", "// @grant unsafeWindow", "// @match https://office.aroflo.com/*", "// @match https://outlook.cloud.microsoft/*", "// @match https://outlook.office.com/*", "// @match https://outlook.office365.com/*", "// @run-at document-start"]);
+  const __wreName = "wre-inbox-filer", __wreVer = "0.9.79", __wreHave = new Set(["// @connect api.anthropic.com", "// @connect api.github.com", "// @connect api.todoist.com", "// @connect files.todoist.com", "// @connect production-reportapi.ambrosebuilding.com.au", "// @connect raw.githubusercontent.com", "// @grant GM_deleteValue", "// @grant GM_getValue", "// @grant GM_listValues", "// @grant GM_openInTab", "// @grant GM_registerMenuCommand", "// @grant GM_setValue", "// @grant GM_xmlhttpRequest", "// @grant unsafeWindow", "// @match https://office.aroflo.com/*", "// @match https://outlook.cloud.microsoft/*", "// @match https://outlook.office.com/*", "// @match https://outlook.office365.com/*", "// @run-at document-start"]);
   const __wreInfo0 = typeof GM_info != 'undefined' ? GM_info : null;
   const __wreSay = m => { try { console.log('[WRE live update] ' + __wreName + ': ' + m); } catch (e) {} };
   const __wreCmp = (a, b) => { const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number); for (let i = 0; i < Math.max(x.length, y.length); i++) { const d = (x[i] || 0) - (y[i] || 0); if (d) return d; } return 0; };
@@ -73,7 +73,7 @@
   }
   if (window.top === window.self) { __wreCheck(); setInterval(__wreCheck, 2 * 60e3 + 5000); }
   if (__wreLive()) return;
-  // ---------- the built in copy (src/wre-inbox-filer.js at 0.9.78) ----------
+  // ---------- the built in copy (src/wre-inbox-filer.js at 0.9.79) ----------
 
 (function () {
 'use strict';
@@ -145,6 +145,13 @@ const plain = s => String(s || '').replace(/<[^>]+>/g, ' ').replace(/&nbsp;| /g
 const SHORT = { street: 'st', road: 'rd', drive: 'dr', avenue: 'ave', terrace: 'tce', court: 'ct', place: 'pl', crescent: 'cres', parade: 'pde', close: 'cl', lane: 'ln', highway: 'hwy', boulevard: 'bvd', circuit: 'cct', grove: 'gr' };
 const norm = s => String(s || '').toLowerCase().replace(/\b(street|road|drive|avenue|terrace|court|place|crescent|parade|close|lane|highway|boulevard|circuit|grove)\b/g, w => SHORT[w]).replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
 // Whole address inside a longer string: "40 Adelong Rd" is in "20253832 - 40 Adelong Road Shailer Park", "140 Adelong Rd" isn't.
+// FieldViser report types: the name for the file and note, and what a schedule note or task description says for that report
+const fvType = t => { const s = String(t || '');
+  if (/solar|pv/i.test(s)) return { name: 'Solar report', note: 'Solar report done', re: /solar\s*(pv\s*)?(report|inspect)/i };
+  if (/air\s*con|\bac\b|a\/c|hvac/i.test(s)) return { name: 'AC report', note: 'AC report done', re: /(\ba\/?c\b|air\s*con\w*|hvac)\s*(report|inspect)/i };
+  if (/make\s*safe/i.test(s)) return { name: 'Make safe report', note: 'Make safe report done', re: /make\s*safe/i };
+  if (/electric/i.test(s)) return { name: 'Electrical report', note: 'Electrical report done', re: /electrical\s*(report|inspect)|elec\s*report/i };
+  const w = s.trim() || 'FieldViser report'; return { name: w, note: w + ' done', re: new RegExp(w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s*'), 'i') }; };
 const hasAddr = (hay, needle) => !!norm(needle) && (' ' + norm(hay) + ' ').includes(' ' + norm(needle) + ' ');
 // Same site as a task name, allowing for unit style addresses: "42A - 42B/Sailaway Street" is JN 9437's "42B Sailaway Street"
 // (19/10, the filer made JN 9474 next to it). The street words have to be there, and one of the address's numbers as a whole
@@ -295,10 +302,11 @@ Work out what this email is:
 - "dates_not_accurate": someone at the builder says the current schedule or booked dates aren't right, are on hold, or new dates are coming.
 - "new_dates": the builder gives new or confirmed dates for WRE's work on a job. An Ambrose "Schedule Update for Job <number>" email with the updated repair schedule PDF attached is this when the schedule has dates for the electrician (WRE); if WRE isn't on the schedule it's "skip".
 - "cancelled": the builder cancels a PO, a booking or the whole job for WRE. That includes a job being cash settled, closed out or settled with the customer, and "remove the work not done, invoice what's been done". The email body wins over any schedule PDF attached: Ambrose's system attaches the current schedule to every job email, so a schedule showing dates doesn't mean the job's going ahead when the body says it isn't.
+- "fv_report": a completed report from FieldViser (from no-reply@fieldviser.com, PDF attached), e.g. an Electrical Report, Solar Report, Air Conditioning Report or Make Safe Report that WRE filled in on site. Give report_type as the form's name as printed on the PDF, report_date as the date the inspection or visit was done (YYYY-MM-DD), and the site address. A FieldViser email that isn't a finished report (an account, billing or sign in email) is "skip".
 - "skip": anything else (acceptance required, invoices, remittances, statements, marketing, general chat).
 
 Reply with ONLY one JSON object:
-{"kind":"po|updated_po|esa|dates_not_accurate|new_dates|cancelled|skip","why":"few words",
+{"kind":"po|updated_po|esa|fv_report|dates_not_accurate|new_dates|cancelled|skip","why":"few words","report_type":"","report_date":"",
  "builder":"builder company","po_full":"20305368-07","po_base":"20305368","ref":"",
  "address":{"street":"3 Natone Court","suburb":"Edens Landing","state":"QLD","postcode":"4207"},
  "dates":[{"what":"isolation","start":"2026-11-09T07:00","end":"2026-11-09T10:00"}],
@@ -1508,7 +1516,7 @@ if (ON_AF) {
   }
 
   // ---------- the job runner ----------
-  const fileName = job => { const x = job.x; if (x.kind == 'esa') return 'ESA ' + shortStreet(x.address.street) + '.pdf'; const b = /ambrose/i.test(job.builder) ? ' Ambrose' : job.builder ? ' ' + job.builder.split(' ')[0] : ''; return 'PO ' + String(x.po_full || x.ref).replace(/^PO\s*/i, '') + b + (x.kind == 'updated_po' ? ' updated ' + dmy(new Date()).slice(0, 5).replace('/', '-') : '') + '.pdf'; };
+  const fileName = job => { const x = job.x; if (x.kind == 'esa') return 'ESA ' + shortStreet(x.address.street) + '.pdf'; if (x.kind == 'fv_report') return fvType(x.report_type).name + ' ' + shortStreet(x.address.street) + (x.report_date ? ' ' + x.report_date.split('-').reverse().slice(0, 2).join('-') : '') + '.pdf'; const b = /ambrose/i.test(job.builder) ? ' Ambrose' : job.builder ? ' ' + job.builder.split(' ')[0] : ''; return 'PO ' + String(x.po_full || x.ref).replace(/^PO\s*/i, '') + b + (x.kind == 'updated_po' ? ' updated ' + dmy(new Date()).slice(0, 5).replace('/', '-') : '') + '.pdf'; };
   const trialOn = () => { const s = gget('wfLiveAt', 0); return !s || now() - s < TRIAL_DAYS * 864e5; };
   const jobKey = x => x.po_base || x.ref || '';
   const tasksFor = async x => { const out = new Map(); if (jobKey(x)) (await search(jobKey(x), 'CustOn')).forEach(r => out.set(r.jn, r)); if (jobKey(x)) (await search(jobKey(x), 'RefNo')).forEach(r => out.set(r.jn, r)); if (x.address && x.address.street) (await search(streetBits(x.address.street).words || x.address.street, 'Location')).filter(r => sameSite(r.name, x.address.street)).forEach(r => out.set(r.jn, r)); return [...out.values()]; };
@@ -1569,6 +1577,49 @@ if (ON_AF) {
       return fin(['ESA attached to JN ' + job.target.jn + (R.noteErr ? ', note failed: ' + R.noteErr : ', noted')]);
     }
 
+    // FieldViser reports (Ethan, 30/10): the address is on them but no PO. One open task at the address takes it. Two or more:
+    // the task with a schedule note naming that report (around the report's date), then the task description naming it,
+    // else Errors / to check with a button per task on the dashboard, and the pick comes back through Try again (use: JN).
+    if (x.kind == 'fv_report') {
+      const st = x.address && x.address.street, T = fvType(x.report_type);
+      if (!job.pdfKey) return errFu(T.name + (st ? ' for ' + shortStreet(st) : '') + (job.pdfBad ? ': the PDF came through broken (' + job.pdfBad + ')' : ': couldn\'t grab the PDF out of the email'));
+      if (!job.target) {
+        let pick = null, how = '', open = [];
+        if (job.useJn) { const r = await findJn(job.useJn); if (!r || !r.href) return errFu(T.name + ': JN ' + job.useJn + ' isn\'t in AroFlo'); if (/Archived/i.test(r.status || '')) return errFu(T.name + ': JN ' + job.useJn + ' is archived, AroFlo won\'t take it'); pick = r; how = 'you picked it'; }
+        else {
+          if (!st) return errFu(T.name + ' with no address I could read');
+          const b = streetBits(st);
+          open = (await search(b.words || st.replace(/^\S+\s+/, ''), 'Location')).filter(r => isOpenTask(r) && sameSite(r.name, st));
+          if (open.length == 1) { pick = open[0]; how = 'only open task there'; }
+          else if (open.length > 1) {
+            const ds = {}; for (const r of open) { try { ds[r.jn] = await descOf(r.href); } catch (e) { ds[r.jn] = { html: '', wrid: '' }; } }
+            // schedule notes, from 3 weeks before the report to a week after
+            let bySched = [];
+            try { const d0 = x.report_date && /^\d{4}-\d\d-\d\d$/.test(x.report_date) ? x.report_date : ymd(new Date()); const days = []; for (let i = -21; i <= 7; i += 7) days.push(addD(d0, i));
+              await calDays(days); const evs = Object.values(calCache).flatMap(c => c.ev);
+              bySched = open.filter(r => ds[r.jn].wrid && evs.some(e => e.wrid == String(ds[r.jn].wrid) && T.re.test(e.note))); } catch (e) { log(T.name + ' ' + shortStreet(st) + ': couldn\'t read the schedules (' + e.message + '), going by the descriptions'); }
+            if (bySched.length == 1) { pick = bySched[0]; how = 'schedule note says ' + T.name.toLowerCase(); }
+            else { const pool = bySched.length ? bySched : open; const byDesc = pool.filter(r => T.re.test(plain(ds[r.jn].html)) || T.re.test(r.name));
+              if (byDesc.length == 1) { pick = byDesc[0]; how = 'description says ' + T.name.toLowerCase(); } }
+          }
+        }
+        if (!pick) {
+          const msg = T.name + ' for ' + shortStreet(st) + ': ' + (open.length ? open.length + ' open tasks there, can\'t tell which' : 'no open task at that address');
+          if (job.dry) return fin([msg + ', would go to Errors / to check' + (open.length ? ' with a button for ' + open.map(r => 'JN ' + r.jn).join(', ') : '')]);
+          await safeFu({ sec: 'check', key: 'err-' + job.id, p1: false, due: ymd(new Date()), title: 'Filer: ' + msg.slice(0, 80),
+            desc: 'Email: ' + job.info.subject + '\nFrom ' + job.info.from + ', ' + job.info.date + '\nPDF attached below.' + (open.length ? '\npick: ' + open.map(r => 'JN ' + r.jn + ' ' + r.name.replace(/\|/g, ' ').slice(0, 45)).join(' | ') : '\nNo open task found. Add use: JN 1234 on its own line and hit Try again to put it on one.'),
+            pdf: { name: fileName(job), b64: gget(job.pdfKey, '') } });
+          return fin([msg], true);
+        }
+        job.target = { jn: pick.jn, href: pick.href, how }; saveJob(job);
+      }
+      if (job.dry) return fin([T.name + ': would attach ' + fileName(job) + ' to JN ' + job.target.jn + ' (' + job.target.how + ') and add the note "' + T.note + '"']);
+      if (!R.up && !R.upErr) return startOp({ op: 'upload', jobId: job.id, pdfKey: job.pdfKey, name: fileName(job) }, job.target.href);
+      if (R.upErr) return errFu(T.name + ' upload on JN ' + job.target.jn + ' failed: ' + R.upErr);
+      if (nextAtt() >= 0) return doAtt(job.target.href);
+      if (!R.note && !R.noteErr) return startOp({ op: 'note', jobId: job.id, text: T.note }, job.target.href);
+      return fin([T.name + ' on JN ' + job.target.jn + ' (' + job.target.how + ')' + (R.noteErr ? ', note failed: ' + R.noteErr : ', noted')]);
+    }
     if (x.kind == 'cancelled') {
       const ts = (await tasksFor(x)).filter(isOpenTask); const who = ts.length ? ts.map(r => 'JN ' + r.jn).join(', ') : 'no open task found';
       if (job.dry) return fin(['Cancellation: would flag it (' + who + ')']);
@@ -1763,10 +1814,11 @@ if (ON_AF) {
         const j = jobs().find(x => x.id == m[1]);
         if (!j) { const subj = ((t.description || '').match(/^Email: (.+)$/m) || [])[1] || ''; if (subj) await reread(subj.trim().slice(0, 60)); else await note('can\'t tell which email it was'); continue; }
         if (j.status == 'new') { await note('it\'s already in the queue'); continue; }
+        { const u = ((t.description || '').match(/^use: (?:JN\s?)?(\d{4,5})\s*$/m) || [])[1]; if (u) { j.useJn = u; delete j.target; } }
         const R = j.res || {};
         // no PDF in hand (never grabbed, or wiped): get it back off the Todoist comment, else read the email again (19/10: a job that
         // never got its PDF went back in the queue as it was and hit the same error again)
-        if ((!j.pdfKey || !gget(j.pdfKey, '')) && !R.up && /^(po|updated_po|esa)$/.test((j.x || {}).kind || '')) { const b64 = j.pdfKey ? await pdfFromTask(t.id) : ''; if (b64) gset(j.pdfKey, b64); else { await reread(String(j.key || '').split('|').slice(1).join('|').trim().replace(/^\S+@\S+\s+/, '').slice(0, 60) || j.info.subject.slice(0, 60)); continue; } }
+        if ((!j.pdfKey || !gget(j.pdfKey, '')) && !R.up && /^(po|updated_po|esa|fv_report)$/.test((j.x || {}).kind || '')) { const b64 = j.pdfKey ? await pdfFromTask(t.id) : ''; if (b64) gset(j.pdfKey, b64); else { await reread(String(j.key || '').split('|').slice(1).join('|').trim().replace(/^\S+@\S+\s+/, '').slice(0, 60) || j.info.subject.slice(0, 60)); continue; } }
         Object.keys(R).forEach(k => { if (/Err$/.test(k) || k == 'createDry') delete R[k]; }); j.res = R;
         if (!R.jn) j.creating = false; // check AroFlo for the task again before making one
         Object.assign(j, { status: 'new', tries: 0, notBefore: 0, waited: true, retryTask: t.id }); saveJob(j);
