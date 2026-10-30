@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Calendar NPT
 // @namespace    wre
-// @version      3.2.2
+// @version      3.3.0
 // @description  Notes, photos and timesheet badges on the AroFlo calendar for the days in view, kept in step with the WRE daily check issue list in Todoist, plus an A letter on Ambrose jobs for photos or the report being up on Ambrose
 // @match        https://office.aroflo.com/ims/Site/Calendar/*
 // @match        https://tradiesadmin.ambroseconstruct.com.au/*
@@ -664,23 +664,46 @@
     return (tdState = { at: now, open, done, aOpen, aDone, acache, acacheId, acacheAt });
   }
 
-  // 26/10: a visit moved to someone else (8 Meadow Way, Lachie's 23/10 went to Pearce) left the old person's issue sitting
-  // there forever, since only visits in view get rechecked. Now an open issue for a day in view, where that task is still
-  // on the calendar but that person isn't booked on it that day any more, gets a comment and ticked off.
+  // Bookings moved off someone get their issue ticked off.
+  // 26/10: first go only looked at days on screen, and needed the view's dates, which this calendar view doesn't give,
+  // so it never actually ran (30/10: 3 Yodelay St, Lachie's 27/10 got moved off that day and sat on the list).
+  // Now every open issue is checked against AroFlo itself: that day's bookings come straight from the calendar's own
+  // feed, whatever's on screen. Not booked on that task that day any more (moved, swapped or cancelled): comment and tick off.
+  const DAYEV = new Map(); // yyyy-mm-dd -> {at, evs}
+  const DAYEV_MS = 120000;
+  async function dayEvents(dates) {
+    const now = Date.now(), need = dates.filter(d => { const c = DAYEV.get(d); return !c || now - c.at > DAYEV_MS; });
+    if (need.length) {
+      const box = document.getElementById('calBoxContainer');
+      if (!W.jsonSettings || !box) throw new Error('calendar settings not found');
+      const q = new URLSearchParams();
+      q.set('jsonSettings', JSON.stringify(W.jsonSettings));
+      q.set('masterusercoded', box.getAttribute('data-master-user-id') || '');
+      q.set('range', need.map(d => Date.UTC(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8)) / 1000).join(',')); // AroFlo's days are UTC midnight
+      ['task', 'overhead', 'event', 'externalevent'].forEach(t => q.set('eventtypes_' + t, '1'));
+      const r = await fetch('/ims/Site/Calendar/AJAX/AJAX_JSON_ims_events.cfm', { method: 'POST', credentials: 'same-origin', cache: 'no-store',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'X-Requested-With': 'XMLHttpRequest' }, body: q.toString() });
+      const evs = JSON.parse(await r.text());
+      if (!Array.isArray(evs)) throw new Error('calendar feed not a list');
+      const by = {};
+      evs.forEach(e => { const d = ymd(new Date(e.start)); (by[d] = by[d] || []).push(e); });
+      need.forEach(d => DAYEV.set(d, { at: now, evs: by[d] || [] }));
+    }
+    return dates.reduce((o, d) => (o[d] = DAYEV.get(d).evs, o), {});
+  }
   async function movedOff(L, today) {
     let n = 0;
     try {
-      const v = cal.fullCalendar('getView'), d0 = v.intervalStart || v.visStart || v.start, d1 = v.intervalEnd || v.visEnd || v.end;
-      if (!d0 || !d1) return 0;
-      const from = ymd(new Date(+d0)), to = ymd(new Date(+d1 - 1));
-      const evs = cal.fullCalendar('clientEvents').filter(e => e.type === 'task' && !isCancel(e));
-      const dayHas = {}, booked = new Set(), onTask = {};
-      evs.forEach(e => { const dt = ymd(new Date(e.start)); dayHas[dt] = true; booked.add(e.wrid + '|' + dt + '|' + e.resourcename); (onTask[e.wrid] = onTask[e.wrid] || new Set()).add(dt); });
-      for (const [k, ex] of [...L.open]) {
-        const [wrid, date, who] = k.split('|');
-        if (date < from || date > to || date >= today || !dayHas[date]) continue; // that day isn't loaded on screen
-        if (!onTask[wrid] || booked.has(k)) continue;                             // task not in view, or still theirs
-        const now = [...evs].filter(e => e.wrid == wrid && ymd(new Date(e.start)) === date).map(e => nick(e.resourcename));
+      const keys = [...L.open.keys()].filter(k => k.split('|')[1] <= today);
+      if (!keys.length) return 0;
+      const byDay = await dayEvents([...new Set(keys.map(k => k.split('|')[1]))]);
+      for (const k of keys) {
+        const [wrid, date, who] = k.split('|'), ex = L.open.get(k);
+        const all = byDay[date] || [];
+        if (!all.length) continue; // nothing came back for that day at all: don't trust it, leave the issue be
+        const evs = all.filter(e => e.type === 'task' && !isCancel(e) && String(e.wrid) === wrid);
+        if (evs.some(e => e.resourcename === who)) continue; // still theirs
+        const now = evs.map(e => nick(e.resourcename));
         await td('POST', 'comments', { task_id: ex.id, content: dmS(today) + ': ' + nick(who) + ' isn\'t booked on this one that day any more' + (now.length ? ' (it\'s ' + listed([...new Set(now)]) + ' now)' : '') + ', ticked off' });
         await td('POST', 'tasks/' + ex.id + '/close');
         L.open.delete(k); L.done.set(k, ex); n++;
@@ -712,7 +735,7 @@
       });
       if (all.some(v => isAmb(v.ev))) setTimeout(ambSync, 0);
       if (!want.size) {
-        if (tdState && tdState.open.size) { const c = await movedOff(await loadList(), today); if (c) sy.msg = 'list ' + hm(Date.now()) + ' (' + c + ' ticked off)'; }
+        { const c = await movedOff(await loadList(), today); if (c) sy.msg = 'list ' + hm(Date.now()) + ' (' + c + ' ticked off)'; }
         if (/token saved/.test(sy.msg)) { await loadList(); sy.bad = false; sy.msg = 'list on ' + hm(Date.now()); } // proves the token works
         return;
       }
@@ -1209,7 +1232,25 @@
 
   // AroFlo can rebuild the calendar (changing views): re-hook after a click, cheaply.
   document.addEventListener('click', () => setTimeout(() => { if (cal) hook(); }, 0), true);
-  document.addEventListener('visibilitychange', () => { if (!document.hidden && cal) { hook(); scan(false); } });
+  // Keep it live (30/10): AroFlo never refetches the calendar itself, so a booking moved by Lisa (or you on the phone)
+  // didn't show until a reload. Pull fresh bookings every 3 min and whenever you come back to the tab, but only when
+  // you're not mid-click: nothing for 45s, no popup or drag open. Badges and the issue list then follow on their own.
+  let lastInput = 0, lastFetch = Date.now();
+  ['mousedown', 'keydown', 'touchstart', 'wheel'].forEach(t => document.addEventListener(t, () => { lastInput = Date.now(); }, { capture: true, passive: true }));
+  const busyUI = () => [...document.querySelectorAll('.ui-dialog, .modal, [role="dialog"], .fc-cell-overlay, .ui-draggable-dragging')].some(el => el.offsetParent !== null);
+  function refresh() {
+    if (!cal || document.hidden || Date.now() - lastInput < 45000 || busyUI()) return false;
+    lastFetch = Date.now();
+    try { hook(); cal.fullCalendar('refetchEvents'); } catch (e) {}
+    soon();
+    return true;
+  }
+  setInterval(() => { if (Date.now() - lastFetch > 3 * 60000) refresh(); }, 30000);
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden || !cal) return;
+    hook();
+    if (!(Date.now() - lastFetch > 60000 && refresh())) scan(false);
+  });
 
   start();
 })();
