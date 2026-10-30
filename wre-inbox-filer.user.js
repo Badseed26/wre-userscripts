@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.80
+// @version      0.9.81
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Sonnet and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -31,7 +31,7 @@
   // Live updates (23/10): Tampermonkey only checks for a new version every few hours. This checks the repo's latest commit every
   // 2 min (free when nothing's changed) and keeps the newest code here, so a push runs on the next page load. If the new code needs
   // a permission this install hasn't got, or this browser won't run it, the built in copy below runs like before.
-  const __wreName = "wre-inbox-filer", __wreVer = "0.9.80", __wreHave = new Set(["// @connect api.anthropic.com", "// @connect api.github.com", "// @connect api.todoist.com", "// @connect files.todoist.com", "// @connect production-reportapi.ambrosebuilding.com.au", "// @connect raw.githubusercontent.com", "// @grant GM_deleteValue", "// @grant GM_getValue", "// @grant GM_listValues", "// @grant GM_openInTab", "// @grant GM_registerMenuCommand", "// @grant GM_setValue", "// @grant GM_xmlhttpRequest", "// @grant unsafeWindow", "// @match https://office.aroflo.com/*", "// @match https://outlook.cloud.microsoft/*", "// @match https://outlook.office.com/*", "// @match https://outlook.office365.com/*", "// @run-at document-start"]);
+  const __wreName = "wre-inbox-filer", __wreVer = "0.9.81", __wreHave = new Set(["// @connect api.anthropic.com", "// @connect api.github.com", "// @connect api.todoist.com", "// @connect files.todoist.com", "// @connect production-reportapi.ambrosebuilding.com.au", "// @connect raw.githubusercontent.com", "// @grant GM_deleteValue", "// @grant GM_getValue", "// @grant GM_listValues", "// @grant GM_openInTab", "// @grant GM_registerMenuCommand", "// @grant GM_setValue", "// @grant GM_xmlhttpRequest", "// @grant unsafeWindow", "// @match https://office.aroflo.com/*", "// @match https://outlook.cloud.microsoft/*", "// @match https://outlook.office.com/*", "// @match https://outlook.office365.com/*", "// @run-at document-start"]);
   const __wreInfo0 = typeof GM_info != 'undefined' ? GM_info : null;
   const __wreSay = m => { try { console.log('[WRE live update] ' + __wreName + ': ' + m); } catch (e) {} };
   const __wreCmp = (a, b) => { const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number); for (let i = 0; i < Math.max(x.length, y.length); i++) { const d = (x[i] || 0) - (y[i] || 0); if (d) return d; } return 0; };
@@ -73,7 +73,7 @@
   }
   if (window.top === window.self) { __wreCheck(); setInterval(__wreCheck, 2 * 60e3 + 5000); }
   if (__wreLive()) return;
-  // ---------- the built in copy (src/wre-inbox-filer.js at 0.9.80) ----------
+  // ---------- the built in copy (src/wre-inbox-filer.js at 0.9.81) ----------
 
 (function () {
 'use strict';
@@ -685,7 +685,9 @@ if (ON_MAIL) {
     const okPdf = info.pdfs.filter(n => !/repair.?schedule|schedule|invoice|statement|remittance|assessment|report|photo|scope of works/i.test(n));
     // a "Schedule Update for Job" email: the updated repair schedule PDF is the thing to read, for WRE's dates (20/10)
     const sched = /schedule update/i.test(info.subject) ? (info.pdfs.find(n => /schedule/i.test(n)) || '') : '';
-    const pick = sched || okPdf.find(n => /purchase order|work order|\bpo\b|\bpo[\s_-]?\d|safety advice|variation|\bwo\b/i.test(n)) || (okPdf.length == 1 ? okPdf[0] : okPdf.find(n => /\d{4,}/.test(n)) || '');
+    // 30/10: a FieldViser email's PDF is the report itself (the skip list above drops anything called report)
+    const fvPdf = FV_RE.test(info.from + ' ' + p.head) ? (info.pdfs.find(n => /report/i.test(n)) || info.pdfs[0] || '') : '';
+    const pick = fvPdf || sched || okPdf.find(n => /purchase order|work order|\bpo\b|\bpo[\s_-]?\d|safety advice|variation|\bwo\b/i.test(n)) || (okPdf.length == 1 ? okPdf[0] : okPdf.find(n => /\d{4,}/.test(n)) || '');
     let pdfKey = '';
     if (pick) { const b64 = await grabPdf(pick); if (b64) { pdfKey = 'wfPdf_' + id; gset(pdfKey, b64); } else log('Couldn\'t grab the PDF on ' + p.head.slice(0, 60)); }
     // every other PDF and photo on the email goes on the task too (19/10)

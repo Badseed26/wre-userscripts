@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.80
+// @version      0.9.81
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Sonnet and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -634,7 +634,9 @@ if (ON_MAIL) {
     const okPdf = info.pdfs.filter(n => !/repair.?schedule|schedule|invoice|statement|remittance|assessment|report|photo|scope of works/i.test(n));
     // a "Schedule Update for Job" email: the updated repair schedule PDF is the thing to read, for WRE's dates (20/10)
     const sched = /schedule update/i.test(info.subject) ? (info.pdfs.find(n => /schedule/i.test(n)) || '') : '';
-    const pick = sched || okPdf.find(n => /purchase order|work order|\bpo\b|\bpo[\s_-]?\d|safety advice|variation|\bwo\b/i.test(n)) || (okPdf.length == 1 ? okPdf[0] : okPdf.find(n => /\d{4,}/.test(n)) || '');
+    // 30/10: a FieldViser email's PDF is the report itself (the skip list above drops anything called report)
+    const fvPdf = FV_RE.test(info.from + ' ' + p.head) ? (info.pdfs.find(n => /report/i.test(n)) || info.pdfs[0] || '') : '';
+    const pick = fvPdf || sched || okPdf.find(n => /purchase order|work order|\bpo\b|\bpo[\s_-]?\d|safety advice|variation|\bwo\b/i.test(n)) || (okPdf.length == 1 ? okPdf[0] : okPdf.find(n => /\d{4,}/.test(n)) || '');
     let pdfKey = '';
     if (pick) { const b64 = await grabPdf(pick); if (b64) { pdfKey = 'wfPdf_' + id; gset(pdfKey, b64); } else log('Couldn\'t grab the PDF on ' + p.head.slice(0, 60)); }
     // every other PDF and photo on the email goes on the task too (19/10)
