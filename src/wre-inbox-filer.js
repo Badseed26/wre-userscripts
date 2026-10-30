@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE Inbox Filer
 // @namespace    wre
-// @version      0.9.79
+// @version      0.9.80
 // @description  Watches the shared Outlook for builder POs, revised POs and Energex safety advice, reads them with Claude Sonnet and files them onto the right AroFlo task. Unmatched ones, dates to book and anything odd go to WRE follow ups. Runs only in the two filer tabs (Outlook and AroFlo opened with #wre-filer).
 // @match        https://outlook.cloud.microsoft/*
 // @match        https://outlook.office.com/*
@@ -507,6 +507,9 @@ if (ON_MAIL) {
   // A row's key: subject head plus the minute it arrived (not the day it was seen or how Outlook prints the time), so the same
   // subject re-sent later is a new email and the key doesn't change at midnight. The old 6 hour fuzzy match swallowed re-sends (20/10).
   const rowKey2 = p => { const t = rowTime(p.when); return p.head.slice(0, 120) + '|' + (t ? Math.floor(t.getTime() / 60000) : p.when); };
+  const FV_RE = /fieldviser|\breport (completed|changed|updated)\b/i;
+  // 0.9.80: the reports 0.9.79 skipped as own emails get another go
+  if (!gget('wfFvUnsee', 0)) { const s0 = gget('wfSeen', {}); Object.keys(s0).forEach(k => { if (/\breport (completed|changed|updated)\b/i.test(k)) delete s0[k]; }); gset('wfSeen', s0); gset('wfFvUnsee', 1); }
   const markSeen = k => { const s = seen(); s[k] = now(); const cut = now() - 40 * 864e5; Object.keys(s).forEach(x => { if (!(+s[x] > cut)) delete s[x]; }); gset('wfSeen', s); };
   const senderOf = (head, R) => { const h = head.toLowerCase(); return R.senders.find(s => h.includes(s.k) || (s.builder && h.includes(s.builder.toLowerCase().split(' ')[0])) || s.words.some(w => h.includes(w))); };
   const SKIP_SUBJ = /Acceptance Required - Purchase Order|Safety Advice Request Form - Submission|Remittance Advice|Tax Invoice|RCTI/i;
@@ -624,7 +627,8 @@ if (ON_MAIL) {
     const info = readPane(); const id = 'j' + now().toString(36);
     // Nothing in the reading pane (the click didn't open it, or the list moved under us): leave it for the next scan rather than reading a blank.
     if (!info.subject.trim() && !info.body) { log('Reading pane came up empty, left it: ' + p.head.slice(0, 60)); return test ? 'reading pane came up empty, try again' : false; }
-    if (/wired ?rite/i.test(info.from)) { log('Own email, skipped: ' + p.head.slice(0, 60)); if (wasUnread) { await park(); await markUnread(key); } markSeen(rowKey2(p)); return test ? 'own email, skipped' : false; }
+    // 30/10: FieldViser reports come in under the business name (Wired Rite Electrical), so they aren't our own emails
+    if (/wired ?rite/i.test(info.from) && !FV_RE.test(info.from + ' ' + p.head)) { log('Own email, skipped: ' + p.head.slice(0, 60)); if (wasUnread) { await park(); await markUnread(key); } markSeen(rowKey2(p)); return test ? 'own email, skipped' : false; }
     const fullKey = (info.date || ymd(new Date())) + '|' + p.head.slice(0, 120);
     // Which PDF is the PO: skip schedules, reports and photos, then look for a PO looking name (ARC's are "PO128170-BU01-002.pdf").
     const okPdf = info.pdfs.filter(n => !/repair.?schedule|schedule|invoice|statement|remittance|assessment|report|photo|scope of works/i.test(n));
