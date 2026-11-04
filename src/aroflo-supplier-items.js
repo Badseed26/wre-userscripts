@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AroFlo supplier items
 // @namespace    wre
-// @version      0.4
+// @version      0.5
 // @description  Supplier button on AroFlo quotes: search CNW and Tradezone with your own sign ins, pick an item, set the qty and it adds the line (item, part no, qty, cost in Value). Markup left alone, you press Save Quote.
 // @match        https://office.aroflo.com/ims/Site/Service/Quotes/*
 // @grant        GM_xmlhttpRequest
@@ -290,6 +290,41 @@ ${it.note ? `<div class="mt warn">${esc(it.note)}</div>` : ''}</div></div></div>
       b.after(s);
     });
   }
+  // ---------- bridge for Claude's quote skill (stage 3 pricing) ----------
+  // The skill runs plain page scripts, which can't reach this script's supplier requests, so they talk by events:
+  //   document.dispatchEvent(new CustomEvent('wre-sup-call', {detail: JSON.stringify({id, fn, args})}))
+  // and the answer comes back as a 'wre-sup-reply' event with detail JSON {id, r} or {id, err}.
+  //   ping()                      -> {v} the script's version
+  //   search(term, ['CNW'])       -> [{sup, code, name, uom, price, branch, national, stock, note}] or {signedOut:'CNW'}
+  //   lines()                     -> [{i, item, part, qty, value, depth}] every line on the quote, in order
+  //   setValue(i, 12.34)          -> {ok, value} puts a cost in that line's Value only, reads it back. Never saves.
+  const lineRows = () => itemInputs().map((inp, i) => { const row = inp.closest('tr'); const g = k => { const x = colInput(row, k); return x ? x.value : null; }; let depth = 0; for (let e = row.parentElement; e; e = e.parentElement) if (e.tagName == 'UL') depth++; return { i, inp, row, item: inp.value, part: g('partNo'), qty: g('qty'), value: g('value'), depth }; });
+  const API = {
+    ping: async () => ({ v: GM_info.script.version }),
+    search: async (term, sups) => {
+      const use = sups && sups.length ? sups : ['CNW', 'Tradezone'];
+      const out = [];
+      for (const sp of use) {
+        try { (await (sp == 'CNW' ? searchCnw : searchTz)(term)).forEach(it => out.push({ sup: it.sup, code: it.code, name: it.name, uom: it.uom || '', price: it.price || 0, branch: it.branch, national: it.national, stock: it.stock || '', note: it.note || '' })); }
+        catch (e) { out.push(e.signedOut ? { sup: sp, signedOut: true } : { sup: sp, error: String(e.message || e) }); }
+      }
+      return out;
+    },
+    lines: async () => lineRows().map(({ i, item, part, qty, value, depth }) => ({ i, item, part, qty, value, depth })),
+    setValue: async (i, v) => {
+      const L = lineRows()[i]; if (!L) throw new Error('no line ' + i);
+      const val = colInput(L.row, 'value'); if (!val) throw new Error('no Value box on line ' + i);
+      setv(val, Number(v).toFixed(2)); await sleep(200);
+      return { ok: Math.abs(Number(val.value) - Number(v)) < 0.005, value: val.value, item: L.inp.value };
+    },
+  };
+  document.addEventListener('wre-sup-call', async e => {
+    let d; try { d = JSON.parse(e.detail); } catch (x) { return; }
+    let rep_;
+    try { rep_ = { id: d.id, r: await API[d.fn](...(d.args || [])) }; } catch (x) { rep_ = { id: d.id, err: String(x.message || x) }; }
+    document.dispatchEvent(new CustomEvent('wre-sup-reply', { detail: JSON.stringify(rep_) }));
+  });
+
   if (!/viewexist=1/.test(location.search) && !document.querySelector('#newQuoteContainer')) return;
   place();
   new MutationObserver(() => place()).observe(document.body, { childList: true, subtree: true });
