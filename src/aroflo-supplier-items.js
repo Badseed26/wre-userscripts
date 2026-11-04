@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AroFlo supplier items
 // @namespace    wre
-// @version      0.1
+// @version      0.2
 // @description  Supplier button on AroFlo quotes: search CNW and Tradezone with your own sign ins, pick an item, set the qty and it adds the line (item, part no, qty, cost in Value). Markup left alone, you press Save Quote.
 // @match        https://office.aroflo.com/ims/Site/Service/Quotes/*
 // @grant        GM_xmlhttpRequest
@@ -48,6 +48,8 @@
     });
   }
   const html = t => new DOMParser().parseFromString(t || '', 'text/html');
+  // a product photo's address (lazy loaded pages keep it in data-src)
+  const imgOf = (el, base) => { const i = el && el.querySelector('img'); if (!i) return ''; const u = i.getAttribute('data-src') || i.getAttribute('data-original') || i.getAttribute('src') || ''; if (!u || /^data:|placeholder|loading|blank/i.test(u)) return ''; try { return new URL(u, base).href; } catch (e) { return ''; } };
 
   // ---------- CNW ----------
   async function searchCnw(term) {
@@ -67,12 +69,12 @@
       const id = idEl ? idEl.id.split('-')[0] : '';
       const code = clean((c.querySelector('a.product-code') || {}).textContent).replace(/^Code:\s*/i, '') || full;
       if (!id || seen.has(id)) return; seen.add(id);
-      items.push({ sup: 'CNW', id, code, full, name: clean(a && (a.getAttribute('data-short-name') || a.getAttribute('title') || a.textContent)), uom: clean((c.querySelector('.priceUOM span') || {}).textContent), href: a ? CNW + a.getAttribute('href') : '' });
+      items.push({ sup: 'CNW', id, code, full, name: clean(a && (a.getAttribute('data-short-name') || a.getAttribute('title') || a.textContent)), uom: clean((c.querySelector('.priceUOM span') || {}).textContent), href: a ? CNW + a.getAttribute('href') : '', img: imgOf(c.querySelector('.scaffoldProductSearchItemWrapperImage') || c, CNW) });
     });
     // searched an exact code and CNW jumped straight to the product page
     if (!items.length && doc.querySelector('.scaffoldProductDisplayData')) {
       const p = doc.querySelector('.supplierCost span.price[id], span.price[id]');
-      items.push({ sup: 'CNW', id: p ? p.id : '', code: clean((doc.querySelector('.scaffoldProductDisplayDataCode .product-code') || {}).textContent).replace(/^Code:\s*/i, ''), name: clean((doc.querySelector('h1') || {}).textContent), uom: clean((doc.querySelector('.scaffoldUnitOfMesureCode') || {}).textContent), href: r.finalUrl || '' });
+      items.push({ sup: 'CNW', id: p ? p.id : '', code: clean((doc.querySelector('.scaffoldProductDisplayDataCode .product-code') || {}).textContent).replace(/^Code:\s*/i, ''), name: clean((doc.querySelector('h1') || {}).textContent), uom: clean((doc.querySelector('.scaffoldUnitOfMesureCode') || {}).textContent), href: r.finalUrl || '', img: (doc.querySelector('meta[property="og:image"]') || { getAttribute: () => '' }).getAttribute('content') || imgOf(doc.querySelector('.scaffoldProductDisplayWrapper'), CNW) });
     }
     if (!items.length) {
       debug.CNW.sample = t.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/\s+/g, ' ').slice(0, 8000);
@@ -110,7 +112,7 @@
       const txt = clean(c.textContent);
       const m = txt.match(/\$\s*([\d,]+\.\d{2})\s*ex/i);
       const st = c.querySelector('.stock_wrapper');
-      items.push({ sup: 'Tradezone', id, code: clean((c.querySelector('h6.part') || {}).textContent), sku: (c.querySelector('h5.sku input') || {}).value || '', name: clean(a && (a.getAttribute('title') || a.textContent)), href: a ? new URL(a.getAttribute('href'), TZ).href : '', price: m ? Number(m[1].replace(/,/g, '')) : null, stock: st ? clean(st.textContent) || (/in_stock/.test(st.className) ? 'In stock' : '') : '' });
+      items.push({ sup: 'Tradezone', id, code: clean((c.querySelector('h6.part') || {}).textContent), sku: (c.querySelector('h5.sku input') || {}).value || '', name: clean(a && (a.getAttribute('title') || a.textContent)), href: a ? new URL(a.getAttribute('href'), TZ).href : '', price: m ? Number(m[1].replace(/,/g, '')) : null, stock: st ? clean(st.textContent) || (/in_stock/.test(st.className) ? 'In stock' : '') : '', img: imgOf(c.querySelector('.product-image') || c, TZ) });
     });
     if (!items.length) debug.Tradezone.sample = t.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/\s+/g, ' ').slice(0, 8000);
     if (items.length && items.every(i => !i.price)) items.forEach(i => { i.note = 'no price, check you\'re signed in to Tradezone'; });
@@ -172,7 +174,14 @@
 #wre-sup .opt{padding:0 10px 6px;font-size:13px;color:#555;display:flex;gap:12px;align-items:center}
 #wre-sup .msg{padding:0 10px 6px;font-size:13px;color:#555}
 #wre-sup .ls{overflow:auto;padding:0 10px 10px}
-#wre-sup .grp{font:700 12px inherit;color:${GREY};text-transform:uppercase;margin:10px 0 4px}
+#wre-sup .grp{display:flex;align-items:center;gap:8px;margin:12px 0 6px;padding:8px 10px;background:#f3f1ef;border-left:4px solid ${ORANGE};border-radius:6px;font:700 16px inherit;color:#222;cursor:pointer;user-select:none}
+#wre-sup .grp .ct{font:600 12px inherit;color:#666;flex:1}
+#wre-sup .grp .ar{font-size:14px;color:${GREY}}
+#wre-sup .gb.shut{display:none}
+#wre-sup .row{display:flex;gap:8px}
+#wre-sup .th{width:52px;height:52px;flex:none;border:1px solid #e3e0dd;border-radius:6px;object-fit:contain;background:#fff}
+#wre-sup .th.none{display:flex;align-items:center;justify-content:center;font-size:10px;color:#aaa}
+#wre-sup .bd{flex:1;min-width:0}
 #wre-sup .it{border:1px solid #e3e0dd;border-radius:8px;padding:8px;margin-bottom:6px}
 #wre-sup .nm{font-weight:600}
 #wre-sup .mt{font-size:12px;color:#666;margin-top:2px}
@@ -213,21 +222,26 @@
     results = [];
     let h = '';
     out.forEach(o => {
-      h += `<div class="grp">${o.s}</div>`;
-      if (o.e) { h += `<div class="warn">${esc(o.e.message || o.e)}</div>`; return; }
-      if (!o.r.length) { h += `<div class="mt">Nothing found. If you're sure it's there, tap Copy debug and send it to Claude.</div>`; return; }
+      const shut = GM_getValue('shut' + o.s, false);
+      const ct = o.e ? 'error' : o.r.length + ' found';
+      h += `<div class="grp" data-g="${o.s}"><span>${o.s}</span><span class="ct">${ct}</span><span class="ar">${shut ? '▸' : '▾'}</span></div><div class="gb${shut ? ' shut' : ''}" data-g="${o.s}">`;
+      if (o.e) { h += `<div class="warn">${esc(o.e.message || o.e)}</div></div>`; return; }
+      if (!o.r.length) { h += `<div class="mt">Nothing found. If you're sure it's there, tap Copy debug and send it to Claude.</div></div>`; return; }
       o.r.forEach(it => {
         const n = results.push(it) - 1;
         const stock = it.sup == 'CNW' ? (it.branch != null ? `Branch ${it.branch}, national ${it.national}` : '') : it.stock;
-        h += `<div class="it"><div class="nm">${esc(it.name)}</div>
+        h += `<div class="it"><div class="row">${it.img ? `<img class="th" src="${esc(it.img)}" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.visibility='hidden'">` : '<div class="th none">no pic</div>'}<div class="bd"><div class="nm">${esc(it.name)}</div>
 <div class="mt">${esc(it.code)}${it.uom ? ' · ' + esc(it.uom) : ''}${stock ? ' · ' + esc(stock) : ''}${it.href ? ` · <a href="${esc(it.href)}" target="_blank">view</a>` : ''}</div>
 <div class="ad"><span class="pr">${it.price ? money(it.price) + ' ex' : '<span class="warn">no price</span>'}</span><span style="flex:1"></span>Qty <input type="number" min="0" step="any" value="1" inputmode="decimal"><button class="btn" data-n="${n}">Add</button></div>
-${it.note ? `<div class="mt warn">${esc(it.note)}</div>` : ''}</div>`;
+${it.note ? `<div class="mt warn">${esc(it.note)}</div>` : ''}</div></div></div>`;
       });
+      h += '</div>';
     });
     list.innerHTML = h;
     msg.textContent = results.length + ' found. Add drops a new line on the quote, then press Save Quote yourself.';
     list.querySelectorAll('button[data-n]').forEach(b => { b.onclick = () => add(b); });
+    // tap a supplier's heading to fold it away (remembered for next time)
+    list.querySelectorAll('.grp').forEach(g => { g.onclick = () => { const b = list.querySelector('.gb[data-g="' + g.dataset.g + '"]'); const shut = !b.classList.contains('shut'); b.classList.toggle('shut', shut); g.querySelector('.ar').textContent = shut ? '▸' : '▾'; GM_setValue('shut' + g.dataset.g, shut); }; });
   }
   async function add(b) {
     const it = results[+b.dataset.n]; const qty = Number(b.parentElement.querySelector('input').value) || 1;
