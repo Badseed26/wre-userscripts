@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AroFlo supplier items
 // @namespace    wre
-// @version      0.5
+// @version      0.6
 // @description  Supplier button on AroFlo quotes: search CNW and Tradezone with your own sign ins, pick an item, set the qty and it adds the line (item, part no, qty, cost in Value). Markup left alone, you press Save Quote.
 // @match        https://office.aroflo.com/ims/Site/Service/Quotes/*
 // @grant        GM_xmlhttpRequest
@@ -22,7 +22,7 @@
   // Live updates (23/10): Tampermonkey only checks for a new version every few hours. This checks the repo's latest commit every
   // 2 min (free when nothing's changed) and keeps the newest code here, so a push runs on the next page load. If the new code needs
   // a permission this install hasn't got, or this browser won't run it, the built in copy below runs like before.
-  const __wreName = "aroflo-supplier-items", __wreVer = "0.5", __wreHave = new Set(["// @connect api.github.com", "// @connect raw.githubusercontent.com", "// @connect shop.cnw.com.au", "// @connect www.tradezone.com.au", "// @grant GM_getValue", "// @grant GM_setValue", "// @grant GM_xmlhttpRequest", "// @grant unsafeWindow", "// @match https://office.aroflo.com/ims/Site/Service/Quotes/*", "// @run-at document-idle"]);
+  const __wreName = "aroflo-supplier-items", __wreVer = "0.6", __wreHave = new Set(["// @connect api.github.com", "// @connect raw.githubusercontent.com", "// @connect shop.cnw.com.au", "// @connect www.tradezone.com.au", "// @grant GM_getValue", "// @grant GM_setValue", "// @grant GM_xmlhttpRequest", "// @grant unsafeWindow", "// @match https://office.aroflo.com/ims/Site/Service/Quotes/*", "// @run-at document-idle"]);
   const __wreInfo0 = typeof GM_info != 'undefined' ? GM_info : null;
   const __wreSay = m => { try { console.log('[WRE live update] ' + __wreName + ': ' + m); } catch (e) {} };
   const __wreCmp = (a, b) => { const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number); for (let i = 0; i < Math.max(x.length, y.length); i++) { const d = (x[i] || 0) - (y[i] || 0); if (d) return d; } return 0; };
@@ -64,7 +64,7 @@
   }
   if (window.top === window.self) { __wreCheck(); setInterval(__wreCheck, 2 * 60e3 + 5000); }
   if (__wreLive()) return;
-  // ---------- the built in copy (src/aroflo-supplier-items.js at 0.5) ----------
+  // ---------- the built in copy (src/aroflo-supplier-items.js at 0.6) ----------
 
 (function () {
   'use strict';
@@ -106,7 +106,31 @@
   const html = t => new DOMParser().parseFromString(t || '', 'text/html');
   // a product photo's address (lazy loaded pages keep it in data-src)
   // prefers the real product photo, never the range or brand badges stuck on the corner
-  const imgOf = (el, base, prefer) => { if (!el) return ''; const badge = x => x.closest('[class*=Icons],[class*=icon],[class*=badge],[class*=Badge],[class*=brand],[class*=logo],[class*=label]'); const i = (prefer && el.querySelector(prefer)) || [...el.querySelectorAll('img')].find(x => !badge(x)); if (!i) return ''; const u = i.getAttribute('data-src') || i.getAttribute('data-original') || i.getAttribute('src') || ''; if (!u || /^data:|placeholder|loading|blank/i.test(u)) return ''; try { return new URL(u, base).href; } catch (e) { return ''; } };
+  const imgOf = (el, base, prefer) => { if (!el) return ''; const badge = x => x.closest('[class*=Icons],[class*=icon],[class*=badge],[class*=Badge],[class*=brand],[class*=logo],[class*=label]'); const i = (prefer && el.querySelector(prefer)) || [...el.querySelectorAll('img')].find(x => !badge(x)); if (!i) return ''; const cands = ['data-src', 'data-original', 'data-lazy', 'data-lazy-src', 'data-srcset', 'srcset', 'src'].map(a => (i.getAttribute(a) || '').split(',')[0].trim().split(' ')[0]); const u = cands.find(x => x && !/^data:|placeholder|loading|blank|spacer|\.gif$/i.test(x)) || ''; if (!u) return ''; try { return new URL(u, base).href; } catch (e) { return ''; } };
+
+  // ---------- branches ----------
+  // CNW: their store list gives each branch's number, and the price call takes it as stock_location. Default Oxenford.
+  // Tradezone: each product page lists stock per branch. Default Gold Coast. Names seen get kept for the picker.
+  const cnwBranch = () => GM_getValue('cnwBranch', 'Oxenford');
+  const tzBranch = () => GM_getValue('tzBranch', 'Gold Coast');
+  const short_ = n => clean(n).replace(/^CNW\s+/i, '');
+  async function cnwStores() {
+    const c = GM_getValue('cnwStores', null);
+    if (c && c.list && c.list.length && Date.now() - c.at < 7 * 864e5) return c.list;
+    try {
+      const r = await get(CNW + '/store-finder/storedata', true);
+      const list = (JSON.parse(r.responseText).features || []).map(f => f.properties || {}).filter(p => p.storeId).map(p => ({ id: String(p.storeId), name: short_(p.storeName || p.town), state: p.stateCode || '' })).sort((a, b) => a.name.localeCompare(b.name));
+      if (list.length) GM_setValue('cnwStores', { at: Date.now(), list });
+      return list;
+    } catch (e) { return c && c.list || []; }
+  }
+  async function cnwLoc() {
+    const want = cnwBranch().toLowerCase(), list = await cnwStores();
+    const hit = list.find(s => s.name.toLowerCase() == want) || list.find(s => s.name.toLowerCase().includes(want));
+    return hit ? hit.id : '119';
+  }
+  const tzSeen = names => { const have = new Set(GM_getValue('tzBranches', ['Gold Coast'])); names.forEach(n => n && have.add(n)); GM_setValue('tzBranches', [...have].sort()); };
+  async function pool(list, n, fn) { let i = 0; await Promise.all(Array.from({ length: Math.min(n, list.length) }, async () => { while (i < list.length) { const x = list[i++]; try { await fn(x); } catch (e) {} } })); }
 
   // ---------- CNW ----------
   async function searchCnw(term) {
@@ -115,7 +139,7 @@
     debug.CNW = { url: r.finalUrl || '', status: r.status, sample: '' };
     if (/\/login\b/.test(r.finalUrl || '')) throw out_('CNW');
     const doc = html(t);
-    const loc = (t.match(/stock_location=(\d+)/) || [])[1] || GM_getValue('cnwLoc', '119');
+    const loc = await cnwLoc();
     let items = [];
     const seen = new Set();
     doc.querySelectorAll('.scaffoldProductSearchItem').forEach(c => {
@@ -174,7 +198,28 @@
     if (!items.length) debug.Tradezone.sample = t.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/\s+/g, ' ').slice(0, 8000);
     if (items.length && items.every(i => !i.price)) { if (!signedIn(t)) throw out_('Tradezone'); items.forEach(i => { i.note = 'no price from Tradezone for this one'; }); }
     if (!items.length && !signedIn(t)) throw out_('Tradezone');
-    return items.slice(0, 12);
+    const top = items.slice(0, 12);
+    // each product page has stock per branch, the main photo and the price
+    const names = [];
+    await pool(top.slice(0, 8), 4, async it => {
+      if (!it.href) return;
+      const pr = await get(it.href); const d = html(pr.responseText);
+      it.branches = [...d.querySelectorAll('label.selector_row, .selector_rows .selector_row')].map(row => {
+        const qEl = row.querySelector('.qty'); const qt = clean(qEl && qEl.textContent);
+        const whole = clean((row.querySelector('.location_and_qty') || row).textContent);
+        let name = clean(whole.replace(qt, '').replace(/add to cart/i, ''));
+        if (!name) name = clean(whole.split(/\d/)[0]);
+        const n = (qt.match(/\d[\d,]*/) || ['0'])[0];
+        return { name, qty: Number(n.replace(/,/g, '')) };
+      }).filter(b => b.name);
+      names.push(...it.branches.map(b => b.name));
+      if (!it.img) { const og = d.querySelector('meta[property="og:image"]'); it.img = og ? og.getAttribute('content') : imgOf(d.querySelector('.product_media') || d.body, TZ); }
+      if (!it.price) { const m = clean((d.querySelector('.price_and_points') || {}).textContent).match(/\$\s*([\d,]+\.\d{2})\s*ex/i); if (m) { it.price = Number(m[1].replace(/,/g, '')); delete it.note; } }
+    });
+    if (names.length) tzSeen(names);
+    const want = tzBranch().toLowerCase();
+    top.forEach(it => { if (!it.branches || !it.branches.length) return; const b = it.branches.find(x => x.name.toLowerCase() == want) || it.branches.find(x => x.name.toLowerCase().includes(want)); it.branch = b ? b.qty : 0; it.bname = tzBranch(); });
+    return top;
   }
 
   // ---------- AroFlo: add the line ----------
@@ -230,6 +275,8 @@
 #wre-sup .sr input{flex:1;font-size:16px;padding:8px;border:1px solid #bbb;border-radius:8px}
 #wre-sup .btn{background:${ORANGE};color:#fff;border:0;border-radius:8px;padding:8px 12px;font:600 14px inherit}
 #wre-sup .opt{padding:0 10px 6px;font-size:13px;color:#555;display:flex;gap:12px;align-items:center}
+#wre-sup .br label{display:flex;align-items:center;gap:4px;flex:1}
+#wre-sup .br input{flex:1;min-width:0;font-size:16px;padding:5px 6px;border:1px solid #bbb;border-radius:6px}
 #wre-sup .msg{padding:0 10px 6px;font-size:13px;color:#555}
 #wre-sup .ls{overflow:auto;padding:0 10px 10px}
 #wre-sup .grp{display:flex;align-items:center;gap:8px;margin:12px 0 6px;padding:8px 10px;background:#f3f1ef;border-left:4px solid ${ORANGE};border-radius:6px;font:700 16px inherit;color:#222;cursor:pointer;user-select:none}
@@ -261,13 +308,25 @@
     box.innerHTML = `<div class="hd"><b>Supplier items</b><button title="Close">×</button></div>
 <div class="sr"><input type="search" placeholder="Search CNW and Tradezone" enterkeyhint="search"><button class="btn">Search</button></div>
 <div class="opt"><label><input type="checkbox" data-s="CNW" checked> CNW</label><label><input type="checkbox" data-s="Tradezone" checked> Tradezone</label><a href="#" class="dbg" style="margin-left:auto">Copy debug</a></div>
+<div class="opt br"><label>CNW <input list="wre-cnw-br" data-b="cnwBranch" placeholder="branch"></label><label>TZ <input list="wre-tz-br" data-b="tzBranch" placeholder="branch"></label><datalist id="wre-cnw-br"></datalist><datalist id="wre-tz-br"></datalist></div>
 <div class="msg"></div><div class="ls"></div>`;
     document.body.appendChild(box);
     termIn = box.querySelector('.sr input'); list = box.querySelector('.ls'); msg = box.querySelector('.msg');
     box.querySelector('.hd button').onclick = () => { box.style.display = 'none'; };
     box.querySelector('.sr .btn').onclick = run;
     termIn.addEventListener('keydown', e => { if (e.key == 'Enter') { e.preventDefault(); run(); } });
-    box.querySelectorAll('.opt input').forEach(c => { c.checked = GM_getValue('use' + c.dataset.s, true); c.onchange = () => GM_setValue('use' + c.dataset.s, c.checked); });
+    // branch pickers: type to search, the list fills in as you go. Saved, and the search runs again on change.
+    const fillLists = async () => {
+      box.querySelector('#wre-cnw-br').innerHTML = (await cnwStores()).map(st => `<option value="${esc(st.name)}">${esc(st.state)}</option>`).join('');
+      box.querySelector('#wre-tz-br').innerHTML = GM_getValue('tzBranches', ['Gold Coast']).map(n => `<option value="${esc(n)}">`).join('');
+    };
+    box.querySelectorAll('.br input').forEach(inp => {
+      inp.value = inp.dataset.b == 'cnwBranch' ? cnwBranch() : tzBranch();
+      inp.onfocus = () => { inp.select(); fillLists(); };
+      inp.onchange = () => { const v = clean(inp.value); if (!v) { inp.value = inp.dataset.b == 'cnwBranch' ? cnwBranch() : tzBranch(); return; } GM_setValue(inp.dataset.b, v); if (clean(termIn.value) && results.length) run(); };
+    });
+    fillLists();
+    box.querySelectorAll('.opt input[type=checkbox]').forEach(c => { c.checked = GM_getValue('use' + c.dataset.s, true); c.onchange = () => GM_setValue('use' + c.dataset.s, c.checked); });
     box.querySelector('.dbg').onclick = e => { e.preventDefault(); copyDebug(e.target); };
   }
   function open() { if (!box) build(); box.style.display = 'flex'; termIn.focus(); }
@@ -294,7 +353,7 @@
       if (!o.r.length) { h += `<div class="mt">Nothing found. If you're sure it's there, tap Copy debug and send it to Claude.</div></div>`; return; }
       o.r.forEach(it => {
         const n = results.push(it) - 1;
-        const stock = it.sup == 'CNW' ? (it.branch != null ? `Branch ${it.branch}, national ${it.national}` : '') : it.stock;
+        const stock = it.sup == 'CNW' ? (it.branch != null ? `${cnwBranch()} ${it.branch}, national ${it.national}` : '') : (it.bname ? `${it.bname} ${it.branch || 'none'}` : it.stock);
         h += `<div class="it"><div class="row">${it.img ? `<img class="th" src="${esc(it.img)}" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.visibility='hidden'">` : '<div class="th none">no pic</div>'}<div class="bd"><div class="nm">${esc(it.name)}</div>
 <div class="mt">${esc(it.code)}${it.uom ? ' · ' + esc(it.uom) : ''}${stock ? ' · ' + esc(stock) : ''}${it.href ? ` · <a href="${esc(it.href)}" target="_blank">view</a>` : ''}</div>
 <div class="ad"><span class="pr">${it.price ? money(it.price) + ' ex' : '<span class="warn">no price</span>'}</span><span style="flex:1"></span>Qty <input type="number" min="0" step="any" value="1" inputmode="decimal"><button class="btn" data-n="${n}">Add</button></div>
@@ -356,7 +415,7 @@ ${it.note ? `<div class="mt warn">${esc(it.note)}</div>` : ''}</div></div></div>
       const use = sups && sups.length ? sups : ['CNW', 'Tradezone'];
       const out = [];
       for (const sp of use) {
-        try { (await (sp == 'CNW' ? searchCnw : searchTz)(term)).forEach(it => out.push({ sup: it.sup, code: it.code, name: it.name, uom: it.uom || '', price: it.price || 0, branch: it.branch, national: it.national, stock: it.stock || '', note: it.note || '' })); }
+        try { (await (sp == 'CNW' ? searchCnw : searchTz)(term)).forEach(it => out.push({ sup: it.sup, code: it.code, name: it.name, uom: it.uom || '', price: it.price || 0, branch: it.branch, bname: it.sup == 'CNW' ? cnwBranch() : (it.bname || ''), national: it.national, stock: it.stock || '', note: it.note || '' })); }
         catch (e) { out.push(e.signedOut ? { sup: sp, signedOut: true } : { sup: sp, error: String(e.message || e) }); }
       }
       return out;
