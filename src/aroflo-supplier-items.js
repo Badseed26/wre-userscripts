@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AroFlo supplier items
 // @namespace    wre
-// @version      0.2
+// @version      0.3
 // @description  Supplier button on AroFlo quotes: search CNW and Tradezone with your own sign ins, pick an item, set the qty and it adds the line (item, part no, qty, cost in Value). Markup left alone, you press Save Quote.
 // @match        https://office.aroflo.com/ims/Site/Service/Quotes/*
 // @grant        GM_xmlhttpRequest
@@ -49,7 +49,8 @@
   }
   const html = t => new DOMParser().parseFromString(t || '', 'text/html');
   // a product photo's address (lazy loaded pages keep it in data-src)
-  const imgOf = (el, base) => { const i = el && el.querySelector('img'); if (!i) return ''; const u = i.getAttribute('data-src') || i.getAttribute('data-original') || i.getAttribute('src') || ''; if (!u || /^data:|placeholder|loading|blank/i.test(u)) return ''; try { return new URL(u, base).href; } catch (e) { return ''; } };
+  // prefers the real product photo, never the range or brand badges stuck on the corner
+  const imgOf = (el, base, prefer) => { if (!el) return ''; const badge = x => x.closest('[class*=Icons],[class*=icon],[class*=badge],[class*=Badge],[class*=brand],[class*=logo],[class*=label]'); const i = (prefer && el.querySelector(prefer)) || [...el.querySelectorAll('img')].find(x => !badge(x)); if (!i) return ''; const u = i.getAttribute('data-src') || i.getAttribute('data-original') || i.getAttribute('src') || ''; if (!u || /^data:|placeholder|loading|blank/i.test(u)) return ''; try { return new URL(u, base).href; } catch (e) { return ''; } };
 
   // ---------- CNW ----------
   async function searchCnw(term) {
@@ -69,7 +70,7 @@
       const id = idEl ? idEl.id.split('-')[0] : '';
       const code = clean((c.querySelector('a.product-code') || {}).textContent).replace(/^Code:\s*/i, '') || full;
       if (!id || seen.has(id)) return; seen.add(id);
-      items.push({ sup: 'CNW', id, code, full, name: clean(a && (a.getAttribute('data-short-name') || a.getAttribute('title') || a.textContent)), uom: clean((c.querySelector('.priceUOM span') || {}).textContent), href: a ? CNW + a.getAttribute('href') : '', img: imgOf(c.querySelector('.scaffoldProductSearchItemWrapperImage') || c, CNW) });
+      items.push({ sup: 'CNW', id, code, full, name: clean(a && (a.getAttribute('data-short-name') || a.getAttribute('title') || a.textContent)), uom: clean((c.querySelector('.priceUOM span') || {}).textContent), href: a ? CNW + a.getAttribute('href') : '', img: imgOf(c, CNW, 'img.product-thumb') });
     });
     // searched an exact code and CNW jumped straight to the product page
     if (!items.length && doc.querySelector('.scaffoldProductDisplayData')) {
@@ -112,7 +113,7 @@
       const txt = clean(c.textContent);
       const m = txt.match(/\$\s*([\d,]+\.\d{2})\s*ex/i);
       const st = c.querySelector('.stock_wrapper');
-      items.push({ sup: 'Tradezone', id, code: clean((c.querySelector('h6.part') || {}).textContent), sku: (c.querySelector('h5.sku input') || {}).value || '', name: clean(a && (a.getAttribute('title') || a.textContent)), href: a ? new URL(a.getAttribute('href'), TZ).href : '', price: m ? Number(m[1].replace(/,/g, '')) : null, stock: st ? clean(st.textContent) || (/in_stock/.test(st.className) ? 'In stock' : '') : '', img: imgOf(c.querySelector('.product-image') || c, TZ) });
+      items.push({ sup: 'Tradezone', id, code: clean((c.querySelector('h6.part') || {}).textContent), sku: (c.querySelector('h5.sku input') || {}).value || '', name: clean(a && (a.getAttribute('title') || a.textContent)), href: a ? new URL(a.getAttribute('href'), TZ).href : '', price: m ? Number(m[1].replace(/,/g, '')) : null, stock: st ? clean(st.textContent) || (/in_stock/.test(st.className) ? 'In stock' : '') : '', img: imgOf(c, TZ, 'a.product-image img') });
     });
     if (!items.length) debug.Tradezone.sample = t.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/\s+/g, ' ').slice(0, 8000);
     if (items.length && items.every(i => !i.price)) items.forEach(i => { i.note = 'no price, check you\'re signed in to Tradezone'; });
