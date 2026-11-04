@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         AroFlo supplier items
 // @namespace    wre
-// @version      0.6
-// @description  Supplier button on AroFlo quotes: search CNW and Tradezone with your own sign ins, pick an item, set the qty and it adds the line (item, part no, qty, cost in Value). Markup left alone, you press Save Quote.
+// @version      0.7
+// @description  Supplier button on AroFlo quotes: search CNW and Tradezone with your own sign ins, pick an item, set the qty and it adds the line (item, part no, qty, cost in Value). Markup left alone, you press Save Quote. Order puts the quote's parts in your CNW or Tradezone cart (never checks out).
 // @match        https://office.aroflo.com/ims/Site/Service/Quotes/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
@@ -22,7 +22,7 @@
   // Live updates (23/10): Tampermonkey only checks for a new version every few hours. This checks the repo's latest commit every
   // 2 min (free when nothing's changed) and keeps the newest code here, so a push runs on the next page load. If the new code needs
   // a permission this install hasn't got, or this browser won't run it, the built in copy below runs like before.
-  const __wreName = "aroflo-supplier-items", __wreVer = "0.6", __wreHave = new Set(["// @connect api.github.com", "// @connect raw.githubusercontent.com", "// @connect shop.cnw.com.au", "// @connect www.tradezone.com.au", "// @grant GM_getValue", "// @grant GM_setValue", "// @grant GM_xmlhttpRequest", "// @grant unsafeWindow", "// @match https://office.aroflo.com/ims/Site/Service/Quotes/*", "// @run-at document-idle"]);
+  const __wreName = "aroflo-supplier-items", __wreVer = "0.7", __wreHave = new Set(["// @connect api.github.com", "// @connect raw.githubusercontent.com", "// @connect shop.cnw.com.au", "// @connect www.tradezone.com.au", "// @grant GM_getValue", "// @grant GM_setValue", "// @grant GM_xmlhttpRequest", "// @grant unsafeWindow", "// @match https://office.aroflo.com/ims/Site/Service/Quotes/*", "// @run-at document-idle"]);
   const __wreInfo0 = typeof GM_info != 'undefined' ? GM_info : null;
   const __wreSay = m => { try { console.log('[WRE live update] ' + __wreName + ': ' + m); } catch (e) {} };
   const __wreCmp = (a, b) => { const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number); for (let i = 0; i < Math.max(x.length, y.length); i++) { const d = (x[i] || 0) - (y[i] || 0); if (d) return d; } return 0; };
@@ -64,7 +64,7 @@
   }
   if (window.top === window.self) { __wreCheck(); setInterval(__wreCheck, 2 * 60e3 + 5000); }
   if (__wreLive()) return;
-  // ---------- the built in copy (src/aroflo-supplier-items.js at 0.6) ----------
+  // ---------- the built in copy (src/aroflo-supplier-items.js at 0.7) ----------
 
 (function () {
   'use strict';
@@ -104,6 +104,21 @@
     });
   }
   const html = t => new DOMParser().parseFromString(t || '', 'text/html');
+  function post(url, data, json) {
+    return new Promise((resolve, reject) => {
+      GM_xmlhttpRequest({
+        method: 'POST', url, data, timeout: 25000,
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8', 'X-Requested-With': 'XMLHttpRequest', Accept: json ? 'application/json, text/javascript, */*' : 'text/html, */*' },
+        onload: r => resolve(r),
+        onerror: () => reject(new Error('couldn\'t reach ' + new URL(url).host)),
+        ontimeout: () => reject(new Error(new URL(url).host + ' took too long')),
+      });
+    });
+  }
+  const form = o => Object.keys(o).map(k => encodeURIComponent(k) + '=' + encodeURIComponent(o[k])).join('&');
+  // parts added through the window, so Order knows which supplier and product each Part No is
+  const partMap = () => GM_getValue('partMap', {});
+  const remember = it => { const m = partMap(); m[String(it.code).toUpperCase()] = { sup: it.sup, full: it.full || '', id: it.id || '', name: it.name, href: it.href || '', at: Date.now() }; const k = Object.keys(m); if (k.length > 600) k.sort((a, b) => m[a].at - m[b].at).slice(0, k.length - 600).forEach(x => delete m[x]); GM_setValue('partMap', m); };
   // a product photo's address (lazy loaded pages keep it in data-src)
   // prefers the real product photo, never the range or brand badges stuck on the corner
   const imgOf = (el, base, prefer) => { if (!el) return ''; const badge = x => x.closest('[class*=Icons],[class*=icon],[class*=badge],[class*=Badge],[class*=brand],[class*=logo],[class*=label]'); const i = (prefer && el.querySelector(prefer)) || [...el.querySelectorAll('img')].find(x => !badge(x)); if (!i) return ''; const cands = ['data-src', 'data-original', 'data-lazy', 'data-lazy-src', 'data-srcset', 'srcset', 'src'].map(a => (i.getAttribute(a) || '').split(',')[0].trim().split(' ')[0]); const u = cands.find(x => x && !/^data:|placeholder|loading|blank|spacer|\.gif$/i.test(x)) || ''; if (!u) return ''; try { return new URL(u, base).href; } catch (e) { return ''; } };
@@ -155,7 +170,7 @@
     // searched an exact code and CNW jumped straight to the product page
     if (!items.length && doc.querySelector('.scaffoldProductDisplayData')) {
       const p = doc.querySelector('.supplierCost span.price[id], span.price[id]');
-      items.push({ sup: 'CNW', id: p ? p.id : '', code: clean((doc.querySelector('.scaffoldProductDisplayDataCode .product-code') || {}).textContent).replace(/^Code:\s*/i, ''), name: clean((doc.querySelector('h1') || {}).textContent), uom: clean((doc.querySelector('.scaffoldUnitOfMesureCode') || {}).textContent), href: r.finalUrl || '', img: (doc.querySelector('meta[property="og:image"]') || { getAttribute: () => '' }).getAttribute('content') || imgOf(doc.querySelector('.scaffoldProductDisplayWrapper'), CNW) });
+      items.push({ sup: 'CNW', id: p ? p.id : '', full: decodeURIComponent(((r.finalUrl || '').match(/\/p\/([^/?#]+)/) || [])[1] || ''), code: clean((doc.querySelector('.scaffoldProductDisplayDataCode .product-code') || {}).textContent).replace(/^Code:\s*/i, ''), name: clean((doc.querySelector('h1') || {}).textContent), uom: clean((doc.querySelector('.scaffoldUnitOfMesureCode') || {}).textContent), href: r.finalUrl || '', img: (doc.querySelector('meta[property="og:image"]') || { getAttribute: () => '' }).getAttribute('content') || imgOf(doc.querySelector('.scaffoldProductDisplayWrapper'), CNW) });
     }
     if (!items.length) {
       debug.CNW.sample = t.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/\s+/g, ' ').slice(0, 8000);
@@ -262,6 +277,111 @@
     return { ok, miss };
   }
 
+  // ---------- order from the quote ----------
+  // Reads every line with a Part No, works out the supplier (from when it was added through the window, else an exact
+  // code match on CNW then Tradezone), rounds part quantities up (0.5 of a roll is 1 roll) and merges doubles.
+  // Adding puts them in that supplier's cart with your sign in, then reads the cart back. It never checks out.
+  function quoteParts() {
+    const cell = (row, k) => { let td = row.querySelector('td.q-col-' + k); if (!td) { const th = document.querySelector('th.q-col-' + k); if (th) td = row.children[[...th.parentElement.children].indexOf(th)]; } if (!td) return ''; const x = td.querySelector('input:not([type=hidden]):not([type=checkbox]),textarea'); return clean(x ? x.value : td.textContent); };
+    const rows = [...document.querySelectorAll('tr')].filter(r => r.querySelector('td.q-col-partNo, td.q-col-item'));
+    const by = {};
+    rows.forEach(r => {
+      const part = cell(r, 'partNo').toUpperCase(); if (!part) return;
+      const q = Number(cell(r, 'qty')) || 0; if (q <= 0) return;
+      const b = by[part] || (by[part] = { part, item: cell(r, 'item'), qty: 0, value: Number(cell(r, 'value')) || 0 });
+      b.qty += q;
+    });
+    return Object.values(by).map(b => Object.assign(b, { order: Math.ceil(b.qty - 1e-9) }));
+  }
+  async function resolvePart(p) {
+    const m = partMap()[p.part];
+    const exact = (list, sup) => list.find(x => String(x.code).toUpperCase() == p.part || String(x.full || '').toUpperCase() == p.part);
+    const tryCnw = async () => { const l = await searchCnw(p.part); const x = exact(l, 'CNW'); return x ? Object.assign(p, { sup: 'CNW', full: x.full, id: x.id, name: x.name, price: x.price, branch: x.branch, href: x.href }) : null; };
+    const tryTz = async () => { const l = await searchTz(p.part); const x = exact(l, 'Tradezone'); return x ? Object.assign(p, { sup: 'Tradezone', id: x.id, name: x.name, price: x.price, branch: x.branch, href: x.href }) : null; };
+    try {
+      if (m && m.sup == 'Tradezone') return (await tryTz()) || Object.assign(p, { sup: 'Tradezone', id: m.id, name: m.name, href: m.href });
+      if (m && m.sup == 'CNW') return (await tryCnw()) || Object.assign(p, { sup: 'CNW', full: m.full, id: m.id, name: m.name, href: m.href });
+      return (await tryCnw()) || (await tryTz()) || Object.assign(p, { sup: '' });
+    } catch (e) { return Object.assign(p, { sup: e.signedOut || '', err: e.signedOut ? 'signed out' : String(e.message || e), signedOut: e.signedOut }); }
+  }
+  async function cnwCart(parts) {
+    const page = await get(CNW + '/cart');
+    if (/\/login\b/.test(page.finalUrl || '')) throw out_('CNW');
+    const t = page.responseText || '';
+    const tok = (t.match(/CSRFToken["']?\s*[:=]\s*["']([^"']+)/) || [])[1] || (html(t).querySelector('input[name=CSRFToken]') || {}).value;
+    if (!tok) throw new Error('couldn\'t get CNW\'s cart ready (no token)');
+    for (const p of parts) {
+      if (!p.full) { p.res = 'no CNW product code'; continue; }
+      const r = await post(CNW + '/cart/add', form({ productCodePost: p.full, qty: p.order, CSRFToken: tok }));
+      debug.cnwAdd = { status: r.status, sample: (r.responseText || '').replace(/\s+/g, ' ').slice(0, 1500) };
+      p.res = r.status >= 400 ? 'CNW said no (' + r.status + ')' : 'sent';
+    }
+    const after = (await get(CNW + '/cart')).responseText || '';
+    parts.forEach(p => { if (p.res == 'sent') p.res = after.includes(p.full) ? 'in cart' : 'didn\'t show in the cart'; });
+  }
+  async function tzCart(parts) {
+    for (const p of parts) {
+      if (!p.id || !p.href) { p.res = 'no Tradezone product'; continue; }
+      const pg = await get(p.href);
+      if (/customer\/account\/login/.test(pg.finalUrl || '')) throw out_('Tradezone');
+      const d = html(pg.responseText);
+      const key = (d.querySelector('input[name=form_key]') || {}).value || ((pg.responseText || '').match(/form_key["']?\s*[:=]\s*["']([^"']+)/) || [])[1];
+      const f = d.querySelector('form#product_addtocart_form, form[action*="checkout/cart/add"]');
+      const url = f ? new URL(f.getAttribute('action'), TZ).href : TZ + '/checkout/cart/add/product/' + p.id + '/';
+      const r = await post(url, form({ product: p.id, qty: p.order, form_key: key || '' }));
+      debug.tzAdd = { status: r.status, url: url.replace(/\?.*/, ''), sample: (r.responseText || '').replace(/\s+/g, ' ').slice(0, 1500) };
+      p.res = r.status >= 400 ? 'Tradezone said no (' + r.status + ')' : 'sent';
+    }
+    const after = (await get(TZ + '/checkout/cart/')).responseText || '';
+    parts.forEach(p => { if (p.res == 'sent') p.res = (after.includes('-' + p.id + '.html') || (p.name && after.includes(p.name))) ? 'in cart' : 'didn\'t show in the cart'; });
+  }
+  let orderParts = [];
+  async function orderView() {
+    if (!box) build(); box.style.display = 'flex';
+    const parts = quoteParts();
+    if (!parts.length) { msg.textContent = ''; list.innerHTML = '<div class="mt">No lines with a Part No on this quote. Lines added through the Supplier window carry one, the rest you\'d order by hand.</div>'; return; }
+    msg.textContent = 'Working out ' + parts.length + ' parts…'; list.innerHTML = '';
+    await pool(parts, 3, resolvePart);
+    orderParts = parts; drawOrder();
+  }
+  function drawOrder() {
+    const parts = orderParts; let h = '';
+    const outs = [...new Set(parts.filter(p => p.signedOut).map(p => p.signedOut))];
+    outs.forEach(sp => { h += `<div class="out"><b>Signed out of ${sp}</b>Sign in, come back, then tap Order again.<div class="btns"><button class="btn" data-login="${sp}">Sign in to ${sp}</button></div></div>`; });
+    ['CNW', 'Tradezone'].forEach(sp => {
+      const ps = parts.filter(p => p.sup == sp && !p.signedOut); if (!ps.length) return;
+      const br = sp == 'CNW' ? cnwBranch() : tzBranch();
+      h += `<div class="grp"><span>${sp}</span><span class="ct">${ps.length} parts</span></div><div class="gb">`;
+      ps.forEach(p => {
+        const n = parts.indexOf(p);
+        const moved = p.price && p.value && Math.abs(p.price - p.value) >= 0.01 ? ` <span class="warn">(quoted ${money(p.value)})</span>` : '';
+        h += `<div class="it"><label class="row" style="align-items:flex-start"><input type="checkbox" data-o="${n}" ${p.res == 'in cart' ? '' : 'checked'} style="margin-top:4px"><div class="bd"><div class="nm">${esc(p.name || p.item)}</div>
+<div class="mt">${esc(p.part)}${p.branch != null ? ' · ' + esc(br) + ' ' + p.branch : ''}${p.price ? ' · ' + money(p.price) + ' ex' + moved : ''}${p.qty != p.order ? ' · quote has ' + p.qty + ', rounded up' : ''}</div>
+${p.res ? `<div class="mt ${p.res == 'in cart' ? '' : 'warn'}"><b>${esc(p.res)}</b></div>` : ''}</div></label>
+<div class="ad"><span style="flex:1"></span>Order <input type="number" min="1" step="1" value="${p.order}" data-q="${n}" inputmode="numeric"></div></div>`;
+      });
+      h += `<div class="ad"><button class="btn" data-cart="${sp}" style="flex:1">Add ticked to ${sp} cart</button><button class="btn grey" data-open="${sp}">Open cart</button></div></div>`;
+    });
+    const none = parts.filter(p => !p.sup && !p.signedOut);
+    if (none.length) { h += `<div class="grp"><span>Not matched</span><span class="ct">${none.length}</span></div><div class="gb">` + none.map(p => `<div class="it"><div class="nm">${esc(p.item)}</div><div class="mt">${esc(p.part)} · qty ${p.order}${p.err ? ' · ' + esc(p.err) : ' · not found as an exact code on CNW or Tradezone'}</div></div>`).join('') + '</div>'; }
+    list.innerHTML = h;
+    msg.textContent = 'Tick what you want, check the qty, then add to the cart. It never checks out, you order on their site.';
+    list.querySelectorAll('input[data-q]').forEach(i => { i.onchange = () => { const v = Math.max(1, Math.ceil(Number(i.value) || 1)); i.value = v; parts[+i.dataset.q].order = v; }; });
+    list.querySelectorAll('button[data-login]').forEach(b => { b.onclick = () => W.open(LOGIN[b.dataset.login], '_blank'); });
+    list.querySelectorAll('button[data-open]').forEach(b => { b.onclick = () => W.open(b.dataset.open == 'CNW' ? CNW + '/cart' : TZ + '/checkout/cart/', '_blank'); });
+    list.querySelectorAll('button[data-cart]').forEach(b => { b.onclick = async () => {
+      const sp = b.dataset.cart;
+      const pick = [...list.querySelectorAll('input[data-o]')].filter(c => c.checked).map(c => parts[+c.dataset.o]).filter(p => p.sup == sp);
+      if (!pick.length) { msg.textContent = 'Nothing ticked for ' + sp + '.'; return; }
+      b.disabled = true; b.textContent = 'Adding…';
+      try { await (sp == 'CNW' ? cnwCart : tzCart)(pick); }
+      catch (e) { pick.forEach(p => { if (!p.res || p.res == 'sent') p.res = e.signedOut ? 'signed out' : String(e.message || e); if (e.signedOut) p.signedOut = sp; }); }
+      drawOrder();
+      const ok = pick.filter(p => p.res == 'in cart').length;
+      msg.textContent = ok + ' of ' + pick.length + ' in your ' + sp + ' cart.' + (ok < pick.length ? ' Anything red didn\'t make it, tap Copy debug and send it to Claude.' : ' Open cart to check it and order.');
+    }; });
+  }
+
   // ---------- the window ----------
   let box, list, msg, termIn;
   function css() {
@@ -305,14 +425,15 @@
   function build() {
     css();
     box = document.createElement('div'); box.id = 'wre-sup';
-    box.innerHTML = `<div class="hd"><b>Supplier items</b><button title="Close">×</button></div>
+    box.innerHTML = `<div class="hd"><b>Supplier items</b><button class="ord" title="Order this quote" style="font:600 13px inherit;border:1px solid #fff8;border-radius:14px;padding:4px 10px">Order</button><button class="x" title="Close">×</button></div>
 <div class="sr"><input type="search" placeholder="Search CNW and Tradezone" enterkeyhint="search"><button class="btn">Search</button></div>
 <div class="opt"><label><input type="checkbox" data-s="CNW" checked> CNW</label><label><input type="checkbox" data-s="Tradezone" checked> Tradezone</label><a href="#" class="dbg" style="margin-left:auto">Copy debug</a></div>
 <div class="opt br"><label>CNW <input list="wre-cnw-br" data-b="cnwBranch" placeholder="branch"></label><label>TZ <input list="wre-tz-br" data-b="tzBranch" placeholder="branch"></label><datalist id="wre-cnw-br"></datalist><datalist id="wre-tz-br"></datalist></div>
 <div class="msg"></div><div class="ls"></div>`;
     document.body.appendChild(box);
     termIn = box.querySelector('.sr input'); list = box.querySelector('.ls'); msg = box.querySelector('.msg');
-    box.querySelector('.hd button').onclick = () => { box.style.display = 'none'; };
+    box.querySelector('.hd .x').onclick = () => { box.style.display = 'none'; };
+    box.querySelector('.hd .ord').onclick = () => orderView();
     box.querySelector('.sr .btn').onclick = run;
     termIn.addEventListener('keydown', e => { if (e.key == 'Enter') { e.preventDefault(); run(); } });
     // branch pickers: type to search, the list fills in as you go. Saved, and the search runs again on change.
@@ -375,6 +496,7 @@ ${it.note ? `<div class="mt warn">${esc(it.note)}</div>` : ''}</div></div></div>
     b.disabled = true; b.textContent = '…';
     try {
       const r = await addLine(it, qty);
+      remember(it);
       b.textContent = r.ok ? 'Added' : 'Check it';
       msg.textContent = r.ok ? `Added ${qty} x ${it.code}${r.miss.length ? ' (couldn\'t find ' + r.miss.join(', ') + ', fill that by hand)' : ''}. Save Quote when you're done.` : 'Added, but the line didn\'t read back right. Check it before saving.';
     } catch (e) { b.textContent = 'Add'; msg.textContent = 'Didn\'t add: ' + (e.message || e); }
@@ -438,5 +560,12 @@ ${it.note ? `<div class="mt warn">${esc(it.note)}</div>` : ''}</div></div></div>
   if (!/viewexist=1/.test(location.search) && !document.querySelector('#newQuoteContainer')) return;
   place();
   new MutationObserver(() => place()).observe(document.body, { childList: true, subtree: true });
+  // an accepted quote has no Add Line Item, so give it its own Order button
+  setTimeout(() => {
+    if (document.querySelector('.wre-sup-open') || !document.querySelector('th.q-col-partNo')) return;
+    const o = document.createElement('button'); o.type = 'button'; o.textContent = 'Order parts';
+    o.style.cssText = 'position:fixed;left:10px;bottom:10px;z-index:2147483645;background:' + ORANGE + ';color:#fff;border:0;border-radius:18px;padding:9px 14px;font:600 14px -apple-system,Segoe UI,sans-serif;box-shadow:0 2px 8px #0004';
+    o.onclick = () => orderView(); document.body.appendChild(o);
+  }, 2500);
 })();
 })();
