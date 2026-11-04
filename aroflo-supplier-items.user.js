@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AroFlo supplier items
 // @namespace    wre
-// @version      0.7
+// @version      0.8
 // @description  Supplier button on AroFlo quotes: search CNW and Tradezone with your own sign ins, pick an item, set the qty and it adds the line (item, part no, qty, cost in Value). Markup left alone, you press Save Quote. Order puts the quote's parts in your CNW or Tradezone cart (never checks out).
 // @match        https://office.aroflo.com/ims/Site/Service/Quotes/*
 // @grant        GM_xmlhttpRequest
@@ -22,7 +22,7 @@
   // Live updates (23/10): Tampermonkey only checks for a new version every few hours. This checks the repo's latest commit every
   // 2 min (free when nothing's changed) and keeps the newest code here, so a push runs on the next page load. If the new code needs
   // a permission this install hasn't got, or this browser won't run it, the built in copy below runs like before.
-  const __wreName = "aroflo-supplier-items", __wreVer = "0.7", __wreHave = new Set(["// @connect api.github.com", "// @connect raw.githubusercontent.com", "// @connect shop.cnw.com.au", "// @connect www.tradezone.com.au", "// @grant GM_getValue", "// @grant GM_setValue", "// @grant GM_xmlhttpRequest", "// @grant unsafeWindow", "// @match https://office.aroflo.com/ims/Site/Service/Quotes/*", "// @run-at document-idle"]);
+  const __wreName = "aroflo-supplier-items", __wreVer = "0.8", __wreHave = new Set(["// @connect api.github.com", "// @connect raw.githubusercontent.com", "// @connect shop.cnw.com.au", "// @connect www.tradezone.com.au", "// @grant GM_getValue", "// @grant GM_setValue", "// @grant GM_xmlhttpRequest", "// @grant unsafeWindow", "// @match https://office.aroflo.com/ims/Site/Service/Quotes/*", "// @run-at document-idle"]);
   const __wreInfo0 = typeof GM_info != 'undefined' ? GM_info : null;
   const __wreSay = m => { try { console.log('[WRE live update] ' + __wreName + ': ' + m); } catch (e) {} };
   const __wreCmp = (a, b) => { const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number); for (let i = 0; i < Math.max(x.length, y.length); i++) { const d = (x[i] || 0) - (y[i] || 0); if (d) return d; } return 0; };
@@ -64,7 +64,7 @@
   }
   if (window.top === window.self) { __wreCheck(); setInterval(__wreCheck, 2 * 60e3 + 5000); }
   if (__wreLive()) return;
-  // ---------- the built in copy (src/aroflo-supplier-items.js at 0.7) ----------
+  // ---------- the built in copy (src/aroflo-supplier-items.js at 0.8) ----------
 
 (function () {
   'use strict';
@@ -148,15 +148,9 @@
   async function pool(list, n, fn) { let i = 0; await Promise.all(Array.from({ length: Math.min(n, list.length) }, async () => { while (i < list.length) { const x = list[i++]; try { await fn(x); } catch (e) {} } })); }
 
   // ---------- CNW ----------
-  async function searchCnw(term) {
-    const r = await get(CNW + '/search?text=' + encodeURIComponent(term));
-    const t = r.responseText || '';
-    debug.CNW = { url: r.finalUrl || '', status: r.status, sample: '' };
-    if (/\/login\b/.test(r.finalUrl || '')) throw out_('CNW');
-    const doc = html(t);
-    const loc = await cnwLoc();
-    let items = [];
-    const seen = new Set();
+  // product cards on a CNW search or category page
+  function cnwCards(doc) {
+    const items = [], seen = new Set();
     doc.querySelectorAll('.scaffoldProductSearchItem').forEach(c => {
       if (c.closest('.productCarousel')) return;                 // skip "you might like" sliders
       const a = c.querySelector('a.product-title');
@@ -167,13 +161,44 @@
       if (!id || seen.has(id)) return; seen.add(id);
       items.push({ sup: 'CNW', id, code, full, name: clean(a && (a.getAttribute('data-short-name') || a.getAttribute('title') || a.textContent)), uom: clean((c.querySelector('.priceUOM span') || {}).textContent), href: a ? CNW + a.getAttribute('href') : '', img: imgOf(c, CNW, 'img.product-thumb') });
     });
-    // searched an exact code and CNW jumped straight to the product page
-    if (!items.length && doc.querySelector('.scaffoldProductDisplayData')) {
-      const p = doc.querySelector('.supplierCost span.price[id], span.price[id]');
-      items.push({ sup: 'CNW', id: p ? p.id : '', full: decodeURIComponent(((r.finalUrl || '').match(/\/p\/([^/?#]+)/) || [])[1] || ''), code: clean((doc.querySelector('.scaffoldProductDisplayDataCode .product-code') || {}).textContent).replace(/^Code:\s*/i, ''), name: clean((doc.querySelector('h1') || {}).textContent), uom: clean((doc.querySelector('.scaffoldUnitOfMesureCode') || {}).textContent), href: r.finalUrl || '', img: (doc.querySelector('meta[property="og:image"]') || { getAttribute: () => '' }).getAttribute('content') || imgOf(doc.querySelector('.scaffoldProductDisplayWrapper'), CNW) });
+    return items;
+  }
+  // one CNW product page: its number for the price call, code, unit and photo
+  function cnwProduct(doc, url) {
+    if (!doc.querySelector('.scaffoldProductDisplayData')) return null;
+    const p = doc.querySelector('.supplierCost span.price[id], span.price[id]');
+    return { sup: 'CNW', id: p ? p.id : '', full: decodeURIComponent(((url || '').match(/\/p\/([^/?#]+)/) || [])[1] || ''), code: clean((doc.querySelector('.scaffoldProductDisplayDataCode .product-code') || {}).textContent).replace(/^Code:\s*/i, ''), name: clean((doc.querySelector('h1') || {}).textContent), uom: clean((doc.querySelector('.scaffoldUnitOfMesureCode') || {}).textContent), href: url || '', img: (doc.querySelector('meta[property="og:image"]') || { getAttribute: () => '' }).getAttribute('content') || imgOf(doc.querySelector('.scaffoldProductDisplayWrapper'), CNW) };
+  }
+  async function searchCnw(term) {
+    // 1. the normal search. Some words (like GPO) jump to a category page instead, which loads its products later
+    let r = await get(CNW + '/search?text=' + encodeURIComponent(term));
+    let t = r.responseText || '';
+    debug.CNW = { term, tried: [], url: r.finalUrl || '', status: r.status, sample: '' };
+    if (/\/login\b/.test(r.finalUrl || '')) throw out_('CNW');
+    let doc = html(t);
+    const loc = await cnwLoc();
+    let items = cnwCards(doc);
+    debug.CNW.tried.push('search ' + items.length);
+    if (!items.length) { const one = cnwProduct(doc, r.finalUrl); if (one) items.push(one); }
+    // 2. the same search without the jump
+    if (!items.length) {
+      const r2 = await get(CNW + '/search?q=' + encodeURIComponent(term + ':relevance'));
+      const d2 = html(r2.responseText); items = cnwCards(d2);
+      debug.CNW.tried.push('q ' + items.length + ' ' + (r2.finalUrl || '').replace(CNW, '').slice(0, 80));
+      if (items.length) { t = r2.responseText; doc = d2; }
+    }
+    // 3. the search box's own suggestions, then each product's page for its number and photo
+    if (!items.length) {
+      const a = await get(CNW + '/search/autocomplete/SearchBox?term=' + encodeURIComponent(term), true);
+      let prods = []; try { prods = JSON.parse(a.responseText).products || []; } catch (e) {}
+      debug.CNW.tried.push('suggest ' + prods.length);
+      const got = [];
+      await pool(prods.slice(0, 8), 4, async pr => { if (!pr.url) return; const u = CNW + pr.url; const pg = await get(u); const one = cnwProduct(html(pg.responseText), u); if (one && one.id) { one.full = one.full || pr.code; one.name = one.name || clean(pr.name); got.push(one); } });
+      items = prods.map(pr => got.find(g => g.full == pr.code)).filter(Boolean);
     }
     if (!items.length) {
-      debug.CNW.sample = t.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/\s+/g, ' ').slice(0, 8000);
+      const i = t.indexOf('scaffoldProductSearch');
+      debug.CNW.sample = (i < 0 ? '(no product cards in the page) ' : '') + t.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/\s+/g, ' ').slice(Math.max(0, i - 200), Math.max(0, i - 200) + 6000);
       return [];
     }
     items = items.slice(0, 12);
@@ -397,6 +422,10 @@ ${p.res ? `<div class="mt ${p.res == 'in cart' ? '' : 'warn'}"><b>${esc(p.res)}<
 #wre-sup .opt{padding:0 10px 6px;font-size:13px;color:#555;display:flex;gap:12px;align-items:center}
 #wre-sup .br label{display:flex;align-items:center;gap:4px;flex:1}
 #wre-sup .br input{flex:1;min-width:0;font-size:16px;padding:5px 6px;border:1px solid #bbb;border-radius:6px}
+#wre-sup .sug{display:none;margin:-2px 10px 6px;border:1px solid #ccc;border-radius:8px;max-height:220px;overflow:auto;background:#fff}
+#wre-sup .sug div{padding:9px 10px;border-bottom:1px solid #eee}
+#wre-sup .sug div span{color:#888;font-size:12px}
+#wre-sup .sug .none{color:#888;font-size:13px}
 #wre-sup .msg{padding:0 10px 6px;font-size:13px;color:#555}
 #wre-sup .ls{overflow:auto;padding:0 10px 10px}
 #wre-sup .grp{display:flex;align-items:center;gap:8px;margin:12px 0 6px;padding:8px 10px;background:#f3f1ef;border-left:4px solid ${ORANGE};border-radius:6px;font:700 16px inherit;color:#222;cursor:pointer;user-select:none}
@@ -428,7 +457,7 @@ ${p.res ? `<div class="mt ${p.res == 'in cart' ? '' : 'warn'}"><b>${esc(p.res)}<
     box.innerHTML = `<div class="hd"><b>Supplier items</b><button class="ord" title="Order this quote" style="font:600 13px inherit;border:1px solid #fff8;border-radius:14px;padding:4px 10px">Order</button><button class="x" title="Close">×</button></div>
 <div class="sr"><input type="search" placeholder="Search CNW and Tradezone" enterkeyhint="search"><button class="btn">Search</button></div>
 <div class="opt"><label><input type="checkbox" data-s="CNW" checked> CNW</label><label><input type="checkbox" data-s="Tradezone" checked> Tradezone</label><a href="#" class="dbg" style="margin-left:auto">Copy debug</a></div>
-<div class="opt br"><label>CNW <input list="wre-cnw-br" data-b="cnwBranch" placeholder="branch"></label><label>TZ <input list="wre-tz-br" data-b="tzBranch" placeholder="branch"></label><datalist id="wre-cnw-br"></datalist><datalist id="wre-tz-br"></datalist></div>
+<div class="opt br"><label>CNW <input data-b="cnwBranch" placeholder="branch" autocomplete="off"></label><label>TZ <input data-b="tzBranch" placeholder="branch" autocomplete="off"></label></div><div class="sug"></div>
 <div class="msg"></div><div class="ls"></div>`;
     document.body.appendChild(box);
     termIn = box.querySelector('.sr input'); list = box.querySelector('.ls'); msg = box.querySelector('.msg');
@@ -436,17 +465,32 @@ ${p.res ? `<div class="mt ${p.res == 'in cart' ? '' : 'warn'}"><b>${esc(p.res)}<
     box.querySelector('.hd .ord').onclick = () => orderView();
     box.querySelector('.sr .btn').onclick = run;
     termIn.addEventListener('keydown', e => { if (e.key == 'Enter') { e.preventDefault(); run(); } });
-    // branch pickers: type to search, the list fills in as you go. Saved, and the search runs again on change.
-    const fillLists = async () => {
-      box.querySelector('#wre-cnw-br').innerHTML = (await cnwStores()).map(st => `<option value="${esc(st.name)}">${esc(st.state)}</option>`).join('');
-      box.querySelector('#wre-tz-br').innerHTML = GM_getValue('tzBranches', ['Gold Coast']).map(n => `<option value="${esc(n)}">`).join('');
+    // branch pickers: type and the matching branches show under it, tap one to pick it. Saved straight away.
+    const sug = box.querySelector('.sug');
+    const names = async key => key == 'cnwBranch' ? (await cnwStores()).map(st => ({ n: st.name, s: st.state })) : GM_getValue('tzBranches', ['Gold Coast']).map(n => ({ n, s: '' }));
+    const cur = key => key == 'cnwBranch' ? cnwBranch() : tzBranch();
+    const pick = (inp, v) => {
+      v = clean(v); if (!v) { inp.value = cur(inp.dataset.b); return; }
+      const changed = v != cur(inp.dataset.b);
+      GM_setValue(inp.dataset.b, v); inp.value = v; sug.style.display = 'none';
+      msg.textContent = (inp.dataset.b == 'cnwBranch' ? 'CNW' : 'Tradezone') + ' branch set to ' + v + '.';
+      if (changed && clean(termIn.value) && results.length) run();
     };
     box.querySelectorAll('.br input').forEach(inp => {
-      inp.value = inp.dataset.b == 'cnwBranch' ? cnwBranch() : tzBranch();
-      inp.onfocus = () => { inp.select(); fillLists(); };
-      inp.onchange = () => { const v = clean(inp.value); if (!v) { inp.value = inp.dataset.b == 'cnwBranch' ? cnwBranch() : tzBranch(); return; } GM_setValue(inp.dataset.b, v); if (clean(termIn.value) && results.length) run(); };
+      inp.value = cur(inp.dataset.b);
+      const show = async () => {
+        const q = clean(inp.value).toLowerCase(), all = await names(inp.dataset.b);
+        const hits = all.filter(x => !q || x.n.toLowerCase().includes(q) || x.s.toLowerCase() == q).slice(0, 8);
+        sug.innerHTML = hits.map(x => `<div data-v="${esc(x.n)}">${esc(x.n)}${x.s ? ' <span>' + esc(x.s) + '</span>' : ''}</div>`).join('') || '<div class="none">No branch by that name' + (inp.dataset.b == 'tzBranch' ? ' yet (Tradezone branches show up here once a search has seen them)' : '') + '</div>';
+        sug.style.display = 'block'; sug.dataset.for = inp.dataset.b;
+        sug.querySelectorAll('div[data-v]').forEach(d => { d.onpointerdown = e => { e.preventDefault(); pick(inp, d.dataset.v); inp.blur(); }; });
+      };
+      inp.onfocus = () => { inp.select(); show(); };
+      inp.oninput = show;
+      inp.onkeydown = e => { if (e.key == 'Enter') { e.preventDefault(); const first = sug.querySelector('div[data-v]'); pick(inp, first ? first.dataset.v : inp.value); inp.blur(); } };
+      // leaving the box keeps an exact match, otherwise puts the saved branch back
+      inp.onblur = () => setTimeout(async () => { if (sug.dataset.for == inp.dataset.b) sug.style.display = 'none'; const v = clean(inp.value).toLowerCase(); const hit = (await names(inp.dataset.b)).find(x => x.n.toLowerCase() == v); if (hit) pick(inp, hit.n); else inp.value = cur(inp.dataset.b); }, 150);
     });
-    fillLists();
     box.querySelectorAll('.opt input[type=checkbox]').forEach(c => { c.checked = GM_getValue('use' + c.dataset.s, true); c.onchange = () => GM_setValue('use' + c.dataset.s, c.checked); });
     box.querySelector('.dbg').onclick = e => { e.preventDefault(); copyDebug(e.target); };
   }
