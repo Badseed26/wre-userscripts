@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AroFlo supplier items
 // @namespace    wre
-// @version      0.3
+// @version      0.4
 // @description  Supplier button on AroFlo quotes: search CNW and Tradezone with your own sign ins, pick an item, set the qty and it adds the line (item, part no, qty, cost in Value). Markup left alone, you press Save Quote.
 // @match        https://office.aroflo.com/ims/Site/Service/Quotes/*
 // @grant        GM_xmlhttpRequest
@@ -22,7 +22,7 @@
   // Live updates (23/10): Tampermonkey only checks for a new version every few hours. This checks the repo's latest commit every
   // 2 min (free when nothing's changed) and keeps the newest code here, so a push runs on the next page load. If the new code needs
   // a permission this install hasn't got, or this browser won't run it, the built in copy below runs like before.
-  const __wreName = "aroflo-supplier-items", __wreVer = "0.3", __wreHave = new Set(["// @connect api.github.com", "// @connect raw.githubusercontent.com", "// @connect shop.cnw.com.au", "// @connect www.tradezone.com.au", "// @grant GM_getValue", "// @grant GM_setValue", "// @grant GM_xmlhttpRequest", "// @grant unsafeWindow", "// @match https://office.aroflo.com/ims/Site/Service/Quotes/*", "// @run-at document-idle"]);
+  const __wreName = "aroflo-supplier-items", __wreVer = "0.4", __wreHave = new Set(["// @connect api.github.com", "// @connect raw.githubusercontent.com", "// @connect shop.cnw.com.au", "// @connect www.tradezone.com.au", "// @grant GM_getValue", "// @grant GM_setValue", "// @grant GM_xmlhttpRequest", "// @grant unsafeWindow", "// @match https://office.aroflo.com/ims/Site/Service/Quotes/*", "// @run-at document-idle"]);
   const __wreInfo0 = typeof GM_info != 'undefined' ? GM_info : null;
   const __wreSay = m => { try { console.log('[WRE live update] ' + __wreName + ': ' + m); } catch (e) {} };
   const __wreCmp = (a, b) => { const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number); for (let i = 0; i < Math.max(x.length, y.length); i++) { const d = (x[i] || 0) - (y[i] || 0); if (d) return d; } return 0; };
@@ -64,7 +64,7 @@
   }
   if (window.top === window.self) { __wreCheck(); setInterval(__wreCheck, 2 * 60e3 + 5000); }
   if (__wreLive()) return;
-  // ---------- the built in copy (src/aroflo-supplier-items.js at 0.3) ----------
+  // ---------- the built in copy (src/aroflo-supplier-items.js at 0.4) ----------
 
 (function () {
   'use strict';
@@ -85,6 +85,11 @@
   const money = n => (n == null || isNaN(n)) ? '' : '$' + Number(n).toFixed(2);
   const esc = s => clean(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   const debug = {};   // last raw bits per supplier, for Copy debug
+  // where to sign back in. The window never sees or keeps a password: it opens the supplier's own sign in page
+  // in a new tab (your phone's saved passwords fill it), and searches again when you come back.
+  const LOGIN = { CNW: CNW + '/login', Tradezone: TZ + '/customer/account/login/' };
+  const out_ = (sup) => { const e = new Error('Signed out of ' + sup); e.signedOut = sup; return e; };
+  const signedIn = t => /logout|log out|sign out|signout/i.test(t || '');
 
   // ---------- requests with your sign in ----------
   function get(url, json) {
@@ -108,7 +113,7 @@
     const r = await get(CNW + '/search?text=' + encodeURIComponent(term));
     const t = r.responseText || '';
     debug.CNW = { url: r.finalUrl || '', status: r.status, sample: '' };
-    if (/\/login\b/.test(r.finalUrl || '')) throw new Error('signed out of CNW');
+    if (/\/login\b/.test(r.finalUrl || '')) throw out_('CNW');
     const doc = html(t);
     const loc = (t.match(/stock_location=(\d+)/) || [])[1] || GM_getValue('cnwLoc', '119');
     let items = [];
@@ -140,7 +145,7 @@
       const by = {}; (Array.isArray(list) ? list : []).forEach(p => { by[String(p.code)] = p; });
       items.forEach(i => { const p = by[i.id]; if (p) { i.price = Number(p.price); i.branch = p.stockLevel; i.national = p.warehouseStockLevel; i.status = p.stockStatus; } });
     }
-    if (items.every(i => !i.price)) items.forEach(i => { i.note = 'no price, check you\'re signed in to CNW'; });
+    if (items.every(i => !i.price)) { if (!signedIn(t)) throw out_('CNW'); items.forEach(i => { i.note = 'no price from CNW for this one'; }); }
     return items;
   }
 
@@ -154,7 +159,7 @@
       if (r.status == 200 && /product_item/.test(t)) break;
     }
     debug.Tradezone = { url: r && r.finalUrl || '', status: r && r.status, sample: '' };
-    if (/customer\/account\/login/.test(r && r.finalUrl || '')) throw new Error('signed out of Tradezone');
+    if (/customer\/account\/login/.test(r && r.finalUrl || '')) throw out_('Tradezone');
     const doc = html(t);
     const items = [], seen = new Set();
     doc.querySelectorAll('.product_item[data-product-id]').forEach(c => {
@@ -167,7 +172,8 @@
       items.push({ sup: 'Tradezone', id, code: clean((c.querySelector('h6.part') || {}).textContent), sku: (c.querySelector('h5.sku input') || {}).value || '', name: clean(a && (a.getAttribute('title') || a.textContent)), href: a ? new URL(a.getAttribute('href'), TZ).href : '', price: m ? Number(m[1].replace(/,/g, '')) : null, stock: st ? clean(st.textContent) || (/in_stock/.test(st.className) ? 'In stock' : '') : '', img: imgOf(c, TZ, 'a.product-image img') });
     });
     if (!items.length) debug.Tradezone.sample = t.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/\s+/g, ' ').slice(0, 8000);
-    if (items.length && items.every(i => !i.price)) items.forEach(i => { i.note = 'no price, check you\'re signed in to Tradezone'; });
+    if (items.length && items.every(i => !i.price)) { if (!signedIn(t)) throw out_('Tradezone'); items.forEach(i => { i.note = 'no price from Tradezone for this one'; }); }
+    if (!items.length && !signedIn(t)) throw out_('Tradezone');
     return items.slice(0, 12);
   }
 
@@ -241,6 +247,10 @@
 #wre-sup .ad{display:flex;gap:6px;align-items:center;margin-top:6px}
 #wre-sup .ad input{width:70px;font-size:16px;padding:6px;border:1px solid #bbb;border-radius:6px}
 #wre-sup .warn{color:#b3261e}
+#wre-sup .out{border:1px solid #f0c9a6;background:#fff6ee;border-radius:8px;padding:10px;margin-bottom:6px}
+#wre-sup .out b{display:block;margin-bottom:4px}
+#wre-sup .out .btns{display:flex;gap:6px;margin-top:8px}
+#wre-sup .btn.grey{background:${GREY}}
 #wre-sup a{color:${ORANGE}}
 .wre-sup-open{margin-left:4px}`;
     document.head.appendChild(s);
@@ -262,7 +272,9 @@
   }
   function open() { if (!box) build(); box.style.display = 'flex'; termIn.focus(); }
 
-  let results = [];
+  let results = [], waitingLogin = false;
+  // back from signing in: search again by itself
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState == 'visible' && waitingLogin && box && box.style.display != 'none' && clean(termIn.value)) setTimeout(run, 600); });
   async function run() {
     const term = clean(termIn.value); if (!term) return;
     const use = s => box.querySelector('.opt input[data-s="' + s + '"]').checked;
@@ -275,9 +287,10 @@
     let h = '';
     out.forEach(o => {
       const shut = GM_getValue('shut' + o.s, false);
-      const ct = o.e ? 'error' : o.r.length + ' found';
+      const ct = o.e ? (o.e.signedOut ? 'signed out' : 'error') : o.r.length + ' found';
       h += `<div class="grp" data-g="${o.s}"><span>${o.s}</span><span class="ct">${ct}</span><span class="ar">${shut ? '▸' : '▾'}</span></div><div class="gb${shut ? ' shut' : ''}" data-g="${o.s}">`;
-      if (o.e) { h += `<div class="warn">${esc(o.e.message || o.e)}</div></div>`; return; }
+      if (o.e && o.e.signedOut) { h += `<div class="out"><b>Signed out of ${o.s}</b>Sign in on their site (your saved password should fill it), then come back here. It searches again by itself.<div class="btns"><button class="btn" data-login="${o.s}">Sign in to ${o.s}</button><button class="btn grey" data-retry="1">Try again</button></div></div></div>`; return; }
+      if (o.e) { h += `<div class="warn">${esc(o.e.message || o.e)}</div><div class="btns" style="margin-top:6px"><button class="btn grey" data-retry="1">Try again</button></div></div>`; return; }
       if (!o.r.length) { h += `<div class="mt">Nothing found. If you're sure it's there, tap Copy debug and send it to Claude.</div></div>`; return; }
       o.r.forEach(it => {
         const n = results.push(it) - 1;
@@ -292,6 +305,9 @@ ${it.note ? `<div class="mt warn">${esc(it.note)}</div>` : ''}</div></div></div>
     list.innerHTML = h;
     msg.textContent = results.length + ' found. Add drops a new line on the quote, then press Save Quote yourself.';
     list.querySelectorAll('button[data-n]').forEach(b => { b.onclick = () => add(b); });
+    list.querySelectorAll('button[data-login]').forEach(b => { b.onclick = () => { waitingLogin = true; W.open(LOGIN[b.dataset.login], '_blank'); }; });
+    list.querySelectorAll('button[data-retry]').forEach(b => { b.onclick = () => run(); });
+    if (!out.some(o => o.e && o.e.signedOut)) waitingLogin = false;
     // tap a supplier's heading to fold it away (remembered for next time)
     list.querySelectorAll('.grp').forEach(g => { g.onclick = () => { const b = list.querySelector('.gb[data-g="' + g.dataset.g + '"]'); const shut = !b.classList.contains('shut'); b.classList.toggle('shut', shut); g.querySelector('.ar').textContent = shut ? '▸' : '▾'; GM_setValue('shut' + g.dataset.g, shut); }; });
   }
