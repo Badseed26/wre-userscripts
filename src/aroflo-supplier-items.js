@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AroFlo supplier items
 // @namespace    wre
-// @version      0.13
+// @version      0.14
 // @description  Supplier button on AroFlo quotes: search CNW and Tradezone with your own sign ins, pick an item, set the qty and it adds the line (item, part no, qty, cost in Value). Markup left alone, you press Save Quote. Order puts the quote's parts in your CNW or Tradezone cart (never checks out).
 // @match        https://office.aroflo.com/ims/Site/Service/Quotes/*
 // @match        https://shop.cnw.com.au/*
@@ -61,7 +61,7 @@
       if (finished) return; finished = true;
       GM_setValue('loginDone', { sup, at: Date.now() }); GM_setValue('loginReq', null);
       say('Signed in to ' + sup + '. Closing this tab…');
-      setTimeout(() => { try { window.close(); } catch (e) {} setTimeout(() => say('Signed in to ' + sup + '. Go back to AroFlo, it searches again by itself.'), 900); }, 900);
+      setTimeout(() => { try { (typeof unsafeWindow != 'undefined' ? unsafeWindow : window).close(); } catch (e) {} try { window.close(); } catch (e) {} setTimeout(() => say('Signed in to ' + sup + '. The iPhone won\'t let this tab close itself, so close it and go back to AroFlo. It\'s already searching again.'), 800); }, 600);
     };
     const setv = (el, v) => { const d = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value'); d.set.call(el, v); ['input', 'change', 'keyup'].forEach(t => el.dispatchEvent(new Event(t, { bubbles: true }))); };
     const go = () => {
@@ -541,7 +541,41 @@ ${p.res ? `<div class="mt ${p.res == 'in cart' ? '' : 'warn'}"><b>${esc(p.res)}<
   function open() { if (!box) build(); box.style.display = 'flex'; termIn.focus(); }
 
   let results = [], waitingLogin = false, lastView = 'search', loginPoll = null;
-  function startLogin(sup) {
+  // with a saved login, sign in in the background: read the supplier's own sign in form (its hidden token and all),
+  // fill the email and password, send it, then check you're really in. No tab to open or close.
+  async function bgLogin(sup) {
+    const cred = GM_getValue('cred_' + sup, null); if (!cred || !cred.u || !cred.p) return false;
+    const pg = await get(LOGIN[sup]); const doc = html(pg.responseText);
+    const pw = doc.querySelector('input[type=password]'); const f = pw && pw.closest('form'); if (!f) { debug.login = sup + ': no sign in form'; return false; }
+    const fields = {};
+    let user = null;
+    [...f.querySelectorAll('input,select,textarea')].forEach(i => {
+      if (!i.name) return;
+      const t = (i.type || '').toLowerCase();
+      if (t == 'password') { fields[i.name] = cred.p; return; }
+      if (!user && /^(email|text)$/.test(t)) { user = i; fields[i.name] = cred.u; return; }
+      if (t == 'checkbox' || t == 'radio') { if (i.checked || /remember|keep|stay/i.test(i.name)) fields[i.name] = i.value || 'on'; return; }
+      if (/^(submit|button|image|file)$/.test(t)) return;
+      fields[i.name] = i.value || '';
+    });
+    if (!user) { debug.login = sup + ': no email box'; return false; }
+    const action = new URL(f.getAttribute('action') || LOGIN[sup], pg.finalUrl || LOGIN[sup]).href;
+    const r = await post(action, form(fields));
+    debug.login = sup + ': sent ' + r.status + ' to ' + action.replace(/\?.*/, '') + ', landed ' + (r.finalUrl || '').replace(/\?.*/, '');
+    // really in?
+    if (sup == 'CNW') { const c = await get(CNW + '/cart'); return !/\/login\b/.test(c.finalUrl || '') && !cnwOut(c.responseText); }
+    const a = await get(TZ + '/customer/account/'); return !/customer\/account\/login/.test(a.finalUrl || '') && signedIn(a.responseText);
+  }
+  async function startLogin(sup) {
+    if (GM_getValue('cred_' + sup, null)) {
+      msg.textContent = 'Signing in to ' + sup + '…';
+      let ok = false; try { ok = await bgLogin(sup); } catch (e) { debug.login = sup + ': ' + (e.message || e); }
+      if (ok) { msg.textContent = 'Signed in to ' + sup + ', searching again…'; lastView == 'order' ? orderView() : run(); return; }
+      msg.textContent = 'Couldn\'t sign in to ' + sup + ' in the background, opening their page instead.';
+    }
+    openLogin(sup);
+  }
+  function openLogin(sup) {
     const at = Date.now();
     GM_setValue('loginReq', { sup, at }); GM_setValue('loginDone', null);
     waitingLogin = true; W.open(LOGIN[sup], '_blank');
