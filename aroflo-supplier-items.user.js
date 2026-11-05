@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AroFlo supplier items
 // @namespace    wre
-// @version      0.20
+// @version      0.21
 // @description  Supplier button on AroFlo quotes: search CNW and Tradezone with your own sign ins, pick an item, set the qty and it adds the line (item, part no, qty, cost in Value). Markup left alone, you press Save Quote. Order puts the quote's parts in your CNW or Tradezone cart (never checks out). Reprice, price compare, favourites, recents, stock at nearby branches and price history, synced through Todoist.
 // @match        https://office.aroflo.com/ims/Site/Service/Quotes/*
 // @match        https://shop.cnw.com.au/*
@@ -25,7 +25,7 @@
   // Live updates (23/10): Tampermonkey only checks for a new version every few hours. This checks the repo's latest commit every
   // 2 min (free when nothing's changed) and keeps the newest code here, so a push runs on the next page load. If the new code needs
   // a permission this install hasn't got, or this browser won't run it, the built in copy below runs like before.
-  const __wreName = "aroflo-supplier-items", __wreVer = "0.20", __wreHave = new Set(["// @connect api.github.com", "// @connect api.todoist.com", "// @connect raw.githubusercontent.com", "// @connect shop.cnw.com.au", "// @connect www.tradezone.com.au", "// @grant GM_getValue", "// @grant GM_setValue", "// @grant GM_xmlhttpRequest", "// @grant unsafeWindow", "// @match https://office.aroflo.com/ims/Site/Service/Quotes/*", "// @match https://shop.cnw.com.au/*", "// @match https://www.tradezone.com.au/*", "// @run-at document-idle"]);
+  const __wreName = "aroflo-supplier-items", __wreVer = "0.21", __wreHave = new Set(["// @connect api.github.com", "// @connect api.todoist.com", "// @connect raw.githubusercontent.com", "// @connect shop.cnw.com.au", "// @connect www.tradezone.com.au", "// @grant GM_getValue", "// @grant GM_setValue", "// @grant GM_xmlhttpRequest", "// @grant unsafeWindow", "// @match https://office.aroflo.com/ims/Site/Service/Quotes/*", "// @match https://shop.cnw.com.au/*", "// @match https://www.tradezone.com.au/*", "// @run-at document-idle"]);
   const __wreInfo0 = typeof GM_info != 'undefined' ? GM_info : null;
   const __wreSay = m => { try { console.log('[WRE live update] ' + __wreName + ': ' + m); } catch (e) {} };
   const __wreCmp = (a, b) => { const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number); for (let i = 0; i < Math.max(x.length, y.length); i++) { const d = (x[i] || 0) - (y[i] || 0); if (d) return d; } return 0; };
@@ -67,7 +67,7 @@
   }
   if (window.top === window.self) { __wreCheck(); setInterval(__wreCheck, 2 * 60e3 + 5000); }
   if (__wreLive()) return;
-  // ---------- the built in copy (src/aroflo-supplier-items.js at 0.20) ----------
+  // ---------- the built in copy (src/aroflo-supplier-items.js at 0.21) ----------
 
 (function () {
   'use strict';
@@ -564,7 +564,7 @@
   }
   let orderParts = [];
   async function orderView() {
-    if (!box) build(); box.style.display = 'flex'; lastView = 'order';
+    if (!box) build(); showBox(); lastView = 'order';
     const parts = quoteParts();
     if (!parts.length) { msg.textContent = ''; list.innerHTML = '<div class="mt">No lines with a Part No on this quote. Lines added through the Supplier window carry one, the rest you\'d order by hand.</div>'; return; }
     msg.textContent = 'Working out ' + parts.length + ' parts…'; list.innerHTML = '';
@@ -712,7 +712,7 @@ ${histLine(it)}${it.note ? `<div class="mt warn">${esc(it.note)}</div>` : ''}</d
   // and it never saves the quote.
   let rp = [];
   async function repriceView() {
-    if (!box) build(); box.style.display = 'flex'; lastView = 'reprice';
+    if (!box) build(); showBox(); lastView = 'reprice';
     const rows = lineRows().filter(r => clean(r.part));
     if (!rows.length) { msg.textContent = ''; list.innerHTML = '<div class="mt">No lines with a Part No to reprice. Lines added through the Supplier window carry one.</div>'; return; }
     const by = {}; rows.forEach(r => { const k = clean(r.part).toUpperCase(); (by[k] || (by[k] = { part: k, item: r.item, value: Number(r.value) || 0, rows: [] })).rows.push(r); });
@@ -763,6 +763,26 @@ ${sw ? `<label class="tk"><input type="checkbox" data-sw="${n}"> Swap to ${esc(p
 
   // ---------- the window ----------
   let box, list, msg, termIn;
+  // On a phone the window fills the screen like an app page, sized to what's actually on screen (so it's the right
+  // size even with AroFlo on Request Desktop Website, pinched in or with the keyboard up).
+  const MOBILE = (navigator.maxTouchPoints > 0 && Math.min(screen.width, screen.height) < 700) || /iPhone|iPod|Android.+Mobile/.test(navigator.userAgent);
+  function fit() {
+    if (!MOBILE || !box || box.style.display == 'none') return;
+    const vv = W.visualViewport || { width: innerWidth, height: innerHeight, offsetLeft: 0, offsetTop: 0 };
+    const sw = vv.width > vv.height ? Math.max(screen.width, screen.height) : Math.min(screen.width, screen.height);
+    const k = vv.width / sw;
+    Object.assign(box.style, { left: vv.offsetLeft + 'px', top: vv.offsetTop + 'px', width: sw + 'px', height: (vv.height / k) + 'px', transform: 'scale(' + k + ')' });
+  }
+  let pageOverflow = null;
+  function showBox() {
+    box.style.display = 'flex';
+    if (MOBILE) { box.classList.add('mob'); if (pageOverflow == null) { pageOverflow = document.documentElement.style.overflow; document.documentElement.style.overflow = 'hidden'; } fit(); }
+  }
+  function hideBox() {
+    box.style.display = 'none';
+    if (pageOverflow != null) { document.documentElement.style.overflow = pageOverflow; pageOverflow = null; }
+  }
+  if (MOBILE) { const vv = W.visualViewport; if (vv) { vv.addEventListener('resize', fit); vv.addEventListener('scroll', fit); } addEventListener('resize', fit); addEventListener('orientationchange', () => setTimeout(fit, 300)); }
   function css() {
     const s = document.createElement('style');
     s.textContent = `
@@ -786,7 +806,24 @@ ${sw ? `<label class="tk"><input type="checkbox" data-sw="${n}"> Swap to ${esc(p
 #wre-sup .lgrow input{flex:1;min-width:0;font-size:16px;padding:6px;border:1px solid #bbb;border-radius:6px}
 #wre-sup .opt .dbg{margin-left:10px}
 #wre-sup .msg{padding:0 10px 6px;font-size:13px;color:#555}
-#wre-sup .ls{overflow:auto;padding:0 10px 10px}
+#wre-sup .ls{overflow:auto;padding:0 10px 10px;flex:1;min-height:0;overscroll-behavior:contain;-webkit-overflow-scrolling:touch}
+#wre-sup.mob{right:auto;bottom:auto;max-height:none;border:0;border-radius:0;box-shadow:none;font-size:15px;transform-origin:0 0}
+#wre-sup.mob .hd{border-radius:0;padding:12px 10px}
+#wre-sup.mob .hd b{font-size:17px}
+#wre-sup.mob .hd .pill{font-size:14px;padding:7px 12px}
+#wre-sup.mob .hd .x{font-size:28px;padding:0 6px}
+#wre-sup.mob .btn{padding:10px 14px;font-size:15px}
+#wre-sup.mob .sr input{font-size:17px;padding:10px}
+#wre-sup.mob .opt{flex-wrap:wrap;row-gap:6px;font-size:14px}
+#wre-sup.mob .opt input[type=checkbox]{width:20px;height:20px}
+#wre-sup.mob .ad input{width:80px;padding:9px}
+#wre-sup.mob .star{font-size:26px}
+#wre-sup.mob .th{width:64px;height:64px}
+#wre-sup.mob .mt{font-size:13px}
+#wre-sup.mob .tk{font-size:15px;padding:4px 0}
+#wre-sup.mob .tk input{width:22px;height:22px}
+#wre-sup.mob .grp{padding:11px 12px}
+#wre-sup.mob .ls{padding-bottom:40px}
 #wre-sup .grp{display:flex;align-items:center;gap:8px;margin:12px 0 6px;padding:8px 10px;background:#f3f1ef;border-left:4px solid ${ORANGE};border-radius:6px;font:700 16px inherit;color:#222;cursor:pointer;user-select:none}
 #wre-sup .grp .ct{font:600 12px inherit;color:#666;flex:1}
 #wre-sup .grp .ar{font-size:14px;color:${GREY}}
@@ -843,7 +880,7 @@ ${sw ? `<label class="tk"><input type="checkbox" data-sw="${n}"> Swap to ${esc(p
 <div class="tgt mt"></div><div class="msg"></div><div class="ls"></div>`;
     document.body.appendChild(box);
     termIn = box.querySelector('.sr input'); list = box.querySelector('.ls'); msg = box.querySelector('.msg');
-    box.querySelector('.hd .x').onclick = () => { box.style.display = 'none'; };
+    box.querySelector('.hd .x').onclick = () => hideBox();
     box.querySelector('.hd .ord').onclick = () => orderView();
     box.querySelector('.hd .rpc').onclick = () => repriceView();
     box.querySelector('.hd .fv').onclick = () => { termIn.value = ''; favView(); };
@@ -889,7 +926,7 @@ ${sw ? `<label class="tk"><input type="checkbox" data-sw="${n}"> Swap to ${esc(p
     box.querySelector('.lgclear').onclick = () => { GM_setValue('cred_CNW', null); GM_setValue('cred_Tradezone', null); fillLg(); msg.textContent = 'Saved logins cleared.'; };
   }
   function open(b) {
-    if (!box) build(); box.style.display = 'flex';
+    if (!box) build(); showBox();
     target = b || null;
     const btns = [...document.querySelectorAll('button')].filter(x => /^\s*Add Line Item\s*$/i.test(x.textContent) && x.offsetParent);
     const top = !b || b === btns[btns.length - 1];
@@ -897,7 +934,7 @@ ${sw ? `<label class="tk"><input type="checkbox" data-sw="${n}"> Swap to ${esc(p
     box.querySelector('.tgt').textContent = top ? 'Adding at the top level' : 'Adding into: ' + (f && clean(f.value) || 'this folder');
     if (!pulled && tdToken()) pull().then(() => { if (lastView == 'fav') favView(); }, e => { syncMsg = 'Sync didn\'t go through: ' + (e.message || e); });
     if (!results.length || lastView == 'fav') favView();
-    termIn.focus();
+    if (!MOBILE) termIn.focus();   // on the phone, don't throw the keyboard up straight away
   }
 
   let results = [], waitingLogin = false, lastView = 'search', loginPoll = null;
