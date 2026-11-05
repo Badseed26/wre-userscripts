@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AroFlo supplier items
 // @namespace    wre
-// @version      0.30
+// @version      0.31
 // @description  Supplier button on AroFlo quotes: search CNW and Tradezone with your own sign ins, pick an item, set the qty and it adds the line (item, part no, qty, cost in Value). Markup left alone, you press Save Quote. Order puts the quote's parts in your CNW or Tradezone cart (never checks out). Reprice, price compare, favourites, recents, stock at nearby branches and price history, synced through Todoist. Build from notes: AI reads the task and your notes into a priced, one-supplier material list for you to check.
 // @match        https://office.aroflo.com/ims/Site/Service/Quotes/*
 // @match        https://shop.cnw.com.au/*
@@ -1146,6 +1146,9 @@ ${x ? `<div class="mt">Ordering ${esc(x.sup)} ${money(x.price)}${it.pricedAt ? `
   function guardTouch(bx) {
     bx.addEventListener('touchstart', e => { touchY = e.touches[0].clientY; }, { passive: true });
     bx.addEventListener('touchmove', e => {
+      // keyboard up: iPhone needs to move things itself to show what's under the keyboard, so leave it alone
+      const ae = document.activeElement, vv = W.visualViewport;
+      if ((ae && bx.contains(ae) && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName) && ae.type != 'checkbox') || (vv && vv.height < innerHeight * 0.8)) return;
       const sc = [list, bx.querySelector('.sug')].find(el => el && el.contains(e.target) && el.scrollHeight > el.clientHeight + 1);
       if (!sc) { e.preventDefault(); return; }                       // not on a scrolling part: stop the page moving
       const dy = e.touches[0].clientY - touchY;
