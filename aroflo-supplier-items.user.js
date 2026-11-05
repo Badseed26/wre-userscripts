@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AroFlo supplier items
 // @namespace    wre
-// @version      0.10
+// @version      0.11
 // @description  Supplier button on AroFlo quotes: search CNW and Tradezone with your own sign ins, pick an item, set the qty and it adds the line (item, part no, qty, cost in Value). Markup left alone, you press Save Quote. Order puts the quote's parts in your CNW or Tradezone cart (never checks out).
 // @match        https://office.aroflo.com/ims/Site/Service/Quotes/*
 // @grant        GM_xmlhttpRequest
@@ -22,7 +22,7 @@
   // Live updates (23/10): Tampermonkey only checks for a new version every few hours. This checks the repo's latest commit every
   // 2 min (free when nothing's changed) and keeps the newest code here, so a push runs on the next page load. If the new code needs
   // a permission this install hasn't got, or this browser won't run it, the built in copy below runs like before.
-  const __wreName = "aroflo-supplier-items", __wreVer = "0.10", __wreHave = new Set(["// @connect api.github.com", "// @connect raw.githubusercontent.com", "// @connect shop.cnw.com.au", "// @connect www.tradezone.com.au", "// @grant GM_getValue", "// @grant GM_setValue", "// @grant GM_xmlhttpRequest", "// @grant unsafeWindow", "// @match https://office.aroflo.com/ims/Site/Service/Quotes/*", "// @run-at document-idle"]);
+  const __wreName = "aroflo-supplier-items", __wreVer = "0.11", __wreHave = new Set(["// @connect api.github.com", "// @connect raw.githubusercontent.com", "// @connect shop.cnw.com.au", "// @connect www.tradezone.com.au", "// @grant GM_getValue", "// @grant GM_setValue", "// @grant GM_xmlhttpRequest", "// @grant unsafeWindow", "// @match https://office.aroflo.com/ims/Site/Service/Quotes/*", "// @run-at document-idle"]);
   const __wreInfo0 = typeof GM_info != 'undefined' ? GM_info : null;
   const __wreSay = m => { try { console.log('[WRE live update] ' + __wreName + ': ' + m); } catch (e) {} };
   const __wreCmp = (a, b) => { const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number); for (let i = 0; i < Math.max(x.length, y.length); i++) { const d = (x[i] || 0) - (y[i] || 0); if (d) return d; } return 0; };
@@ -64,7 +64,7 @@
   }
   if (window.top === window.self) { __wreCheck(); setInterval(__wreCheck, 2 * 60e3 + 5000); }
   if (__wreLive()) return;
-  // ---------- the built in copy (src/aroflo-supplier-items.js at 0.10) ----------
+  // ---------- the built in copy (src/aroflo-supplier-items.js at 0.11) ----------
 
 (function () {
   'use strict';
@@ -90,6 +90,9 @@
   const LOGIN = { CNW: CNW + '/login', Tradezone: TZ + '/customer/account/login/' };
   const out_ = (sup) => { const e = new Error('Signed out of ' + sup); e.signedOut = sup; return e; };
   const signedIn = t => /logout|log out|sign out|signout/i.test(t || '');
+  // CNW marks every page it sends with logged-in or logged-out on the body. Signed out, it shows the products but no prices
+  // and no cart buttons (where the product number lives), which is why everything came back without a price.
+  const cnwOut = t => /<body[^>]*class="[^"]*\blogged-out\b/i.test(t || '');
 
   // ---------- requests with your sign in ----------
   function get(url, json) {
@@ -201,7 +204,7 @@
     let r = await get(CNW + '/search?text=' + encodeURIComponent(term));
     let t = r.responseText || '';
     debug.CNW = { term, tried: [], url: r.finalUrl || '', status: r.status, sample: '' }; delete debug.cnwCard; delete debug.cnwPage;
-    if (/\/login\b/.test(r.finalUrl || '')) throw out_('CNW');
+    if (/\/login\b/.test(r.finalUrl || '') || cnwOut(t)) throw out_('CNW');
     let doc = html(t);
     const loc = await cnwLoc();
     let items = cnwCards(doc);
@@ -360,7 +363,7 @@
   }
   async function cnwCart(parts) {
     const page = await get(CNW + '/cart');
-    if (/\/login\b/.test(page.finalUrl || '')) throw out_('CNW');
+    if (/\/login\b/.test(page.finalUrl || '') || cnwOut(page.responseText)) throw out_('CNW');
     const t = page.responseText || '';
     const tok = (t.match(/CSRFToken["']?\s*[:=]\s*["']([^"']+)/) || [])[1] || (html(t).querySelector('input[name=CSRFToken]') || {}).value;
     if (!tok) throw new Error('couldn\'t get CNW\'s cart ready (no token)');

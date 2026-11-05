@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AroFlo supplier items
 // @namespace    wre
-// @version      0.10
+// @version      0.11
 // @description  Supplier button on AroFlo quotes: search CNW and Tradezone with your own sign ins, pick an item, set the qty and it adds the line (item, part no, qty, cost in Value). Markup left alone, you press Save Quote. Order puts the quote's parts in your CNW or Tradezone cart (never checks out).
 // @match        https://office.aroflo.com/ims/Site/Service/Quotes/*
 // @grant        GM_xmlhttpRequest
@@ -39,6 +39,9 @@
   const LOGIN = { CNW: CNW + '/login', Tradezone: TZ + '/customer/account/login/' };
   const out_ = (sup) => { const e = new Error('Signed out of ' + sup); e.signedOut = sup; return e; };
   const signedIn = t => /logout|log out|sign out|signout/i.test(t || '');
+  // CNW marks every page it sends with logged-in or logged-out on the body. Signed out, it shows the products but no prices
+  // and no cart buttons (where the product number lives), which is why everything came back without a price.
+  const cnwOut = t => /<body[^>]*class="[^"]*\blogged-out\b/i.test(t || '');
 
   // ---------- requests with your sign in ----------
   function get(url, json) {
@@ -150,7 +153,7 @@
     let r = await get(CNW + '/search?text=' + encodeURIComponent(term));
     let t = r.responseText || '';
     debug.CNW = { term, tried: [], url: r.finalUrl || '', status: r.status, sample: '' }; delete debug.cnwCard; delete debug.cnwPage;
-    if (/\/login\b/.test(r.finalUrl || '')) throw out_('CNW');
+    if (/\/login\b/.test(r.finalUrl || '') || cnwOut(t)) throw out_('CNW');
     let doc = html(t);
     const loc = await cnwLoc();
     let items = cnwCards(doc);
@@ -309,7 +312,7 @@
   }
   async function cnwCart(parts) {
     const page = await get(CNW + '/cart');
-    if (/\/login\b/.test(page.finalUrl || '')) throw out_('CNW');
+    if (/\/login\b/.test(page.finalUrl || '') || cnwOut(page.responseText)) throw out_('CNW');
     const t = page.responseText || '';
     const tok = (t.match(/CSRFToken["']?\s*[:=]\s*["']([^"']+)/) || [])[1] || (html(t).querySelector('input[name=CSRFToken]') || {}).value;
     if (!tok) throw new Error('couldn\'t get CNW\'s cart ready (no token)');
