@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AroFlo supplier items
 // @namespace    wre
-// @version      0.23
+// @version      0.24
 // @description  Supplier button on AroFlo quotes: search CNW and Tradezone with your own sign ins, pick an item, set the qty and it adds the line (item, part no, qty, cost in Value). Markup left alone, you press Save Quote. Order puts the quote's parts in your CNW or Tradezone cart (never checks out). Reprice, price compare, favourites, recents, stock at nearby branches and price history, synced through Todoist.
 // @match        https://office.aroflo.com/ims/Site/Service/Quotes/*
 // @match        https://shop.cnw.com.au/*
@@ -263,11 +263,12 @@
     doc.querySelectorAll('.product_item[data-product-id]').forEach(c => {
       if (c.closest('.itemslider-wrapper, .owl-wrapper')) return;  // skip sliders
       const id = c.getAttribute('data-product-id'); if (seen.has(id)) return; seen.add(id);
-      const a = c.querySelector('.name a, a.hover_link, a.product-image');
+      // the name lives on the title link; the photo link comes first in the card and often has no text
+      const a = c.querySelector('.name a') || c.querySelector('a.hover_link') || c.querySelector('a.product-image');
       const txt = clean(c.textContent);
       const m = txt.match(/\$\s*([\d,]+\.\d{2})\s*ex/i);
       const st = c.querySelector('.stock_wrapper');
-      items.push({ sup: 'Tradezone', id, code: clean((c.querySelector('h6.part') || {}).textContent), sku: (c.querySelector('h5.sku input') || {}).value || '', name: clean(a && (a.getAttribute('title') || a.textContent)), href: a ? new URL(a.getAttribute('href'), TZ).href : '', price: m ? Number(m[1].replace(/,/g, '')) : null, stock: st ? clean(st.textContent) || (/in_stock/.test(st.className) ? 'In stock' : '') : '', img: imgOf(c, TZ, 'a.product-image img'), ...minStep(c) });
+      items.push({ sup: 'Tradezone', id, code: clean((c.querySelector('h6.part') || {}).textContent), sku: (c.querySelector('h5.sku input') || {}).value || '', name: clean(a && (a.getAttribute('title') || a.textContent)) || clean(((c.querySelector('a.product-image') || {}).getAttribute || (() => ''))('title')) || clean((c.querySelector('img[alt]') || { getAttribute: () => '' }).getAttribute('alt')), href: a ? new URL(a.getAttribute('href'), TZ).href : '', price: m ? Number(m[1].replace(/,/g, '')) : null, stock: st ? clean(st.textContent) || (/in_stock/.test(st.className) ? 'In stock' : '') : '', img: imgOf(c, TZ, 'a.product-image img'), ...minStep(c) });
     });
     if (!items.length) debug.Tradezone.sample = t.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/\s+/g, ' ').slice(0, 8000);
     if (items.length && items.every(i => !i.price)) { if (!signedIn(t)) throw out_('Tradezone'); items.forEach(i => { i.note = 'no price from Tradezone for this one'; }); }
@@ -293,6 +294,7 @@
       return { name, qty: Number(n.replace(/,/g, '')) };
     }).filter(b => b.name);
     if (it.branches.length) tzSeen(it.branches.map(b => b.name));
+    if (!it.name) it.name = clean((d.querySelector('h1') || {}).textContent) || clean((d.querySelector('meta[property="og:title"]') || { getAttribute: () => '' }).getAttribute('content'));
     if (!it.img) { const og = d.querySelector('meta[property="og:image"]'); it.img = og ? og.getAttribute('content') : imgOf(d.querySelector('.product_media') || d.body, TZ); }
     if (!it.min && !it.step) Object.assign(it, minStep(d.querySelector('.product_wrapper, .product_view') || d.body));
     if (!it.price || force) { const m = clean((d.querySelector('.price_and_points') || {}).textContent).match(/\$\s*([\d,]+\.\d{2})\s*ex/i); if (m) { it.price = Number(m[1].replace(/,/g, '')); delete it.note; } }
@@ -591,12 +593,14 @@ ${nearLine(p, null)}${p.res ? `<div class="mt ${p.res == 'in cart' ? '' : 'warn'
   function cmpLine(it, n, dropAttr) {
     const o = it.other; if (!o) return '';
     const cheaper = o.price && it.price && o.price < it.price - 0.005;
-    return `<div class="cmp">Same item? <b>${esc(o.sup)}</b> ${esc(o.code)} · ${o.price ? money(o.price) + ' ex' : 'no price'}${cheaper ? ' <span class="cheap">cheaper</span>' : ''} <a href="#" ${dropAttr || 'data-drop'}="${n}" title="Not the same item">✕</a><div class="mt">${esc(o.name)}</div></div>`;
+    // Show it jumps to the other one in the list (or pops it in here if it's not on this page), Use it adds that one instead
+    const btns = dropAttr ? '' : `<div class="cb"><button class="btn grey sm" data-jump="${n}">Show it</button><button class="btn sm${cheaper ? '' : ' grey'}" data-inst="${n}">Use ${esc(o.sup)} instead</button></div><div class="alt" data-jump-for="${n}"></div>`;
+    return `<div class="cmp">Same item? <b>${esc(o.sup)}</b> ${esc(o.code)} · ${o.price ? money(o.price) + ' ex' : 'no price'}${cheaper ? ' <span class="cheap">cheaper</span>' : ''} <a href="#" ${dropAttr || 'data-drop'}="${n}" title="Not the same item">✕</a><div class="mt">${esc(o.name)}</div>${btns}</div>`;
   }
   function cardHtml(it, n) {
     const cheap = it.other && it.other.price && it.price && it.price < it.other.price - 0.005;
     const stock = stockLine(it, n);
-    return `<div class="it"><div class="row">${it.img ? `<img class="th" src="${esc(it.img)}" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.visibility='hidden'">` : '<div class="th none">no pic</div>'}<div class="bd"><div class="nm"><span>${esc(it.name)}</span><button class="star" data-f="${n}" title="Favourite">${favOn(it) ? '★' : '☆'}</button></div>
+    return `<div class="it" data-card="${n}"><div class="row">${it.img ? `<img class="th" src="${esc(it.img)}" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.visibility='hidden'">` : '<div class="th none">no pic</div>'}<div class="bd"><div class="nm"><span>${esc(it.name)}</span><button class="star" data-f="${n}" title="Favourite">${favOn(it) ? '★' : '☆'}</button></div>
 <div class="mt">${esc(it.code)}${it.uom ? ' · ' + esc(it.uom) : ''}${lotText(it) ? ' · <b class="warn">' + esc(lotText(it)) + '</b>' : ''}${stock ? ' · ' + stock : ''}${it.href ? ` · <a href="${esc(it.href)}" target="_blank">view</a>` : ''}</div>
 ${nearLine(it, n)}${cmpLine(it, n)}
 <div class="ad"><span class="pr">${it.price ? money(it.price) + ' ex' + (it.stale ? ' <span class="mt">(last seen)</span>' : '') : '<span class="warn">no price</span>'}${cheap ? ' <span class="cheap">cheaper</span>' : ''}</span><span style="flex:1"></span>Qty <input type="number" min="0" step="any" value="1" inputmode="decimal"><button class="btn" data-n="${n}">Add</button></div>
@@ -609,6 +613,25 @@ ${histLine(it)}${it.note ? `<div class="mt warn">${esc(it.note)}</div>` : ''}</d
     once('button[data-f]', b => { b.onclick = e => { e.preventDefault(); e.stopPropagation(); const it = results[+b.dataset.f]; toggleFav(it); const on = favOn(it); list.querySelectorAll('button[data-f]').forEach(x => { const y = results[+x.dataset.f]; if (y && keyOf(y) == keyOf(it)) x.textContent = on ? '★' : '☆'; }); msg.textContent = on ? 'Starred. It shows up top when you open the window.' : 'Unstarred.'; }; });
     once('a[data-drop]', a => { a.onclick = e => { e.preventDefault(); const it = results[+a.dataset.drop]; if (!it || !it.other) return; D.drop[pk(it, it.other)] = { at: Date.now() }; changed(); results.forEach(x => { if (x.other && dropped(x, x.other)) delete x.other; }); msg.textContent = 'Dropped that match, it won\'t pair those two again.'; redraw(); }; });
     once('.hs', d => { d.onclick = () => { const b = d.nextElementSibling; if (b.style.display == 'none') { b.innerHTML = histOf(d.dataset.h).slice(-6).reverse().map(e => dmy(e[0]) + ': ' + money(e[1])).join('<br>'); b.style.display = 'block'; } else b.style.display = 'none'; }; });
+    const otherOf = it => results.find(x => keyOf(x) == keyOf(it.other)) || Object.assign({}, it.other);
+    once('button[data-jump]', b => { b.onclick = () => {
+      const it = results[+b.dataset.jump]; if (!it || !it.other) return;
+      const full = otherOf(it), j = results.indexOf(full), el = j >= 0 && list.querySelector('[data-card="' + j + '"]:not(.alt [data-card])');
+      if (el) {
+        const gb = el.closest('.gb'); if (gb && gb.classList.contains('shut')) { gb.classList.remove('shut'); const g = list.querySelector('.grp[data-g="' + gb.dataset.g + '"] .ar'); if (g) g.textContent = '▾'; GM_setValue('shut' + gb.dataset.g, false); }
+        el.scrollIntoView({ block: 'center', behavior: 'smooth' }); el.classList.add('flash'); setTimeout(() => el.classList.remove('flash'), 1600);
+        return;
+      }
+      // not on this page of results: pop it in right here
+      const div = list.querySelector('.alt[data-jump-for="' + b.dataset.jump + '"]'); if (!div) return;
+      if (div.innerHTML) { div.innerHTML = ''; b.textContent = 'Show it'; return; }
+      div.innerHTML = cardHtml(full, results.push(full) - 1); wire(div); b.textContent = 'Hide it';
+    }; });
+    once('button[data-inst]', b => { b.onclick = () => {
+      const it = results[+b.dataset.inst]; if (!it || !it.other) return;
+      const q = b.closest('.it').querySelector(':scope > .row > .bd > .ad input');
+      add(b, otherOf(it), Number(q && q.value) || 1, it);
+    }; });
     once('a[data-chk]', a => { a.onclick = async e => { e.preventDefault(); const it = results[+a.dataset.chk]; a.textContent = 'checking…'; try { await tzDetail(it); await stockCheck([it]); } catch (x) {} redraw(); }; });
     once('button[data-pg]', b => { b.onclick = () => pageTo(b.dataset.pg, +b.dataset.d); });
     once('a[data-alt]', a => { a.onclick = e => { e.preventDefault(); findInStock(+a.dataset.alt, a); }; });
@@ -842,6 +865,10 @@ ${sw ? `<label class="tk"><input type="checkbox" data-sw="${n}"> Swap to ${esc(p
 #wre-sup .tk{display:flex;gap:8px;align-items:center;margin-top:6px;font-size:13px}
 #wre-sup .tk input{width:18px;height:18px}
 #wre-sup .alt{margin-top:6px}
+#wre-sup .cb{display:flex;gap:6px;margin-top:6px;flex-wrap:wrap}
+#wre-sup .btn.sm{padding:6px 10px;font-size:13px}
+#wre-sup .it{transition:box-shadow .3s}
+#wre-sup .it.flash{box-shadow:0 0 0 3px ${ORANGE}}
 #wre-sup .pg{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:4px 0 10px}
 #wre-sup .pg span{font-weight:600;color:#555}
 #wre-sup .pg .btn[disabled]{opacity:.35}
@@ -1028,17 +1055,18 @@ ${sw ? `<label class="tk"><input type="checkbox" data-sw="${n}"> Swap to ${esc(p
     msg.textContent = results.length + ' found. Add drops a line on the quote, then press Save Quote yourself.';
     wire(list);
   }
-  async function add(b) {
-    const it = results[+b.dataset.n]; const qty = Number(b.parentElement.querySelector('input').value) || 1;
+  async function add(b, it_, qty_, instead) {
+    const it = it_ || results[+b.dataset.n]; const qty = qty_ || Number(b.parentElement.querySelector('input').value) || 1;
+    const label = b.textContent;
     const lot = fitQty(qty, it) != Math.ceil(qty - 1e-9) ? ` Heads up, ${it.sup} ${lotText(it)}, so you'd have to order ${fitQty(qty, it)}.` : '';
     b.disabled = true; b.textContent = '…';
     try {
       const r = await addLine(it, qty);
       remember(it); recordPrice(it, it.price); addRecent(it);
       b.textContent = r.ok ? 'Added' : 'Check it';
-      msg.textContent = r.ok ? `Added ${qty} x ${it.code}${r.miss.length ? ' (couldn\'t find ' + r.miss.join(', ') + ', fill that by hand)' : ''}. Save Quote when you're done.${lot}` : 'Added, but the line didn\'t read back right. Check it before saving.';
-    } catch (e) { b.textContent = 'Add'; msg.textContent = 'Didn\'t add: ' + (e.message || e); }
-    setTimeout(() => { b.disabled = false; if (b.textContent != 'Add') b.textContent = 'Add again'; }, 1500);
+      msg.textContent = r.ok ? `Added ${qty} x ${it.sup} ${it.code}${instead ? ' instead of ' + instead.sup + ' ' + instead.code : ''}${r.miss.length ? ' (couldn\'t find ' + r.miss.join(', ') + ', fill that by hand)' : ''}. Save Quote when you're done.${lot}` : 'Added, but the line didn\'t read back right. Check it before saving.';
+    } catch (e) { b.textContent = label; msg.textContent = 'Didn\'t add: ' + (e.message || e); }
+    setTimeout(() => { b.disabled = false; if (b.textContent != label) b.textContent = it_ ? label : 'Add again'; }, 1500);
   }
   function copyDebug(a) {
     const head = document.querySelector('th.q-col-item'); const row = itemInputs()[0] && itemInputs()[0].closest('tr');
