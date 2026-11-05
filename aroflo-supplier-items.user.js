@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AroFlo supplier items
 // @namespace    wre
-// @version      0.31
+// @version      0.32
 // @description  Supplier button on AroFlo quotes: search CNW and Tradezone with your own sign ins, pick an item, set the qty and it adds the line (item, part no, qty, cost in Value). Markup left alone, you press Save Quote. Order puts the quote's parts in your CNW or Tradezone cart (never checks out). Reprice, price compare, favourites, recents, stock at nearby branches and price history, synced through Todoist. Build from notes: AI reads the task and your notes into a priced, one-supplier material list for you to check.
 // @match        https://office.aroflo.com/ims/Site/Service/Quotes/*
 // @match        https://shop.cnw.com.au/*
@@ -26,7 +26,7 @@
   // Live updates (23/10): Tampermonkey only checks for a new version every few hours. This checks the repo's latest commit every
   // 2 min (free when nothing's changed) and keeps the newest code here, so a push runs on the next page load. If the new code needs
   // a permission this install hasn't got, or this browser won't run it, the built in copy below runs like before.
-  const __wreName = "aroflo-supplier-items", __wreVer = "0.31", __wreHave = new Set(["// @connect api.anthropic.com", "// @connect api.github.com", "// @connect api.todoist.com", "// @connect raw.githubusercontent.com", "// @connect shop.cnw.com.au", "// @connect www.tradezone.com.au", "// @grant GM_getValue", "// @grant GM_setValue", "// @grant GM_xmlhttpRequest", "// @grant unsafeWindow", "// @match https://office.aroflo.com/ims/Site/Service/Quotes/*", "// @match https://shop.cnw.com.au/*", "// @match https://www.tradezone.com.au/*", "// @run-at document-idle"]);
+  const __wreName = "aroflo-supplier-items", __wreVer = "0.32", __wreHave = new Set(["// @connect api.anthropic.com", "// @connect api.github.com", "// @connect api.todoist.com", "// @connect raw.githubusercontent.com", "// @connect shop.cnw.com.au", "// @connect www.tradezone.com.au", "// @grant GM_getValue", "// @grant GM_setValue", "// @grant GM_xmlhttpRequest", "// @grant unsafeWindow", "// @match https://office.aroflo.com/ims/Site/Service/Quotes/*", "// @match https://shop.cnw.com.au/*", "// @match https://www.tradezone.com.au/*", "// @run-at document-idle"]);
   const __wreInfo0 = typeof GM_info != 'undefined' ? GM_info : null;
   const __wreSay = m => { try { console.log('[WRE live update] ' + __wreName + ': ' + m); } catch (e) {} };
   const __wreCmp = (a, b) => { const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number); for (let i = 0; i < Math.max(x.length, y.length); i++) { const d = (x[i] || 0) - (y[i] || 0); if (d) return d; } return 0; };
@@ -68,7 +68,7 @@
   }
   if (window.top === window.self) { __wreCheck(); setInterval(__wreCheck, 2 * 60e3 + 5000); }
   if (__wreLive()) return;
-  // ---------- the built in copy (src/aroflo-supplier-items.js at 0.31) ----------
+  // ---------- the built in copy (src/aroflo-supplier-items.js at 0.32) ----------
 
 (function () {
   'use strict';
@@ -831,9 +831,9 @@ ${sw ? `<label class="tk"><input type="checkbox" data-sw="${n}"> Swap to ${esc(p
     const body = { model, max_tokens: maxTokens, system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }], messages: [{ role: 'user', content: user }] };
     if (effort) body.output_config = { effort };
     const r = await new Promise((res, rej) => GM_xmlhttpRequest({
-      method: 'POST', url: 'https://api.anthropic.com/v1/messages', timeout: 180000, data: JSON.stringify(body),
+      method: 'POST', url: 'https://api.anthropic.com/v1/messages', timeout: 120000, data: JSON.stringify(body),
       headers: { 'content-type': 'application/json', 'x-api-key': aiKey(), 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
-      onload: res, onerror: () => rej(new Error('couldn\'t reach the AI. If Tampermonkey asked to allow api.anthropic.com, hit Always allow')), ontimeout: () => rej(new Error('the AI took too long')),
+      onload: res, onerror: () => rej(new Error('couldn\'t reach the AI. If Tampermonkey asked to allow api.anthropic.com, hit Always allow')), ontimeout: () => rej(new Error('the AI took over 2 minutes, try again')), onabort: () => rej(new Error('the AI request was stopped')),
     }));
     let j = null; try { j = JSON.parse(r.responseText); } catch (e) {}
     if (r.status == 401) throw new Error('the Anthropic key wasn\'t accepted, check it under Logins');
@@ -890,7 +890,12 @@ ${sw ? `<label class="tk"><input type="checkbox" data-sw="${n}"> Swap to ${esc(p
     debug.sources = { task: !!E, got: Object.keys(out), info };
     return { out, info };
   }
-  const afGet = url => fetch(url, { credentials: 'include' }).then(r => { if (!r.ok) throw new Error('AroFlo said ' + r.status); return r.text(); });
+  const afGet = url => new Promise((res, rej) => {
+    // AroFlo read through the page itself, with a 20 second limit so a stuck read can't hang the build
+    const t = setTimeout(() => rej(new Error('AroFlo took too long')), 20000);
+    const f = (W.fetch || fetch).bind(W);
+    f(new URL(url, location.origin).href, { credentials: 'include' }).then(r => { if (!r.ok) throw new Error('AroFlo said ' + r.status); return r.text(); }).then(x => { clearTimeout(t); res(x); }, e => { clearTimeout(t); rej(e); });
+  });
 
   // searches, cached for 10 minutes so Redo and the compare don't run the same search twice
   const sCache = {};
@@ -992,7 +997,9 @@ Answer with JSON only: {"picks":[{"i":0,"C":2,"T":null}]}`;
     const sups = ['CNW', 'Tradezone'].filter(sp => box.querySelector('.opt input[data-s="' + sp + '"]').checked);
     if (!sups.length) { msg.textContent = 'Tick CNW, Tradezone or both first.'; return; }
     if (!aiKey()) { msg.textContent = 'Add your Anthropic key under Logins first.'; return; }
-    const say = t => { msg.textContent = t; };
+    let stage = '', t0 = Date.now();
+    const say = t => { stage = t; t0 = Date.now(); debug.build = { stage: t, at: new Date().toLocaleTimeString() }; msg.textContent = t; };
+    const tick = setInterval(() => { if (lastView != 'build' || !stage) return; const sec = Math.round((Date.now() - t0) / 1000); if (sec >= 3) msg.textContent = stage + ' ' + sec + 's'; }, 1000);
     const want = bld.want || { desc: true, notes: true, scope: true, mine: true };
     const mine = clean((box.querySelector('.bmine') || {}).value || bld.mine || '');
     bld.mine = mine;
@@ -1040,12 +1047,13 @@ Answer with JSON only: {"picks":[{"i":0,"C":2,"T":null}]}`;
       bld.items = items; bld.folders = [...new Set(items.map(it => it.folder))]; bld.notes = plan.notes || [];
       bld.changes = before ? items.filter(it => !before.includes(learnKey(it.need))).map(it => it.need) : null;
       drawBuild();
-      const mc = monthCost();
-      say(`Done. This build cost US$${bld.cost.toFixed(2)}, ${monthKey()} so far US$${mc.toFixed(2)}.` + (mc > limit() ? ` That's over your US$${limit()} a month limit.` : ''));
+      const mc = monthCost(); stage = '';
+      msg.textContent = (`Done. This build cost US$${bld.cost.toFixed(2)}, ${monthKey()} so far US$${mc.toFixed(2)}.` + (mc > limit() ? ` That's over your US$${limit()} a month limit.` : ''));
     } catch (e) {
       if (e.signedOut) { list.innerHTML = `<div class="out"><b>Signed out of ${e.signedOut}</b>Sign in, then Build again.<div class="btns"><button class="btn" data-login="${e.signedOut}">Sign in to ${e.signedOut}</button></div></div>`; wire(list); }
-      say('Build didn\'t finish: ' + (e.message || e));
-    }
+      debug.build = Object.assign(debug.build || {}, { error: String(e.message || e) });
+      stage = ''; msg.textContent = 'Build didn\'t finish: ' + (e.message || e);
+    } finally { clearInterval(tick); }
   }
 
   function drawBuild() {
