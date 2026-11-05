@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AroFlo supplier items
 // @namespace    wre
-// @version      0.8
+// @version      0.9
 // @description  Supplier button on AroFlo quotes: search CNW and Tradezone with your own sign ins, pick an item, set the qty and it adds the line (item, part no, qty, cost in Value). Markup left alone, you press Save Quote. Order puts the quote's parts in your CNW or Tradezone cart (never checks out).
 // @match        https://office.aroflo.com/ims/Site/Service/Quotes/*
 // @grant        GM_xmlhttpRequest
@@ -22,7 +22,7 @@
   // Live updates (23/10): Tampermonkey only checks for a new version every few hours. This checks the repo's latest commit every
   // 2 min (free when nothing's changed) and keeps the newest code here, so a push runs on the next page load. If the new code needs
   // a permission this install hasn't got, or this browser won't run it, the built in copy below runs like before.
-  const __wreName = "aroflo-supplier-items", __wreVer = "0.8", __wreHave = new Set(["// @connect api.github.com", "// @connect raw.githubusercontent.com", "// @connect shop.cnw.com.au", "// @connect www.tradezone.com.au", "// @grant GM_getValue", "// @grant GM_setValue", "// @grant GM_xmlhttpRequest", "// @grant unsafeWindow", "// @match https://office.aroflo.com/ims/Site/Service/Quotes/*", "// @run-at document-idle"]);
+  const __wreName = "aroflo-supplier-items", __wreVer = "0.9", __wreHave = new Set(["// @connect api.github.com", "// @connect raw.githubusercontent.com", "// @connect shop.cnw.com.au", "// @connect www.tradezone.com.au", "// @grant GM_getValue", "// @grant GM_setValue", "// @grant GM_xmlhttpRequest", "// @grant unsafeWindow", "// @match https://office.aroflo.com/ims/Site/Service/Quotes/*", "// @run-at document-idle"]);
   const __wreInfo0 = typeof GM_info != 'undefined' ? GM_info : null;
   const __wreSay = m => { try { console.log('[WRE live update] ' + __wreName + ': ' + m); } catch (e) {} };
   const __wreCmp = (a, b) => { const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number); for (let i = 0; i < Math.max(x.length, y.length); i++) { const d = (x[i] || 0) - (y[i] || 0); if (d) return d; } return 0; };
@@ -64,7 +64,7 @@
   }
   if (window.top === window.self) { __wreCheck(); setInterval(__wreCheck, 2 * 60e3 + 5000); }
   if (__wreLive()) return;
-  // ---------- the built in copy (src/aroflo-supplier-items.js at 0.8) ----------
+  // ---------- the built in copy (src/aroflo-supplier-items.js at 0.9) ----------
 
 (function () {
   'use strict';
@@ -148,6 +148,14 @@
   async function pool(list, n, fn) { let i = 0; await Promise.all(Array.from({ length: Math.min(n, list.length) }, async () => { while (i < list.length) { const x = list[i++]; try { await fn(x); } catch (e) {} } })); }
 
   // ---------- CNW ----------
+  // CNW's own product number (what the price call wants). Search pages put it on the cart button, category and
+  // product pages put it in other spots, so look everywhere it's been seen
+  const cnwNum = el => {
+    if (!el) return '';
+    const h = el.outerHTML || '';
+    const m = h.match(/id="(\d{2,9})-(?:addToCartButton|eligibleForAddToCart)"/) || h.match(/<span[^>]*\bid="(\d{2,9})"[^>]*class="[^"]*price/) || h.match(/<span[^>]*class="[^"]*price[^"]*"[^>]*\bid="(\d{2,9})"/) || h.match(/data-(?:product-?)?(?:pk|id|number|num)="(\d{2,9})"/i) || h.match(/\bid="(\d{2,9})"/);
+    return m ? m[1] : '';
+  };
   // product cards on a CNW search or category page
   function cnwCards(doc) {
     const items = [], seen = new Set();
@@ -155,10 +163,10 @@
       if (c.closest('.productCarousel')) return;                 // skip "you might like" sliders
       const a = c.querySelector('a.product-title');
       const full = (c.querySelector('[data-product-code]') || { getAttribute: () => '' }).getAttribute('data-product-code') || '';
-      const idEl = c.querySelector('[id$="-addToCartButton"],[id$="-eligibleForAddToCart"]');
-      const id = idEl ? idEl.id.split('-')[0] : '';
-      const code = clean((c.querySelector('a.product-code') || {}).textContent).replace(/^Code:\s*/i, '') || full;
-      if (!id || seen.has(id)) return; seen.add(id);
+      const id = cnwNum(c);
+      const code = clean((c.querySelector('a.product-code') || {}).textContent).replace(/^Code:\s*/i, '') || full || c.getAttribute('productId') || '';
+      const key = id || full || code; if (!key || seen.has(key)) return; seen.add(key);
+      if (!debug.cnwCard) debug.cnwCard = (c.outerHTML || '').replace(/\s+/g, ' ').slice(0, 3500);
       items.push({ sup: 'CNW', id, code, full, name: clean(a && (a.getAttribute('data-short-name') || a.getAttribute('title') || a.textContent)), uom: clean((c.querySelector('.priceUOM span') || {}).textContent), href: a ? CNW + a.getAttribute('href') : '', img: imgOf(c, CNW, 'img.product-thumb') });
     });
     return items;
@@ -167,13 +175,15 @@
   function cnwProduct(doc, url) {
     if (!doc.querySelector('.scaffoldProductDisplayData')) return null;
     const p = doc.querySelector('.supplierCost span.price[id], span.price[id]');
-    return { sup: 'CNW', id: p ? p.id : '', full: decodeURIComponent(((url || '').match(/\/p\/([^/?#]+)/) || [])[1] || ''), code: clean((doc.querySelector('.scaffoldProductDisplayDataCode .product-code') || {}).textContent).replace(/^Code:\s*/i, ''), name: clean((doc.querySelector('h1') || {}).textContent), uom: clean((doc.querySelector('.scaffoldUnitOfMesureCode') || {}).textContent), href: url || '', img: (doc.querySelector('meta[property="og:image"]') || { getAttribute: () => '' }).getAttribute('content') || imgOf(doc.querySelector('.scaffoldProductDisplayWrapper'), CNW) };
+    const id = (p && /^\d+$/.test(p.id) ? p.id : '') || cnwNum(doc.querySelector('.scaffoldProductDisplayWrapper') || doc.body);
+    if (!id && !debug.cnwPage) debug.cnwPage = ((doc.querySelector('.scaffoldProductDisplayWrapper') || doc.body || {}).outerHTML || '').replace(/<script[\s\S]*?<\/script>/gi, '').replace(/\s+/g, ' ').slice(0, 3500);
+    return { sup: 'CNW', id, full: decodeURIComponent(((url || '').match(/\/p\/([^/?#]+)/) || [])[1] || ''), code: clean((doc.querySelector('.scaffoldProductDisplayDataCode .product-code') || {}).textContent).replace(/^Code:\s*/i, ''), name: clean((doc.querySelector('h1') || {}).textContent), uom: clean((doc.querySelector('.scaffoldUnitOfMesureCode') || {}).textContent), href: url || '', img: (doc.querySelector('meta[property="og:image"]') || { getAttribute: () => '' }).getAttribute('content') || imgOf(doc.querySelector('.scaffoldProductDisplayWrapper'), CNW) };
   }
   async function searchCnw(term) {
     // 1. the normal search. Some words (like GPO) jump to a category page instead, which loads its products later
     let r = await get(CNW + '/search?text=' + encodeURIComponent(term));
     let t = r.responseText || '';
-    debug.CNW = { term, tried: [], url: r.finalUrl || '', status: r.status, sample: '' };
+    debug.CNW = { term, tried: [], url: r.finalUrl || '', status: r.status, sample: '' }; delete debug.cnwCard; delete debug.cnwPage;
     if (/\/login\b/.test(r.finalUrl || '')) throw out_('CNW');
     let doc = html(t);
     const loc = await cnwLoc();
@@ -193,7 +203,7 @@
       let prods = []; try { prods = JSON.parse(a.responseText).products || []; } catch (e) {}
       debug.CNW.tried.push('suggest ' + prods.length);
       const got = [];
-      await pool(prods.slice(0, 8), 4, async pr => { if (!pr.url) return; const u = CNW + pr.url; const pg = await get(u); const one = cnwProduct(html(pg.responseText), u); if (one && one.id) { one.full = one.full || pr.code; one.name = one.name || clean(pr.name); got.push(one); } });
+      await pool(prods.slice(0, 8), 4, async pr => { if (!pr.url) return; const u = CNW + pr.url; const pg = await get(u); const one = cnwProduct(html(pg.responseText), u); if (one) { one.full = one.full || pr.code; one.name = one.name || clean(pr.name); got.push(one); } });
       items = prods.map(pr => got.find(g => g.full == pr.code)).filter(Boolean);
     }
     if (!items.length) {
@@ -209,7 +219,8 @@
       const by = {}; (Array.isArray(list) ? list : []).forEach(p => { by[String(p.code)] = p; });
       items.forEach(i => { const p = by[i.id]; if (p) { i.price = Number(p.price); i.branch = p.stockLevel; i.national = p.warehouseStockLevel; i.status = p.stockStatus; } });
     }
-    if (items.every(i => !i.price)) { if (!signedIn(t)) throw out_('CNW'); items.forEach(i => { i.note = 'no price from CNW for this one'; }); }
+    items.forEach(i => { if (!i.id) i.note = 'couldn\'t get CNW\'s price for this one, tap view'; });
+    if (items.every(i => !i.price) && items.some(i => i.id)) { if (!signedIn(t)) throw out_('CNW'); items.forEach(i => { i.note = i.note || 'no price from CNW for this one'; }); }
     return items;
   }
 
