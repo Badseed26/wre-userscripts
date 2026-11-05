@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AroFlo supplier items
 // @namespace    wre
-// @version      0.22
+// @version      0.23
 // @description  Supplier button on AroFlo quotes: search CNW and Tradezone with your own sign ins, pick an item, set the qty and it adds the line (item, part no, qty, cost in Value). Markup left alone, you press Save Quote. Order puts the quote's parts in your CNW or Tradezone cart (never checks out). Reprice, price compare, favourites, recents, stock at nearby branches and price history, synced through Todoist.
 // @match        https://office.aroflo.com/ims/Site/Service/Quotes/*
 // @match        https://shop.cnw.com.au/*
@@ -194,9 +194,12 @@
     if (!id && !debug.cnwPage) debug.cnwPage = ((doc.querySelector('.scaffoldProductDisplayWrapper') || doc.body || {}).outerHTML || '').replace(/<script[\s\S]*?<\/script>/gi, '').replace(/\s+/g, ' ').slice(0, 3500);
     return { sup: 'CNW', id, full: decodeURIComponent(((url || '').match(/\/p\/([^/?#]+)/) || [])[1] || ''), code: clean((doc.querySelector('.scaffoldProductDisplayDataCode .product-code') || {}).textContent).replace(/^Code:\s*/i, ''), name: clean((doc.querySelector('h1') || {}).textContent), uom: clean((doc.querySelector('.scaffoldUnitOfMesureCode') || {}).textContent), href: url || '', img: (doc.querySelector('meta[property="og:image"]') || { getAttribute: () => '' }).getAttribute('content') || imgOf(doc.querySelector('.scaffoldProductDisplayWrapper'), CNW) };
   }
-  async function searchCnw(term) {
+  // page is 0 for the first page. Later pages reuse the address the first page landed on (search or category).
+  async function searchCnw(term, page = 0, base = '') {
     // 1. the normal search. Some words (like GPO) jump to a category page instead, which loads its products later
-    let r = await get(CNW + '/search?text=' + encodeURIComponent(term));
+    let url = CNW + '/search?text=' + encodeURIComponent(term);
+    if (page > 0) { const u = new URL(base || url); if (/\/c\//.test(u.pathname) && !u.searchParams.get('q')) u.searchParams.set('q', ':relevance'); u.searchParams.set('page', page); url = u.href; }
+    let r = await get(url);
     let t = r.responseText || '';
     debug.CNW = { term, tried: [], url: r.finalUrl || '', status: r.status, sample: '' }; delete debug.cnwCard; delete debug.cnwPage;
     if (/\/login\b/.test(r.finalUrl || '') || cnwOut(t)) throw out_('CNW');
@@ -204,16 +207,18 @@
     const loc = await cnwLoc();
     let items = cnwCards(doc);
     debug.CNW.tried.push('search ' + items.length);
-    if (!items.length) { const one = cnwProduct(doc, r.finalUrl); if (one) items.push(one); }
+    if (!items.length && !page) { const one = cnwProduct(doc, r.finalUrl); if (one) items.push(one); }
+    const more = d => !!d.querySelector('a[rel="next"], li.pagination-next:not(.disabled) a, .pagination-next:not(.disabled) a, a.pagination-next');
+    let next = more(doc), landed = r.finalUrl || url;
     // 2. the same search without the jump
-    if (!items.length) {
+    if (!items.length && !page) {
       const r2 = await get(CNW + '/search?q=' + encodeURIComponent(term + ':relevance'));
       const d2 = html(r2.responseText); items = cnwCards(d2);
       debug.CNW.tried.push('q ' + items.length + ' ' + (r2.finalUrl || '').replace(CNW, '').slice(0, 80));
-      if (items.length) { t = r2.responseText; doc = d2; }
+      if (items.length) { t = r2.responseText; doc = d2; next = more(d2); landed = r2.finalUrl || landed; }
     }
     // 3. the search box's own suggestions, then each product's page for its number and photo
-    if (!items.length) {
+    if (!items.length && !page) {
       const a = await get(CNW + '/search/autocomplete/SearchBox?term=' + encodeURIComponent(term), true);
       let prods = []; try { prods = JSON.parse(a.responseText).products || []; } catch (e) {}
       debug.CNW.tried.push('suggest ' + prods.length);
@@ -226,8 +231,8 @@
       debug.CNW.sample = (i < 0 ? '(no product cards in the page) ' : '') + t.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/\s+/g, ' ').slice(Math.max(0, i - 200), Math.max(0, i - 200) + 6000);
       return [];
     }
-    items = items.slice(0, 12);
-    const ids = items.map(i => i.id).filter(Boolean);
+    items.page = page; items.base = page ? (base || landed) : landed; items.next = next || items.length >= 20;
+    const ids = [...new Set(items.map(i => i.id).filter(Boolean))];
     if (ids.length) {
       const pr = await get(CNW + '/search/product/' + ids.join(',') + '?stock_location=' + loc, true);
       let list = []; try { list = JSON.parse(pr.responseText); } catch (e) { debug.CNW.prices = (pr.responseText || '').slice(0, 1500); }
@@ -240,11 +245,14 @@
   }
 
   // ---------- Tradezone ----------
-  async function searchTz(term, opts) {
-    const tries = ['/catalogsearch/result/?q=', '/search?q='];
+  // page is 1 for the first page. Later pages reuse the address the first page landed on (search or category).
+  async function searchTz(term, opts, page = 1, base = '') {
+    const tries = page > 1 ? [null] : ['/catalogsearch/result/?q=', '/search?q='];
     let t = '', r = null;
     for (const p of tries) {
-      r = await get(TZ + p + encodeURIComponent(term));
+      let url = TZ + p + encodeURIComponent(term);
+      if (page > 1) { const u = new URL(base); u.searchParams.set('p', page); url = u.href; }
+      r = await get(url);
       t = r.responseText || '';
       if (r.status == 200 && /product_item/.test(t)) break;
     }
@@ -264,8 +272,10 @@
     if (!items.length) debug.Tradezone.sample = t.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/\s+/g, ' ').slice(0, 8000);
     if (items.length && items.every(i => !i.price)) { if (!signedIn(t)) throw out_('Tradezone'); items.forEach(i => { i.note = 'no price from Tradezone for this one'; }); }
     if (!items.length && !signedIn(t)) throw out_('Tradezone');
-    const top = items.slice(0, 12);
-    // each product page has stock per branch, the main photo and the price
+    const top = items;
+    top.page = page; top.base = page > 1 ? base : (r && r.finalUrl) || '';
+    top.next = !!doc.querySelector('a.next, a.action.next, .pages-item-next a, a[rel="next"], .pager .next a, .pages a.i-next') || items.length >= 20;
+    // each product page has stock per branch, the main photo and the price (first 8 here, the rest on a tap)
     await pool(opts && opts.pick ? opts.pick(top) : top.slice(0, 8), 4, it => tzDetail(it));
     return top;
   }
@@ -561,9 +571,10 @@ ${nearLine(p, null)}${p.res ? `<div class="mt ${p.res == 'in cart' ? '' : 'warn'
   }
 
   // ---------- cards (search, favourites and in stock picks all look the same) ----------
-  function stockLine(it) {
+  function stockLine(it, n) {
     if (it.sup == 'CNW') return it.branch == null ? '' : esc(cnwBranch()) + ' ' + it.branch + (it.national != null ? ', national ' + it.national : '');
-    return it.bname ? esc(it.bname) + ' ' + (it.branch || 'none') : esc(it.stock || '');
+    if (it.bname) return esc(it.bname) + ' ' + (it.branch || 'none');
+    return esc(it.stock || '') + (n != null && it.href ? `${it.stock ? ' · ' : ''}<a href="#" data-chk="${n}">check ${esc(tzBranch())}</a>` : '');
   }
   function nearLine(it, n) {
     if (it.branch !== 0) return '';
@@ -584,7 +595,7 @@ ${nearLine(p, null)}${p.res ? `<div class="mt ${p.res == 'in cart' ? '' : 'warn'
   }
   function cardHtml(it, n) {
     const cheap = it.other && it.other.price && it.price && it.price < it.other.price - 0.005;
-    const stock = stockLine(it);
+    const stock = stockLine(it, n);
     return `<div class="it"><div class="row">${it.img ? `<img class="th" src="${esc(it.img)}" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.visibility='hidden'">` : '<div class="th none">no pic</div>'}<div class="bd"><div class="nm"><span>${esc(it.name)}</span><button class="star" data-f="${n}" title="Favourite">${favOn(it) ? '★' : '☆'}</button></div>
 <div class="mt">${esc(it.code)}${it.uom ? ' · ' + esc(it.uom) : ''}${lotText(it) ? ' · <b class="warn">' + esc(lotText(it)) + '</b>' : ''}${stock ? ' · ' + stock : ''}${it.href ? ` · <a href="${esc(it.href)}" target="_blank">view</a>` : ''}</div>
 ${nearLine(it, n)}${cmpLine(it, n)}
@@ -598,6 +609,8 @@ ${histLine(it)}${it.note ? `<div class="mt warn">${esc(it.note)}</div>` : ''}</d
     once('button[data-f]', b => { b.onclick = e => { e.preventDefault(); e.stopPropagation(); const it = results[+b.dataset.f]; toggleFav(it); const on = favOn(it); list.querySelectorAll('button[data-f]').forEach(x => { const y = results[+x.dataset.f]; if (y && keyOf(y) == keyOf(it)) x.textContent = on ? '★' : '☆'; }); msg.textContent = on ? 'Starred. It shows up top when you open the window.' : 'Unstarred.'; }; });
     once('a[data-drop]', a => { a.onclick = e => { e.preventDefault(); const it = results[+a.dataset.drop]; if (!it || !it.other) return; D.drop[pk(it, it.other)] = { at: Date.now() }; changed(); results.forEach(x => { if (x.other && dropped(x, x.other)) delete x.other; }); msg.textContent = 'Dropped that match, it won\'t pair those two again.'; redraw(); }; });
     once('.hs', d => { d.onclick = () => { const b = d.nextElementSibling; if (b.style.display == 'none') { b.innerHTML = histOf(d.dataset.h).slice(-6).reverse().map(e => dmy(e[0]) + ': ' + money(e[1])).join('<br>'); b.style.display = 'block'; } else b.style.display = 'none'; }; });
+    once('a[data-chk]', a => { a.onclick = async e => { e.preventDefault(); const it = results[+a.dataset.chk]; a.textContent = 'checking…'; try { await tzDetail(it); await stockCheck([it]); } catch (x) {} redraw(); }; });
+    once('button[data-pg]', b => { b.onclick = () => pageTo(b.dataset.pg, +b.dataset.d); });
     once('a[data-alt]', a => { a.onclick = e => { e.preventDefault(); findInStock(+a.dataset.alt, a); }; });
     once('button[data-login]', b => { b.onclick = () => startLogin(b.dataset.login); });
     once('button[data-retry]', b => { b.onclick = () => run(); });
@@ -829,6 +842,9 @@ ${sw ? `<label class="tk"><input type="checkbox" data-sw="${n}"> Swap to ${esc(p
 #wre-sup .tk{display:flex;gap:8px;align-items:center;margin-top:6px;font-size:13px}
 #wre-sup .tk input{width:18px;height:18px}
 #wre-sup .alt{margin-top:6px}
+#wre-sup .pg{display:flex;align-items:center;justify-content:space-between;gap:8px;margin:4px 0 10px}
+#wre-sup .pg span{font-weight:600;color:#555}
+#wre-sup .pg .btn[disabled]{opacity:.35}
 #wre-sup .tgt{padding:0 10px 4px}
 #wre-sup .hd .pill{font-size:13px;font-weight:600;border:1px solid #fff8;border-radius:14px;padding:5px 10px}
 #wre-sup .out{border:1px solid #f0c9a6;background:#fff6ee;border-radius:8px;padding:10px;margin-bottom:6px}
@@ -970,6 +986,7 @@ ${sw ? `<label class="tk"><input type="checkbox" data-sw="${n}"> Swap to ${esc(p
     if (use('CNW')) jobs.push(searchCnw(term).then(r => ({ s: 'CNW', r }), e => ({ s: 'CNW', e })));
     if (use('Tradezone')) jobs.push(searchTz(term).then(r => ({ s: 'Tradezone', r }), e => ({ s: 'Tradezone', e })));
     const out = await Promise.all(jobs);
+    out.forEach(o => { o.term = term; if (o.r) { o.page = o.r.page; o.base = o.r.base; o.next = o.r.next; } });
     const C_ = (out.find(o => o.s == 'CNW' && o.r) || {}).r || [], T_ = (out.find(o => o.s == 'Tradezone' && o.r) || {}).r || [];
     pairUp(C_, T_);
     msg.textContent = 'Checking stock…';
@@ -977,16 +994,34 @@ ${sw ? `<label class="tk"><input type="checkbox" data-sw="${n}"> Swap to ${esc(p
     lastOut = out; drawResults();
     if (!out.some(o => o.e && o.e.signedOut)) waitingLogin = false;
   }
+  // flick one supplier to its next or previous page, the other stays where it is
+  async function pageTo(sp, d) {
+    const o = lastOut.find(x => x.s == sp && x.r); if (!o) return;
+    const first = sp == 'CNW' ? 0 : 1, np = Math.max(first, (o.page || first) + d);
+    msg.textContent = 'Loading ' + sp + ' page ' + (np - first + 1) + '…';
+    let r;
+    try { r = sp == 'CNW' ? await searchCnw(o.term, np, o.base) : await searchTz(o.term, null, np, o.base); }
+    catch (e) { msg.textContent = 'Couldn\'t load that page: ' + (e.message || e); return; }
+    if (!r.length) { o.next = false; drawResults(); msg.textContent = 'That\'s the last page for ' + sp + '.'; return; }
+    o.r = r; o.page = np; o.next = r.next; if (r.base) o.base = r.base;
+    const C_ = (lastOut.find(x => x.s == 'CNW' && x.r) || {}).r || [], T_ = (lastOut.find(x => x.s == 'Tradezone' && x.r) || {}).r || [];
+    [...C_, ...T_].forEach(x => delete x.other); pairUp(C_, T_);
+    await stockCheck(r);
+    drawResults();
+    const g = list.querySelector('.grp[data-g="' + sp + '"]'); if (g) g.scrollIntoView({ block: 'start' });
+  }
   function drawResults() {
     const out = lastOut; results = []; let h = '';
     out.forEach(o => {
       const shut = GM_getValue('shut' + o.s, false);
-      const ct = o.e ? (o.e.signedOut ? 'signed out' : 'error') : o.r.length + ' found';
+      const first = o.s == 'CNW' ? 0 : 1, pgNo = (o.page || first) - first + 1;
+      const ct = o.e ? (o.e.signedOut ? 'signed out' : 'error') : o.r.length + (pgNo > 1 || o.next ? ' on page ' + pgNo : ' found');
       h += `<div class="grp" data-g="${o.s}"><span>${o.s}</span><span class="ct">${ct}</span><span class="ar">${shut ? '▸' : '▾'}</span></div><div class="gb${shut ? ' shut' : ''}" data-g="${o.s}">`;
       if (o.e && o.e.signedOut) { h += `<div class="out"><b>Signed out of ${o.s}</b>Tap Sign in. With your login saved it signs in by itself and searches again.<div class="btns"><button class="btn" data-login="${o.s}">Sign in to ${o.s}</button><button class="btn grey" data-retry="1">Try again</button></div></div></div>`; return; }
       if (o.e) { h += `<div class="warn">${esc(o.e.message || o.e)}</div><div class="btns" style="margin-top:6px"><button class="btn grey" data-retry="1">Try again</button></div></div>`; return; }
       if (!o.r.length) { h += `<div class="mt">Nothing found. If you're sure it's there, tap Copy debug and send it to Claude.</div></div>`; return; }
       o.r.forEach(it => { h += cardHtml(it, results.push(it) - 1); });
+      if (pgNo > 1 || o.next) h += `<div class="pg"><button class="btn grey" data-pg="${o.s}" data-d="-1" ${pgNo > 1 ? '' : 'disabled'}>‹ Prev</button><span>Page ${pgNo}</span><button class="btn" data-pg="${o.s}" data-d="1" ${o.next ? '' : 'disabled'}>Next ›</button></div>`;
       h += '</div>';
     });
     list.innerHTML = h;
