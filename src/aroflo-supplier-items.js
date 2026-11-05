@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AroFlo supplier items
 // @namespace    wre
-// @version      0.34
+// @version      0.35
 // @description  Supplier button on AroFlo quotes: search CNW and Tradezone with your own sign ins, pick an item, set the qty and it adds the line (item, part no, qty, cost in Value). Markup left alone, you press Save Quote. Order puts the quote's parts in your CNW or Tradezone cart (never checks out). Reprice, price compare, favourites, recents, stock at nearby branches and price history, synced through Todoist. Build from notes: AI reads the task and your notes into a priced, one-supplier material list for you to check.
 // @match        https://office.aroflo.com/ims/Site/Service/Quotes/*
 // @match        https://shop.cnw.com.au/*
@@ -757,7 +757,8 @@ ${sw ? `<label class="tk"><input type="checkbox" data-sw="${n}"> Swap to ${esc(p
   // the job's supplier, stock, the higher price, quantities, folders and adding the lines.
   const AI = { read: 'claude-opus-5-5', pick: 'claude-haiku-5-5' };
   const AIPRICE = { 'claude-opus-5-5': [4, 20, 5, 0.2], 'claude-haiku-5-5': [0.1, 0.5, 0.125, 0.01] };   // USD per MTok: in, out, cache write, cache read
-  const aiKey = () => GM_getValue('anthropicKey', '');
+  const keyClean = k => String(k || '').replace(/[\s\u200B-\u200D\u2060\uFEFF]/g, '').replace(/^["']|["']$/g, '');
+  const aiKey = () => keyClean(GM_getValue('anthropicKey', ''));
   const DEFAULT_RULES = [
     'Duct on an aircon job is 80mm Aussie duct.',
     'Pipe for a split system is the pair coil sized for that unit.',
@@ -785,7 +786,7 @@ ${sw ? `<label class="tk"><input type="checkbox" data-sw="${n}"> Swap to ${esc(p
       onload: res, onerror: () => rej(new Error('couldn\'t reach the AI. If Tampermonkey asked to allow api.anthropic.com, hit Always allow')), ontimeout: () => rej(new Error('the AI took over 2 minutes, try again')), onabort: () => rej(new Error('the AI request was stopped')),
     }));
     let j = null; try { j = JSON.parse(r.responseText); } catch (e) {}
-    if (r.status == 401) throw new Error('the Anthropic key wasn\'t accepted, check it under Logins');
+    if (r.status == 401 || r.status == 403) { const k = aiKey(); throw new Error('Anthropic didn\'t accept the key (' + ((j && j.error && j.error.message) || r.status) + '). Saved key: ' + k.slice(0, 10) + '…' + k.slice(-4) + ', ' + k.length + ' characters. Check it under Logins'); }
     if (!j || r.status >= 300) throw new Error('the AI said ' + r.status + (j && j.error ? ': ' + j.error.message : ''));
     const u = j.usage || {}, pr = AIPRICE[model] || [0, 0, 0, 0];
     const cost = ((u.input_tokens || 0) * pr[0] + (u.output_tokens || 0) * pr[1] + (u.cache_creation_input_tokens || 0) * pr[2] + (u.cache_read_input_tokens || 0) * pr[3]) / 1e6;
@@ -1319,11 +1320,11 @@ ${x ? `<div class="mt">Ordering ${esc(x.sup)} ${money(x.price)}${it.pricedAt ? `
     box.querySelectorAll('.opt input[type=checkbox]').forEach(c => { c.checked = GM_getValue('use' + c.dataset.s, true); c.onchange = () => GM_setValue('use' + c.dataset.s, c.checked); });
     box.querySelector('.dbg').onclick = e => { e.preventDefault(); copyDebug(e.target); };
     const lg = box.querySelector('.lg');
-    const fillLg = () => { lg.querySelectorAll('input[data-c]').forEach(i => { const c = GM_getValue('cred_' + i.dataset.c, null); i.value = c && c[i.dataset.k] || ''; }); lg.querySelector('input[data-t]').value = tdToken(); lg.querySelector('input[data-ak]').value = aiKey(); lg.querySelector('.sy').textContent = tdToken() ? (syncMsg || 'Sync on.') : 'No Todoist token, so favourites, recents and price history stay on this device.'; };
+    const fillLg = () => { lg.querySelectorAll('input[data-c]').forEach(i => { const c = GM_getValue('cred_' + i.dataset.c, null); i.value = c && c[i.dataset.k] || ''; }); lg.querySelector('input[data-t]').value = tdToken(); lg.querySelector('input[data-ak]').value = aiKey(); lg.querySelector('.sy').dataset.k = aiKey() ? 'Anthropic key saved: ' + aiKey().slice(0, 10) + '…' + aiKey().slice(-4) + ' (' + aiKey().length + ' characters)' : 'No Anthropic key saved'; lg.querySelector('.sy').textContent = (tdToken() ? (syncMsg || 'Sync on.') : 'No Todoist token, so favourites, recents and price history stay on this device.') + ' ' + (lg.querySelector('.sy').dataset.k || '') + '.'; };
     box.querySelector('.lgn').onclick = e => { e.preventDefault(); const show = lg.style.display == 'none'; lg.style.display = show ? 'block' : 'none'; if (show) fillLg(); };
     box.querySelector('.lgsave').onclick = () => {
       ['CNW', 'Tradezone'].forEach(sp => { const u = clean(lg.querySelector(`input[data-c="${sp}"][data-k=u]`).value), pw = lg.querySelector(`input[data-c="${sp}"][data-k=p]`).value; GM_setValue('cred_' + sp, u && pw ? { u, p: pw } : null); });
-      GM_setValue('anthropicKey', clean(lg.querySelector('input[data-ak]').value));
+      GM_setValue('anthropicKey', keyClean(lg.querySelector('input[data-ak]').value));
       const tv = clean(lg.querySelector('input[data-t]').value), had = tdToken(); GM_setValue('todoistToken', tv);
       lg.style.display = 'none'; msg.textContent = 'Saved on this device.';
       if (tv && tv != had) { msg.textContent = 'Saved. Syncing with Todoist…'; push().then(() => { msg.textContent = 'Saved and synced with Todoist.'; if (lastView == 'fav') favView(); }, e => { msg.textContent = 'Saved, but sync didn\'t work: ' + (e.message || e); }); }
