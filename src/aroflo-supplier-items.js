@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         AroFlo supplier items
 // @namespace    wre
-// @version      0.24
-// @description  Supplier button on AroFlo quotes: search CNW and Tradezone with your own sign ins, pick an item, set the qty and it adds the line (item, part no, qty, cost in Value). Markup left alone, you press Save Quote. Order puts the quote's parts in your CNW or Tradezone cart (never checks out). Reprice, price compare, favourites, recents, stock at nearby branches and price history, synced through Todoist.
+// @version      0.30
+// @description  Supplier button on AroFlo quotes: search CNW and Tradezone with your own sign ins, pick an item, set the qty and it adds the line (item, part no, qty, cost in Value). Markup left alone, you press Save Quote. Order puts the quote's parts in your CNW or Tradezone cart (never checks out). Reprice, price compare, favourites, recents, stock at nearby branches and price history, synced through Todoist. Build from notes: AI reads the task and your notes into a priced, one-supplier material list for you to check.
 // @match        https://office.aroflo.com/ims/Site/Service/Quotes/*
 // @match        https://shop.cnw.com.au/*
 // @match        https://www.tradezone.com.au/*
@@ -13,6 +13,7 @@
 // @connect      shop.cnw.com.au
 // @connect      www.tradezone.com.au
 // @connect      api.todoist.com
+// @connect      api.anthropic.com
 // @run-at       document-idle
 // @updateURL    https://raw.githubusercontent.com/Badseed26/wre-userscripts/main/aroflo-supplier-items.user.js
 // @downloadURL  https://raw.githubusercontent.com/Badseed26/wre-userscripts/main/aroflo-supplier-items.user.js
@@ -310,7 +311,7 @@
   const keyOf = it => (it.sup == 'CNW' ? 'C' : 'T') + ':' + String(it.code || it.part || '').toUpperCase();
   const normCode = c => String(c || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
   const slim = it => ({ sup: it.sup, code: it.code || it.part || '', full: it.full || '', id: it.id || '', name: it.name || it.item || '', uom: it.uom || '', href: it.href || '', img: it.img || '', min: it.min || 0, step: it.step || 0 });
-  const blank = () => ({ fav: {}, rec: [], hist: {}, drop: {} });
+  const blank = () => ({ fav: {}, rec: [], hist: {}, drop: {}, learn: {}, cost: {}, rules: null });
   let D = Object.assign(blank(), GM_getValue('supData', {}));
   const saveLocal = () => GM_setValue('supData', D);
   const DATA_TASK = '6hw9M8p3qGw5WFhX', TDA = 'https://api.todoist.com/api/v1/';
@@ -330,6 +331,9 @@
     const cut = today() - 365;
     for (const k of keys(a.hist, b.hist)) { const m = new Map(); [...((b.hist || {})[k] || []), ...((a.hist || {})[k] || [])].forEach(e => m.set(e[0], e)); const arr = [...m.values()].filter(e => e[0] >= cut).sort((p, q) => p[0] - q[0]).slice(-12); if (arr.length) o.hist[k] = arr; }
     for (const k of keys(a.drop, b.drop)) o.drop[k] = later((a.drop || {})[k], (b.drop || {})[k]);
+    for (const k of keys(a.learn, b.learn)) o.learn[k] = later((a.learn || {})[k], (b.learn || {})[k]);
+    for (const k of keys(a.cost, b.cost)) { if (k.slice(0, 7) >= new Date(Date.now() - 400 * DAY).toISOString().slice(0, 7)) o.cost[k] = Math.max((a.cost || {})[k] || 0, (b.cost || {})[k] || 0); }
+    o.rules = later(a.rules, b.rules) || null;
     return o;
   }
   let syncIds = [], syncLast = '', syncMsg = '', pulled = false;
@@ -737,7 +741,7 @@ ${sw ? `<label class="tk"><input type="checkbox" data-sw="${n}"> Swap to ${esc(p
       parts.forEach((p, n) => {
         const up = list.querySelector('input[data-up="' + n + '"]'), sw = list.querySelector('input[data-sw="' + n + '"]');
         const doSw = sw && sw.checked, doUp = up && up.checked; if (!doSw && !doUp) return;
-        const price = doSw ? p.other.price : p.price;
+        const price = doSw ? p.other.price : (maxRule() && p.other && p.other.price > p.price ? p.other.price : p.price);
         p.rows.forEach(r => { if (!document.contains(r.row)) return; const val = colInput(r.row, 'value'); if (val) { setv(val, price.toFixed(2)); lines++; } if (doSw) { const pt = colInput(r.row, 'partNo'); if (pt) setv(pt, p.other.code); } });
         if (doSw) { remember(p.other); recordPrice(p.other, p.other.price); } else recordPrice(p, p.price);
         parts_++;
@@ -745,6 +749,369 @@ ${sw ? `<label class="tk"><input type="checkbox" data-sw="${n}"> Swap to ${esc(p
       msg.textContent = parts_ ? 'Updated ' + parts_ + ' parts on ' + lines + ' lines. Check them, then press Save Quote.' : 'Nothing ticked.';
     };
   }
+
+  // ---------- Build from notes ----------
+  // The AI only does the two jobs that need judgement: reading the notes into a gear list (Opus 5.5, medium effort, one
+  // call) and picking between real search results the script couldn't settle itself (Haiku 5.5, one batched call).
+  // Everything else is script: reading AroFlo, stripping private bits, searching, learned picks, favourites, exact codes,
+  // the job's supplier, stock, the higher price, quantities, folders and adding the lines.
+  const AI = { read: 'claude-opus-5-5', pick: 'claude-haiku-5-5' };
+  const AIPRICE = { 'claude-opus-5-5': [4, 20, 5, 0.2], 'claude-haiku-5-5': [0.1, 0.5, 0.125, 0.01] };   // USD per MTok: in, out, cache write, cache read
+  const aiKey = () => GM_getValue('anthropicKey', '');
+  const DEFAULT_RULES = [
+    'Duct on an aircon job is 80mm Aussie duct.',
+    'Pipe for a split system is the pair coil sized for that unit.',
+    'An isolator at a split\'s outdoor unit is a weatherproof 2 pole isolator rated for that unit.',
+    'TPS counts as part rolls (0.5 is half a 100m roll). Submains and heavier cable in metres. Conduit by the length or coil. Fittings, breakers and RCBOs by count.',
+    'Saddles, bends, glands, fixings and other sundries go in Misc. mat, not their own lines.',
+    'Don\'t list labour. Every folder gets an empty Labour and Misc. mat line that Ethan fills.',
+  ].join('\n');
+  const rules = () => (D.rules && D.rules.text != null ? D.rules.text : DEFAULT_RULES);
+  const maxRule = () => !(D.rules && D.rules.max === false);
+  const monthKey = () => new Date().toISOString().slice(0, 7);
+  const device = (() => { let d = GM_getValue('deviceId', ''); if (!d) { d = Math.random().toString(36).slice(2, 8); GM_setValue('deviceId', d); } return d; })();
+  const monthCost = () => Object.entries(D.cost || {}).filter(([k]) => k.startsWith(monthKey())).reduce((a, [, v]) => a + (v || 0), 0);
+  const limit = () => (D.rules && D.rules.limit) || 20;
+  function addCost(usd) { D.cost = D.cost || {}; const k = monthKey() + '|' + device; D.cost[k] = (D.cost[k] || 0) + usd; changed(); }
+  const learnKey = need => clean(need).toLowerCase().replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+
+  async function claude(model, system, user, maxTokens, effort) {
+    if (!aiKey()) throw new Error('No Anthropic key. Add it under Logins');
+    const body = { model, max_tokens: maxTokens, system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }], messages: [{ role: 'user', content: user }] };
+    if (effort) body.output_config = { effort };
+    const r = await new Promise((res, rej) => GM_xmlhttpRequest({
+      method: 'POST', url: 'https://api.anthropic.com/v1/messages', timeout: 180000, data: JSON.stringify(body),
+      headers: { 'content-type': 'application/json', 'x-api-key': aiKey(), 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+      onload: res, onerror: () => rej(new Error('couldn\'t reach the AI. If Tampermonkey asked to allow api.anthropic.com, hit Always allow')), ontimeout: () => rej(new Error('the AI took too long')),
+    }));
+    let j = null; try { j = JSON.parse(r.responseText); } catch (e) {}
+    if (r.status == 401) throw new Error('the Anthropic key wasn\'t accepted, check it under Logins');
+    if (!j || r.status >= 300) throw new Error('the AI said ' + r.status + (j && j.error ? ': ' + j.error.message : ''));
+    const u = j.usage || {}, pr = AIPRICE[model] || [0, 0, 0, 0];
+    const cost = ((u.input_tokens || 0) * pr[0] + (u.output_tokens || 0) * pr[1] + (u.cache_creation_input_tokens || 0) * pr[2] + (u.cache_read_input_tokens || 0) * pr[3]) / 1e6;
+    addCost(cost); bld.cost += cost;
+    const text = (j.content || []).filter(c => c.type == 'text').map(c => c.text).join('');
+    const m = text.match(/```(?:json)?\s*([\s\S]*?)```/) || [0, text];
+    const s = m[1].slice(m[1].indexOf('{'), m[1].lastIndexOf('}') + 1);
+    try { return JSON.parse(s); } catch (e) { debug.ai = text.slice(0, 3000); throw new Error('the AI\'s answer couldn\'t be read (Copy debug has it)'); }
+  }
+
+  // what the AI gets to read: task description, lads' notes, the quote's scope and your notes, private bits stripped
+  function strip(t) {
+    return String(t || '')
+      .replace(/[\w.+-]+@[\w-]+\.[\w.-]+/g, '[email]')
+      .replace(/(\+?61\s?|\b0)[2-478](?:[\s-]?\d){8}\b/g, '[phone]')
+      .replace(/\b(gate code|door code|code|key ?safe|lock ?box|alarm|password|pin)\b\s*(?:is|[:\-])?\s*[\w#*-]*\d[\w#*-]*/gi, '$1 [removed]')
+      .replace(/\b(site contact|contact|tenant|owner|customer|client|insured)\b\s*[:\-]\s*[^\n;,.]*/gi, '$1: [removed]')
+      .replace(/\b([Cc]all|[Rr]ing|[Tt]ext|[Pp]hone|[Ss]peak to|[Aa]sk for|[Mm]eet)\s+(?:Mr|Mrs|Ms|Miss)?\.?\s*[A-Z][a-z]+(?:\s+[A-Z][a-z]+)?/g, '$1 [name]')
+      .replace(/\b\d{1,2} [A-Z][a-z]+ 20\d\d \d{1,2}:\d{2}[ap]m [A-Z][\w'-]+ [A-Z][\w'-]+/g, m => m.replace(/[A-Z][\w'-]+ [A-Z][\w'-]+$/, 'staff'))
+      .replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n').trim();
+  }
+  const pageText = h => { const d = html(h); d.querySelectorAll('script,style').forEach(x => x.remove()); return clean((d.body || d).innerText || (d.body || d).textContent || ''); };
+  // the linked task's code: from the notes call the quote page already made, or anywhere in the page
+  function taskCode() {
+    const fromNet = (performance.getEntriesByType('resource') || []).map(e => e.name).find(n => /get_notes\.cfm\?[^#]*wrCoded=/.test(n));
+    const pg = document.documentElement.innerHTML.replace(/<script[\s\S]*?<\/script>/gi, '');   // page code can hold wrCoded= templates
+    const ok = /wrCoded=([0-9A-Za-z%._*~()-]{10,})/;
+    const m = (fromNet || '').match(ok) || pg.match(/AJAX_HTML_get_notes\.cfm\?[^"']*?wrCoded=([0-9A-Za-z%._*~()-]{10,})/) || pg.match(ok);
+    return m ? decodeURIComponent(m[1].replace(/&amp;/g, '&')) : '';
+  }
+  async function readSources(want) {
+    const out = {}, info = [];
+    const E = taskCode();
+    if (want.notes || want.desc) {
+      if (!E) info.push('couldn\'t find the linked task');
+      else {
+        if (want.notes) {
+          try { const r = await afGet('/ims/Site/Service/Notes/AJAX_HTML_get_notes.cfm?dateorder=0&last3notes=0&isLoaded=1&wrCoded=' + encodeURIComponent(E)); out.notes = pageText(r).replace(/Add Note.*$/i, ''); }
+          catch (e) { info.push('notes: ' + (e.message || e)); }
+        }
+        if (want.desc) {
+          try {
+            const h = document.documentElement.innerHTML, wrid = (h.match(/[?&]wrid=(\d+)/i) || h.match(/"wrid"\s*:\s*"?(\d+)/i) || [])[1];
+            if (wrid) { const t = pageText(await afGet('/ims/Site/Calendar/AJAX/AJAX_HTML_task_details.cfm?wrid=' + wrid)); out.desc = (t.match(/Task Description:?\s*([\s\S]*?)(?:\s+(?:Location|Task Type|Client|Contact|Status|Substatus):|$)/) || [0, t])[1]; }
+            else info.push('couldn\'t find the task description, put anything you need from it in your notes');
+          } catch (e) { info.push('description: ' + (e.message || e)); }
+        }
+      }
+    }
+    if (want.scope) { const ed = W.CKEDITOR && Object.values(W.CKEDITOR.instances || {}).find(i => /desc/i.test(i.name)); const t = ed ? pageText(ed.getData()) : ''; if (t) out.scope = t; }
+    debug.sources = { task: !!E, got: Object.keys(out), info };
+    return { out, info };
+  }
+  const afGet = url => fetch(url, { credentials: 'include' }).then(r => { if (!r.ok) throw new Error('AroFlo said ' + r.status); return r.text(); });
+
+  // searches, cached for 10 minutes so Redo and the compare don't run the same search twice
+  const sCache = {};
+  async function cachedSearch(sup, term) {
+    const k = sup + '|' + term.toLowerCase(), c = sCache[k];
+    if (c && Date.now() - c.at < 10 * 60e3) return c.r;
+    const r = sup == 'CNW' ? await searchCnw(term) : await searchTz(term, { pick: () => [] });   // Tradezone stock gets checked later, only for what's picked
+    sCache[k] = { at: Date.now(), r }; return r;
+  }
+  const brief = x => [x.code, x.name, x.uom || '', x.price ? x.price.toFixed(2) : 'no price'].join(' | ');
+  const usedBefore = x => favOn(x) || histOf(x).length > 0 || !!partMap()[String(x.code).toUpperCase()];
+
+  const READ_SYS = `You work out the materials for an Australian electrician's quote from the job notes (Wired Rite Electrical, Queensland).
+Read every source. Ethan's own notes win when sources clash. The lads' notes are what they found on site.
+List the main gear only, grouped into folders the way Ethan lays out a quote: one folder per customer facing group of work, e.g. "Shed Works - All", "Other Electrical Works", "Solar Replacement Materials". Don't add Labour or Misc. mat lines (the script adds those).
+Quantities in the units Ethan counts in (his rules below). Round up sensibly.
+For each item give 1 to 3 short search terms a sparky would type into an electrical wholesaler's search box (CNW, Tradezone), most specific first. If the notes or rules give an exact product code, put it in "code".
+Mark "inferred": true for anything the notes don't name but the job plainly needs (cable for a new GPO, a breaker for a new circuit, conduit for an outdoor run), with the reason in "why". For named items, "why" quotes the note briefly.
+Never list things already on the quote (given below) unless the notes need more of them.
+Ethan's rules:
+{RULES}
+Answer with JSON only, no other text:
+{"folders":[{"name":"...","items":[{"need":"double GPO white","qty":3,"unit":"each","terms":["double gpo white","dbl gpo"],"code":"","inferred":false,"why":"notes: 3 doubles in the shed"}]}],"notes":["anything Ethan should check"]}`;
+
+  const PICK_SYS = `You pick wholesaler products for an Australian electrician's quote. For each item you get what's needed and up to 5 real search results per supplier (code | name | unit | price ex GST). Pick the index (0 to 4) of the result that is that item, or null if none of them is. Match type, rating, size, colour and pack the way a sparky would; don't pick a different product just because it's cheaper.
+Answer with JSON only: {"picks":[{"i":0,"C":2,"T":null}]}`;
+
+  let bld = { items: [], folders: [], cost: 0, srcInfo: [], notes: [], job: '', summary: '' };
+
+  async function planItems(folders, opts) {
+    const sups = opts.sups;
+    const items = [];
+    folders.forEach(f => (f.items || []).forEach(it => items.push(Object.assign({ folder: f.name, tick: true }, it))));
+    let done = 0;
+    const tell = t => { if (opts.say) opts.say(t); };
+    // learned, exact code and remembered picks first, then searches
+    await pool(items, 3, async it => {
+      it.cand = {}; it.pick = {};
+      const lk = D.learn && D.learn[learnKey(it.need)];
+      for (const sp of sups) {
+        const fixed = (lk && lk[sp]) || (it.code ? it.code : '') || (it.pre && it.pre[sp]) || '';
+        let list = [];
+        if (fixed) { try { list = await cachedSearch(sp, fixed); } catch (e) { if (e.signedOut) throw e; } const x = list.find(y => normCode(y.code) == normCode(fixed) || normCode(y.full) == normCode(fixed)) || list.find(y => codeMatch(y.code, fixed)); if (x) { it.pick[sp] = x; it.auto = it.auto || (lk && lk[sp] ? 'learned' : 'code'); } }
+        if (!it.pick[sp]) {
+          for (const term of (it.terms || [it.need]).slice(0, 2)) {
+            try { list = await cachedSearch(sp, term); } catch (e) { if (e.signedOut) throw e; list = []; }
+            if (list.length) break;
+          }
+          it.cand[sp] = list.slice(0, 5);
+          const known = it.cand[sp].filter(usedBefore);
+          if (known.length == 1) { it.pick[sp] = known[0]; it.auto = it.auto || 'used before'; }
+        }
+      }
+      done++; tell('Searching ' + sups.join(' and ') + ', ' + done + ' of ' + items.length);
+    });
+    return items;
+  }
+  async function aiPick(items, sups) {
+    const need = items.map((it, i) => ({ it, i })).filter(({ it }) => sups.some(sp => !it.pick[sp] && it.cand[sp] && it.cand[sp].length));
+    if (!need.length) return;
+    const user = need.map(({ it, i }) => `#${i} need: ${it.need}, ${it.qty} ${it.unit || ''}${it.why ? ' (' + it.why + ')' : ''}\n` + sups.filter(sp => !it.pick[sp]).map(sp => (sp == 'CNW' ? 'C' : 'T') + ':\n' + (it.cand[sp] || []).map((x, k) => `  ${k}: ${brief(x)}`).join('\n')).join('\n')).join('\n\n');
+    const r = await claude(AI.pick, PICK_SYS, user, 1500);
+    (r.picks || []).forEach(p => { const it = items[p.i]; if (!it) return; [['C', 'CNW'], ['T', 'Tradezone']].forEach(([k, sp]) => { if (!it.pick[sp] && p[k] != null && it.cand[sp] && it.cand[sp][p[k]]) it.pick[sp] = it.cand[sp][p[k]]; }); });
+  }
+  // the job's supplier: most in stock at your branch, then the cheaper total. Then each line: the job's supplier,
+  // the other one if the job's has none here and they do (mixed), else the job's with the nearby branch flagged.
+  async function settle(items, sups, force) {
+    const tz = items.map(it => it.pick.Tradezone).filter(x => x && !x.bname);
+    await pool(tz, 4, x => tzDetail(x).catch(() => {}));
+    await stockCheck(items.flatMap(it => [it.pick.CNW, it.pick.Tradezone].filter(Boolean)));
+    const score = sp => { let stock = 0, total = 0, have = 0; items.forEach(it => { const x = it.pick[sp]; if (!x) return; have++; if (x.branch > 0) stock++; total += (x.price || 0) * (Number(it.qty) || 1); }); return { stock, total, have }; };
+    const sc = {}; sups.forEach(sp => sc[sp] = score(sp));
+    // most in stock at your branch, then most found, then the cheaper total
+    const better = (a, b) => a.stock != b.stock ? a.stock > b.stock : a.have != b.have ? a.have > b.have : a.total <= b.total;
+    const job = force || (sups.length == 1 ? sups[0] : (better(sc.CNW, sc.Tradezone) ? 'CNW' : 'Tradezone'));
+    const other = job == 'CNW' ? 'Tradezone' : 'CNW';
+    const existing = lineRows().map(r => normCode(r.part)).filter(Boolean);
+    items.forEach(it => {
+      const a = it.pick[job], b = sups.includes(other) ? it.pick[other] : null;
+      let x = a, mixed = false;
+      if (!a && b) { x = b; mixed = true; }
+      else if (a && !(a.branch > 0) && b && b.branch > 0) { x = b; mixed = true; }
+      it.use = x || null; it.mixed = mixed && !!x;
+      // the dearer price only counts when the two look like the same thing (within double of each other)
+      let prices = [a, b].filter(y => y && y.price).map(y => y.price);
+      if (prices.length == 2 && Math.max(...prices) > 2 * Math.min(...prices)) prices = x && x.price ? [x.price] : [];
+      it.value = x ? (maxRule() && prices.length ? Math.max(...prices) : x.price || 0) : 0;
+      it.pricedAt = x && maxRule() && prices.length > 1 && it.value > (x.price || 0) + 0.005 ? (x === a ? other : job) : '';
+      it.already = !!(x && existing.includes(normCode(x.code)));
+      if (it.already) it.tick = false;
+    });
+    const s = sc[job] || { stock: 0, have: 0, total: 0 }, o = sc[other];
+    bld.job = job;
+    bld.summary = `${job} for this job: ${s.stock} of ${items.length} in stock at ${myBranch(job)}, ${money(s.total)}` + (o && sups.length > 1 ? `. ${other} ${money(o.total)}, ${o.stock} in stock at ${myBranch(other)}` + (o.have < items.length ? `, ${items.length - o.have} not found` : '') : '');
+  }
+
+  async function buildRun(redo) {
+    if (!box) build(); showBox(); lastView = 'build';
+    const sups = ['CNW', 'Tradezone'].filter(sp => box.querySelector('.opt input[data-s="' + sp + '"]').checked);
+    if (!sups.length) { msg.textContent = 'Tick CNW, Tradezone or both first.'; return; }
+    if (!aiKey()) { msg.textContent = 'Add your Anthropic key under Logins first.'; return; }
+    const say = t => { msg.textContent = t; };
+    const want = bld.want || { desc: true, notes: true, scope: true, mine: true };
+    const mine = clean((box.querySelector('.bmine') || {}).value || bld.mine || '');
+    bld.mine = mine;
+    bld.cost = 0;
+    try {
+      say('Reading the task…');
+      const { out, info } = await readSources(want);
+      bld.srcInfo = info;
+      const src = [out.desc && 'TASK DESCRIPTION:\n' + strip(out.desc), out.notes && 'NOTES ON THE TASK:\n' + strip(out.notes), out.scope && 'QUOTE SCOPE:\n' + strip(out.scope), want.mine && mine && 'ETHAN\'S NOTES:\n' + strip(mine)].filter(Boolean).join('\n\n');
+      if (!src) { say('Nothing to read. Type some notes, or check the task has a description or notes.' + (info.length ? ' (' + info.join(', ') + ')' : '')); drawBuild(); return; }
+      const onQuote = lineRows().filter(r => clean(r.item)).map(r => `${r.item}${r.part ? ' [' + r.part + ']' : ''} x${r.qty || ''}`).join('\n') || '(nothing yet)';
+      const qid = (location.search.match(/quote_?id=([^&]+)/i) || location.search.match(/id=([^&]+)/i) || [0, location.pathname])[1];
+      const hash = String([src, rules(), onQuote].join('|').split('').reduce((h, c) => (h * 31 + c.charCodeAt(0)) | 0, 7));
+      const cache = GM_getValue('buildCache', {});
+      let plan, reuse = false;
+      if (!redo && cache[qid] && cache[qid].hash == hash) { plan = cache[qid].plan; reuse = true; say('Notes haven\'t changed since the last build, reusing it (no AI cost)…'); }
+      else {
+        say('Working out the gear (Opus)…');
+        const sys = READ_SYS.replace('{RULES}', rules());
+        let user = src + '\n\nALREADY ON THE QUOTE:\n' + onQuote;
+        if (redo) {
+          // Redo: just the change and the current list, not all the notes again
+          const cur = bld.items.map(it => `- [${it.folder}] ${it.need} x${it.qty} ${it.unit || ''}${it.edited ? ' (Ethan edited, keep)' : ''}`).join('\n');
+          user = 'CURRENT LIST:\n' + cur + '\n\nETHAN WANTS THIS CHANGED: ' + redo + '\n\nGive the whole updated list in the same JSON. Keep lines marked "Ethan edited" exactly as they are.';
+        }
+        plan = await claude(AI.read, sys, user, 4000, 'medium');
+        cache[qid] = { hash, plan, at: Date.now() };
+        Object.keys(cache).sort((a, b) => cache[a].at - cache[b].at).slice(0, Math.max(0, Object.keys(cache).length - 30)).forEach(k => delete cache[k]);
+        GM_setValue('buildCache', cache);
+      }
+      const kept = redo ? bld.items.filter(it => it.edited) : [];
+      const folders = (plan.folders || []).map(f => ({ name: clean(f.name) || 'Materials', items: (f.items || []).filter(x => !kept.some(k => learnKey(k.need) == learnKey(x.need))) }));
+      // a reused build reuses its picks too, so neither AI call runs
+      const prev = reuse && cache[qid].picks || [];
+      folders.forEach(f => f.items.forEach(x => { const p = prev.find(q => q.need == learnKey(x.need)); if (p) x.pre = p.pre; }));
+      let items = await planItems(folders, { sups, say });
+      say('Picking the closest matches…');
+      await aiPick(items, sups);
+      cache[qid] = Object.assign(cache[qid] || { hash, plan, at: Date.now() }, { picks: items.map(it => ({ need: learnKey(it.need), pre: Object.fromEntries(Object.entries(it.pick).map(([k, v]) => [k, v.code])) })) });
+      GM_setValue('buildCache', cache);
+      items = kept.concat(items);
+      say('Checking stock…');
+      await settle(items, sups);
+      const before = redo ? bld.items.map(it => learnKey(it.need)) : null;
+      bld.items = items; bld.folders = [...new Set(items.map(it => it.folder))]; bld.notes = plan.notes || [];
+      bld.changes = before ? items.filter(it => !before.includes(learnKey(it.need))).map(it => it.need) : null;
+      drawBuild();
+      const mc = monthCost();
+      say(`Done. This build cost US$${bld.cost.toFixed(2)}, ${monthKey()} so far US$${mc.toFixed(2)}.` + (mc > limit() ? ` That's over your US$${limit()} a month limit.` : ''));
+    } catch (e) {
+      if (e.signedOut) { list.innerHTML = `<div class="out"><b>Signed out of ${e.signedOut}</b>Sign in, then Build again.<div class="btns"><button class="btn" data-login="${e.signedOut}">Sign in to ${e.signedOut}</button></div></div>`; wire(list); }
+      say('Build didn\'t finish: ' + (e.message || e));
+    }
+  }
+
+  function drawBuild() {
+    const want = bld.want || (bld.want = { desc: true, notes: true, scope: true, mine: true });
+    let h = `<div class="bsrc"><label><input type="checkbox" data-w="desc" ${want.desc ? 'checked' : ''}> Task description</label><label><input type="checkbox" data-w="notes" ${want.notes ? 'checked' : ''}> Notes on the task</label><label><input type="checkbox" data-w="scope" ${want.scope ? 'checked' : ''}> Quote scope</label><label><input type="checkbox" data-w="mine" ${want.mine ? 'checked' : ''}> My notes</label></div>
+<textarea class="bmine" rows="3" placeholder="Your notes (type or dictate), e.g. 3 doubles in the shed, 16mm sub main from the house">${esc(bld.mine || '')}</textarea>
+<div class="ad"><button class="btn bgo" style="flex:1">${bld.items.length ? 'Build again' : 'Build the list'}</button><button class="btn grey brules">My rules</button></div>`;
+    if (bld.srcInfo && bld.srcInfo.length) h += `<div class="mt warn">${esc(bld.srcInfo.join('. '))}</div>`;
+    if (bld.items.length) {
+      const other = bld.job == 'CNW' ? 'Tradezone' : 'CNW';
+      h += `<div class="cmp" style="font-size:13px"><b>${esc(bld.summary)}</b>${bld.items.some(it => it.pick[other]) ? `<div class="cb"><button class="btn grey sm bflip">Use ${other} for the whole job</button></div>` : ''}</div>`;
+      if (bld.changes && bld.changes.length) h += `<div class="mt amb">Redo added: ${esc(bld.changes.join(', '))}</div>`;
+      bld.folders.forEach(fn => {
+        h += `<div class="grp"><span>${esc(fn)}</span><span class="ct">${bld.items.filter(it => it.folder == fn).length}</span></div><div class="gb">`;
+        bld.items.forEach((it, n) => {
+          if (it.folder != fn) return;
+          const x = it.use;
+          const opts = ['CNW', 'Tradezone'].flatMap(sp => [it.pick[sp], ...(it.cand[sp] || [])].filter(Boolean).filter((y, k, a) => a.findIndex(z => keyOf(z) == keyOf(y)) == k).map(y => ({ y, sp })));
+          const tags = [it.inferred && '<span class="tag inf">inferred</span>', it.mixed && '<span class="tag mix">mixed</span>', it.already && '<span class="tag">already on the quote</span>', it.auto && `<span class="tag">${esc(it.auto)}</span>`].filter(Boolean).join(' ');
+          h += `<div class="it"><label class="tk" style="margin:0"><input type="checkbox" data-bt="${n}" ${it.tick ? 'checked' : ''}><b>${esc(x ? x.name : it.need)}</b></label>
+<div class="mt">${esc(it.need)}${it.why ? ' · ' + esc(it.why) : ''} ${tags}</div>
+${x ? `<div class="mt">${esc(x.sup)} ${esc(x.code)}${x.uom ? ' · ' + esc(x.uom) : ''} · ${stockLine(x) || 'stock unknown'}${lotText(x) ? ' · <b class="warn">' + esc(lotText(x)) + '</b>' : ''}</div>${nearLine(x, null)}` : '<div class="mt warn">No product found. Pick one below or leave it unpriced.</div>'}
+${x ? `<div class="mt">Ordering ${esc(x.sup)} ${money(x.price)}${it.pricedAt ? `, <b>priced at ${esc(it.pricedAt)} ${money(it.value)}</b>` : ''}</div>` : ''}
+<div class="ad"><select data-bs="${n}" style="flex:1;min-width:0;font-size:14px;padding:6px"><option value="">${x ? 'Swap product…' : 'Pick a product…'}</option>${opts.map((o, k) => `<option value="${k}">${esc(o.sp)} · ${esc(o.y.code)} · ${esc(o.y.name).slice(0, 40)} · ${o.y.price ? money(o.y.price) : 'no price'}</option>`).join('')}<option value="none">Leave unpriced</option></select>Qty <input type="number" min="0" step="any" value="${esc(it.qty)}" data-bq="${n}" inputmode="decimal"></div></div>`;
+        });
+        h += '</div>';
+      });
+      if (bld.notes && bld.notes.length) h += `<div class="mt" style="margin:6px 0">Check: ${esc(bld.notes.join(' · '))}</div>`;
+      h += `<div class="ad"><button class="btn badd" style="flex:1">Add ticked to quote</button></div>
+<div class="mt" style="margin-top:8px">Tell it what to change:</div><div class="ad"><input class="bredo" type="text" placeholder="e.g. make the sub main 16mm" style="flex:1;width:auto;font-size:16px"><button class="btn grey bredo-go">Redo</button></div>`;
+    }
+    list.innerHTML = h; wire(list);
+    list.querySelectorAll('input[data-w]').forEach(c => { c.onchange = () => { want[c.dataset.w] = c.checked; }; });
+    const mineBox = list.querySelector('.bmine'); mineBox.oninput = () => { bld.mine = mineBox.value; };
+    list.querySelector('.bgo').onclick = () => buildRun();
+    list.querySelector('.brules').onclick = () => rulesView();
+    const flip = list.querySelector('.bflip'); if (flip) flip.onclick = async () => { const sups = ['CNW', 'Tradezone'].filter(sp => bld.items.some(it => it.pick[sp])); msg.textContent = 'Switching the job over…'; await settle(bld.items, sups, bld.job == 'CNW' ? 'Tradezone' : 'CNW'); drawBuild(); msg.textContent = bld.summary + '.'; };
+    list.querySelectorAll('input[data-bt]').forEach(c => { c.onchange = () => { bld.items[+c.dataset.bt].tick = c.checked; }; });
+    list.querySelectorAll('input[data-bq]').forEach(i => { i.onchange = () => { const it = bld.items[+i.dataset.bq]; it.qty = Number(i.value) || 0; it.edited = true; }; });
+    list.querySelectorAll('select[data-bs]').forEach(sel => { sel.onchange = async () => {
+      const it = bld.items[+sel.dataset.bs]; if (sel.value === '') return;
+      if (sel.value == 'none') { it.use = null; it.value = 0; it.edited = true; drawBuild(); return; }
+      const opts = ['CNW', 'Tradezone'].flatMap(sp => [it.pick[sp], ...(it.cand[sp] || [])].filter(Boolean).filter((y, k, a) => a.findIndex(z => keyOf(z) == keyOf(y)) == k).map(y => ({ y, sp })));
+      const o = opts[+sel.value]; if (!o) return;
+      it.pick[o.sp] = o.y; it.edited = true; it.auto = '';
+      // remember it: next time this kind of thing comes up, use this one
+      D.learn = D.learn || {}; const k = learnKey(it.need); D.learn[k] = Object.assign({}, D.learn[k], { [o.sp]: o.y.code, at: Date.now() }); changed();
+      if (o.sp == 'Tradezone' && !o.y.bname) { try { await tzDetail(o.y); } catch (e) {} }
+      await stockCheck([o.y]);
+      const sups = ['CNW', 'Tradezone'].filter(sp => bld.items.some(x => x.pick[sp]));
+      await settle(bld.items, sups, bld.job); drawBuild(); msg.textContent = 'Swapped, and it\'ll use that one next time.';
+    }; });
+    const add = list.querySelector('.badd'); if (add) add.onclick = () => buildAdd(add);
+    const rg = list.querySelector('.bredo-go'); if (rg) rg.onclick = () => { const t = clean(list.querySelector('.bredo').value); if (t) buildRun(t); };
+  }
+
+  // put the ticked lines on the quote: into the folder with the same name if there is one, otherwise a new folder,
+  // each folder getting an empty Labour and Misc. mat line. Nothing gets saved, you press Save Quote.
+  async function buildAdd(btn) {
+    const pick = bld.items.filter(it => it.tick);
+    if (!pick.length) { msg.textContent = 'Nothing ticked.'; return; }
+    btn.disabled = true; btn.textContent = 'Adding…';
+    try { const r = await applyLines(pick.map(it => ({ folder: it.folder, name: it.use ? it.use.name : it.need, code: it.use ? it.use.code : '', qty: it.qty, value: it.value, it: it.use }))); msg.textContent = `Added ${r.lines} lines into ${r.folders} folder${r.folders == 1 ? '' : 's'}${r.made ? ' (' + r.made + ' new)' : ''}. Check it, then press Save Quote.`; btn.textContent = 'Added'; }
+    catch (e) { msg.textContent = 'Didn\'t finish adding: ' + (e.message || e) + '. Check what went on before trying again.'; btn.textContent = 'Add ticked to quote'; btn.disabled = false; }
+  }
+  const addBtns = () => [...document.querySelectorAll('button')].filter(b => /^\s*Add Line Item\s*$/i.test(b.textContent) && b.offsetParent);
+  function folderBtn(name) {
+    const want = clean(name).toLowerCase();
+    for (const b of addBtns()) { const li = b.closest('li'); const f = li && li.querySelector('td.q-col-item input:not([type=hidden]), td.q-col-item textarea'); if (f && clean(f.value).toLowerCase() == want && b !== addBtns().slice(-1)[0]) return b; }
+    return null;
+  }
+  async function newFolder(name) {
+    const before = new Set(addBtns());
+    target = null;
+    await addLine({ name, code: '', price: 0 }, 1);
+    const inp = itemInputs().find(x => x.value == name); const row = inp && inp.closest('tr');
+    const plus = row && row.querySelector('span[title="Convert Ad-Hoc to Assembly"], [title="Convert Ad-Hoc to Assembly"]');
+    if (!plus) throw new Error('couldn\'t turn "' + name + '" into a folder');
+    if (W.jQuery) W.jQuery(plus).trigger('click'); else plus.click();
+    let b = null; for (let i = 0; i < 40 && !b; i++) { await sleep(150); b = addBtns().find(x => !before.has(x)); }
+    if (!b) throw new Error('the new folder "' + name + '" didn\'t get its Add Line Item');
+    return b;
+  }
+  async function applyLines(lines) {
+    const byF = {}; lines.forEach(l => (byF[l.folder] = byF[l.folder] || []).push(l));
+    let n = 0, made = 0;
+    for (const fn of Object.keys(byF)) {
+      let b = folderBtn(fn), fresh = false;
+      if (!b) { b = await newFolder(fn); made++; fresh = true; }
+      for (const l of byF[fn]) {
+        target = folderBtn(fn) || b;
+        await addLine({ name: l.name, code: l.code, price: l.value }, l.qty || 1);
+        if (l.it) { remember(l.it); recordPrice(l.it, l.it.price); }
+        n++;
+      }
+      const have = [];   // a new folder always gets its own Labour and Misc. mat
+      for (const extra of ['Labour', 'Misc. mat']) {
+        target = folderBtn(fn) || b;
+        if (fresh && !have.includes(extra.toLowerCase() + '#' + fn)) await addLine({ name: extra, code: '', price: 0 }, extra == 'Labour' ? 0 : 1);
+      }
+    }
+    target = null;
+    return { lines: n, folders: Object.keys(byF).length, made };
+  }
+
+  function rulesView() {
+    lastView = 'rules';
+    list.innerHTML = `<div class="mt" style="margin:6px 0">The AI reads these every build. One rule a line. Synced to your other devices.</div>
+<textarea class="rtext" rows="12">${esc(rules())}</textarea>
+<label class="tk"><input type="checkbox" class="rmax" ${maxRule() ? 'checked' : ''}> Price each line at the dearer supplier (Build, Reprice and the quote skill)</label>
+<div class="ad">Monthly AI limit US$ <input type="number" class="rlim" min="1" step="1" value="${limit()}" style="width:80px"> <span class="mt">(${monthKey()} so far US$${monthCost().toFixed(2)}, warns only)</span></div>
+<div class="ad"><button class="btn rsave" style="flex:1">Save</button><button class="btn grey rback">Back</button><button class="btn grey rreset">Reset</button></div>`;
+    list.querySelector('.rsave').onclick = () => { D.rules = { text: list.querySelector('.rtext').value, max: list.querySelector('.rmax').checked, limit: Number(list.querySelector('.rlim').value) || 20, at: Date.now() }; changed(); msg.textContent = 'Rules saved.'; lastView = 'build'; drawBuild(); };
+    list.querySelector('.rback').onclick = () => { lastView = 'build'; drawBuild(); };
+    list.querySelector('.rreset').onclick = () => { list.querySelector('.rtext').value = DEFAULT_RULES; };
+  }
+  function buildView() { if (!box) build(); showBox(); lastView = 'build'; drawBuild(); msg.textContent = bld.items.length ? bld.summary : 'Pick what to read, add your own notes if you like, then Build the list.'; }
 
   // ---------- the window ----------
   let box, list, msg, termIn;
@@ -865,6 +1232,12 @@ ${sw ? `<label class="tk"><input type="checkbox" data-sw="${n}"> Swap to ${esc(p
 #wre-sup .tk{display:flex;gap:8px;align-items:center;margin-top:6px;font-size:13px}
 #wre-sup .tk input{width:18px;height:18px}
 #wre-sup .alt{margin-top:6px}
+#wre-sup .tag{display:inline-block;font:700 11px inherit;font-size:11px;font-weight:700;padding:1px 6px;border-radius:8px;background:#e9e6e3;color:#444;margin-left:2px}
+#wre-sup .tag.inf{background:#fde3cc;color:#8a4300}
+#wre-sup .tag.mix{background:#e2ecf8;color:#24508a}
+#wre-sup .bsrc{display:flex;flex-wrap:wrap;gap:6px 14px;font-size:13px;margin:8px 0}
+#wre-sup .bsrc input{width:18px;height:18px;vertical-align:middle}
+#wre-sup .bmine,#wre-sup .rtext{width:100%;box-sizing:border-box;font-size:16px;padding:8px;border:1px solid #bbb;border-radius:8px;font-family:inherit}
 #wre-sup .cb{display:flex;gap:6px;margin-top:6px;flex-wrap:wrap}
 #wre-sup .btn.sm{padding:6px 10px;font-size:13px}
 #wre-sup .it{transition:box-shadow .3s}
@@ -885,13 +1258,14 @@ ${sw ? `<label class="tk"><input type="checkbox" data-sw="${n}"> Swap to ${esc(p
   function build() {
     css();
     box = document.createElement('div'); box.id = 'wre-sup';
-    box.innerHTML = `<div class="hd"><b>Supplier</b><button class="pill fv" title="Favourites and recents">★</button><button class="pill rpc" title="Reprice this quote">Reprice</button><button class="pill ord" title="Order this quote">Order</button><button class="x" title="Close">×</button></div>
+    box.innerHTML = `<div class="hd"><b>Supplier</b><button class="pill fv" title="Favourites and recents">★</button><button class="pill bld" title="Build the gear list from the notes">Build</button><button class="pill rpc" title="Reprice this quote">Reprice</button><button class="pill ord" title="Order this quote">Order</button><button class="x" title="Close">×</button></div>
 <div class="sr"><input type="search" placeholder="Search CNW and Tradezone" enterkeyhint="search"><button class="btn">Search</button></div>
 <div class="opt"><label><input type="checkbox" data-s="CNW" checked> CNW</label><label><input type="checkbox" data-s="Tradezone" checked> Tradezone</label><a href="#" class="lgn" style="margin-left:auto">Logins</a><a href="#" class="dbg">Copy debug</a></div>
 <div class="lg" style="display:none"><div class="mt" style="margin-bottom:6px">Saved logins sign you in by themselves when a supplier signs you out. They stay in Tampermonkey on this device only, never in the repo, and Claude never sees them. Leave one blank to tap your saved password instead.</div>
 <div class="lgrow"><b>CNW</b><input data-c="CNW" data-k="u" type="email" placeholder="email" autocomplete="off"><input data-c="CNW" data-k="p" type="password" placeholder="password" autocomplete="new-password"></div>
 <div class="lgrow"><b>Tradezone</b><input data-c="Tradezone" data-k="u" type="email" placeholder="email" autocomplete="off"><input data-c="Tradezone" data-k="p" type="password" placeholder="password" autocomplete="new-password"></div>
 <div class="lgrow"><b>Todoist</b><input data-t="1" type="password" placeholder="token, for phone and PC sync" autocomplete="new-password"></div>
+<div class="lgrow"><b>Anthropic</b><input data-k="1" type="password" placeholder="API key, for Build from notes" autocomplete="new-password"></div>
 <div class="mt sy" style="margin-bottom:6px"></div>
 <div class="ad"><button class="btn lgsave" style="flex:1">Save</button><button class="btn grey lgclear">Clear logins</button></div></div>
 <div class="opt br"><label>CNW <input data-b="cnwBranch" placeholder="branch" autocomplete="off"></label><label>TZ <input data-b="tzBranch" placeholder="branch" autocomplete="off"></label></div><div class="sug"></div>
@@ -901,6 +1275,7 @@ ${sw ? `<label class="tk"><input type="checkbox" data-sw="${n}"> Swap to ${esc(p
     box.querySelector('.hd .x').onclick = () => hideBox();
     box.querySelector('.hd .ord').onclick = () => orderView();
     box.querySelector('.hd .rpc').onclick = () => repriceView();
+    box.querySelector('.hd .bld').onclick = () => buildView();
     box.querySelector('.hd .fv').onclick = () => { termIn.value = ''; favView(); };
     box.querySelector('.sr .btn').onclick = run;
     termIn.addEventListener('keydown', e => { if (e.key == 'Enter') { e.preventDefault(); run(); } });
@@ -933,10 +1308,11 @@ ${sw ? `<label class="tk"><input type="checkbox" data-sw="${n}"> Swap to ${esc(p
     box.querySelectorAll('.opt input[type=checkbox]').forEach(c => { c.checked = GM_getValue('use' + c.dataset.s, true); c.onchange = () => GM_setValue('use' + c.dataset.s, c.checked); });
     box.querySelector('.dbg').onclick = e => { e.preventDefault(); copyDebug(e.target); };
     const lg = box.querySelector('.lg');
-    const fillLg = () => { lg.querySelectorAll('input[data-c]').forEach(i => { const c = GM_getValue('cred_' + i.dataset.c, null); i.value = c && c[i.dataset.k] || ''; }); lg.querySelector('input[data-t]').value = tdToken(); lg.querySelector('.sy').textContent = tdToken() ? (syncMsg || 'Sync on.') : 'No Todoist token, so favourites, recents and price history stay on this device.'; };
+    const fillLg = () => { lg.querySelectorAll('input[data-c]').forEach(i => { const c = GM_getValue('cred_' + i.dataset.c, null); i.value = c && c[i.dataset.k] || ''; }); lg.querySelector('input[data-t]').value = tdToken(); lg.querySelector('input[data-k]').value = aiKey(); lg.querySelector('.sy').textContent = tdToken() ? (syncMsg || 'Sync on.') : 'No Todoist token, so favourites, recents and price history stay on this device.'; };
     box.querySelector('.lgn').onclick = e => { e.preventDefault(); const show = lg.style.display == 'none'; lg.style.display = show ? 'block' : 'none'; if (show) fillLg(); };
     box.querySelector('.lgsave').onclick = () => {
       ['CNW', 'Tradezone'].forEach(sp => { const u = clean(lg.querySelector(`input[data-c="${sp}"][data-k=u]`).value), pw = lg.querySelector(`input[data-c="${sp}"][data-k=p]`).value; GM_setValue('cred_' + sp, u && pw ? { u, p: pw } : null); });
+      GM_setValue('anthropicKey', clean(lg.querySelector('input[data-k]').value));
       const tv = clean(lg.querySelector('input[data-t]').value), had = tdToken(); GM_setValue('todoistToken', tv);
       lg.style.display = 'none'; msg.textContent = 'Saved on this device.';
       if (tv && tv != had) { msg.textContent = 'Saved. Syncing with Todoist…'; push().then(() => { msg.textContent = 'Saved and synced with Todoist.'; if (lastView == 'fav') favView(); }, e => { msg.textContent = 'Saved, but sync didn\'t work: ' + (e.message || e); }); }
@@ -1097,6 +1473,7 @@ ${sw ? `<label class="tk"><input type="checkbox" data-sw="${n}"> Swap to ${esc(p
   //   lines()                     -> [{i, item, part, qty, value, depth}] every line on the quote, in order
   //   setValue(i, 12.34)          -> {ok, value} puts a cost in that line's Value only, reads it back. Never saves.
   const lineRows = () => itemInputs().map((inp, i) => { const row = inp.closest('tr'); const g = k => { const x = colInput(row, k); return x ? x.value : null; }; let depth = 0; for (let e = row.parentElement; e; e = e.parentElement) if (e.tagName == 'UL') depth++; return { i, inp, row, item: inp.value, part: g('partNo'), qty: g('qty'), value: g('value'), depth }; });
+  let bridgePlan = null;
   const API = {
     ping: async () => ({ v: GM_info.script.version }),
     search: async (term, sups) => {
@@ -1111,6 +1488,25 @@ ${sw ? `<label class="tk"><input type="checkbox" data-sw="${n}"> Swap to ${esc(p
       if (A.length && B.length) { pairUp(A.map(x => x._it), B.map(x => x._it)); out.forEach(x => { if (x._it && x._it.other) x.other = { sup: x._it.other.sup, code: x._it.other.code, name: x._it.other.name, price: x._it.other.price }; }); }
       out.forEach(x => delete x._it);
       return out;
+    },
+    // quote skill: hand over a gear list (folders of {need, qty, unit, terms, code, inferred, why}), get the candidates
+    // back, choose, then apply. No AI calls from the script on these runs: Claude does the picking itself.
+    candidates: async (folders, sups) => {
+      sups = sups && sups.length ? sups : ['CNW', 'Tradezone'];
+      const items = await planItems(folders, { sups }); bridgePlan = { items, sups };
+      return items.map((it, i) => ({ i, need: it.need, qty: it.qty, auto: Object.fromEntries(sups.map(sp => [sp, it.pick[sp] ? brief(it.pick[sp]) : null])), cand: Object.fromEntries(sups.map(sp => [sp, (it.cand[sp] || []).map((x, k) => k + ': ' + brief(x))])) }));
+    },
+    choose: async (picks, force) => {
+      if (!bridgePlan) throw new Error('run candidates first');
+      const { items, sups } = bridgePlan;
+      (picks || []).forEach(p => { const it = items[p.i]; if (!it) return; sups.forEach(sp => { const k = sp == 'CNW' ? 'C' : 'T'; if (p[k] === null) delete it.pick[sp]; else if (p[k] != null && it.cand[sp] && it.cand[sp][p[k]]) it.pick[sp] = it.cand[sp][p[k]]; }); });
+      await settle(items, sups, force);
+      return { job: bld.job = bld.job, summary: bld.summary, lines: items.map((it, i) => ({ i, folder: it.folder, need: it.need, qty: it.qty, sup: it.use && it.use.sup, code: it.use && it.use.code, name: it.use && it.use.name, value: it.value, pricedAt: it.pricedAt, mixed: it.mixed, inferred: !!it.inferred, already: it.already, branch: it.use ? it.use.branch : null, near: it.use && it.use.near || null })) };
+    },
+    apply: async skip => {
+      if (!bridgePlan) throw new Error('run candidates first');
+      const lines = bridgePlan.items.filter((it, i) => !it.already && !(skip || []).includes(i)).map(it => ({ folder: it.folder, name: it.use ? it.use.name : it.need, code: it.use ? it.use.code : '', qty: it.qty, value: it.value, it: it.use }));
+      return await applyLines(lines);
     },
     other: async (code, sup) => { const o = await findOther({ sup, code, part: code }); return o ? { sup: o.sup, code: o.code, name: o.name, price: o.price, branch: o.branch } : null; },
     lines: async () => lineRows().map(({ i, item, part, qty, value, depth }) => ({ i, item, part, qty, value, depth })),
