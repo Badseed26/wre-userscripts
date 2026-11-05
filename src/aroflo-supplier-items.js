@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AroFlo supplier items
 // @namespace    wre
-// @version      0.33
+// @version      0.34
 // @description  Supplier button on AroFlo quotes: search CNW and Tradezone with your own sign ins, pick an item, set the qty and it adds the line (item, part no, qty, cost in Value). Markup left alone, you press Save Quote. Order puts the quote's parts in your CNW or Tradezone cart (never checks out). Reprice, price compare, favourites, recents, stock at nearby branches and price history, synced through Todoist. Build from notes: AI reads the task and your notes into a priced, one-supplier material list for you to check.
 // @match        https://office.aroflo.com/ims/Site/Service/Quotes/*
 // @match        https://shop.cnw.com.au/*
@@ -1276,7 +1276,7 @@ ${x ? `<div class="mt">Ordering ${esc(x.sup)} ${money(x.price)}${it.pricedAt ? `
 <div class="lgrow"><b>CNW</b><input data-c="CNW" data-k="u" type="email" placeholder="email" autocomplete="off"><input data-c="CNW" data-k="p" type="password" placeholder="password" autocomplete="new-password"></div>
 <div class="lgrow"><b>Tradezone</b><input data-c="Tradezone" data-k="u" type="email" placeholder="email" autocomplete="off"><input data-c="Tradezone" data-k="p" type="password" placeholder="password" autocomplete="new-password"></div>
 <div class="lgrow"><b>Todoist</b><input data-t="1" type="password" placeholder="token, for phone and PC sync" autocomplete="new-password"></div>
-<div class="lgrow"><b>Anthropic</b><input data-k="1" type="password" placeholder="API key, for Build from notes" autocomplete="new-password"></div>
+<div class="lgrow"><b>Anthropic</b><input data-ak="1" type="password" placeholder="API key, for Build from notes" autocomplete="new-password"></div>
 <div class="mt sy" style="margin-bottom:6px"></div>
 <div class="ad"><button class="btn lgsave" style="flex:1">Save</button><button class="btn grey lgclear">Clear logins</button></div></div>
 <div class="opt br"><label>CNW <input data-b="cnwBranch" placeholder="branch" autocomplete="off"></label><label>TZ <input data-b="tzBranch" placeholder="branch" autocomplete="off"></label></div><div class="sug"></div>
@@ -1319,11 +1319,11 @@ ${x ? `<div class="mt">Ordering ${esc(x.sup)} ${money(x.price)}${it.pricedAt ? `
     box.querySelectorAll('.opt input[type=checkbox]').forEach(c => { c.checked = GM_getValue('use' + c.dataset.s, true); c.onchange = () => GM_setValue('use' + c.dataset.s, c.checked); });
     box.querySelector('.dbg').onclick = e => { e.preventDefault(); copyDebug(e.target); };
     const lg = box.querySelector('.lg');
-    const fillLg = () => { lg.querySelectorAll('input[data-c]').forEach(i => { const c = GM_getValue('cred_' + i.dataset.c, null); i.value = c && c[i.dataset.k] || ''; }); lg.querySelector('input[data-t]').value = tdToken(); lg.querySelector('input[data-k]').value = aiKey(); lg.querySelector('.sy').textContent = tdToken() ? (syncMsg || 'Sync on.') : 'No Todoist token, so favourites, recents and price history stay on this device.'; };
+    const fillLg = () => { lg.querySelectorAll('input[data-c]').forEach(i => { const c = GM_getValue('cred_' + i.dataset.c, null); i.value = c && c[i.dataset.k] || ''; }); lg.querySelector('input[data-t]').value = tdToken(); lg.querySelector('input[data-ak]').value = aiKey(); lg.querySelector('.sy').textContent = tdToken() ? (syncMsg || 'Sync on.') : 'No Todoist token, so favourites, recents and price history stay on this device.'; };
     box.querySelector('.lgn').onclick = e => { e.preventDefault(); const show = lg.style.display == 'none'; lg.style.display = show ? 'block' : 'none'; if (show) fillLg(); };
     box.querySelector('.lgsave').onclick = () => {
       ['CNW', 'Tradezone'].forEach(sp => { const u = clean(lg.querySelector(`input[data-c="${sp}"][data-k=u]`).value), pw = lg.querySelector(`input[data-c="${sp}"][data-k=p]`).value; GM_setValue('cred_' + sp, u && pw ? { u, p: pw } : null); });
-      GM_setValue('anthropicKey', clean(lg.querySelector('input[data-k]').value));
+      GM_setValue('anthropicKey', clean(lg.querySelector('input[data-ak]').value));
       const tv = clean(lg.querySelector('input[data-t]').value), had = tdToken(); GM_setValue('todoistToken', tv);
       lg.style.display = 'none'; msg.textContent = 'Saved on this device.';
       if (tv && tv != had) { msg.textContent = 'Saved. Syncing with Todoist…'; push().then(() => { msg.textContent = 'Saved and synced with Todoist.'; if (lastView == 'fav') favView(); }, e => { msg.textContent = 'Saved, but sync didn\'t work: ' + (e.message || e); }); }
