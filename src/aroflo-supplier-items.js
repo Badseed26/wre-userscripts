@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AroFlo supplier items
 // @namespace    wre
-// @version      0.12
+// @version      0.13
 // @description  Supplier button on AroFlo quotes: search CNW and Tradezone with your own sign ins, pick an item, set the qty and it adds the line (item, part no, qty, cost in Value). Markup left alone, you press Save Quote. Order puts the quote's parts in your CNW or Tradezone cart (never checks out).
 // @match        https://office.aroflo.com/ims/Site/Service/Quotes/*
 // @match        https://shop.cnw.com.au/*
@@ -56,7 +56,7 @@
     const loggedIn = () => !pwBox() && (sup == 'CNW' ? document.body && !document.body.classList.contains('logged-out') : /log ?out|sign ?out/i.test((document.body && document.body.innerText || '').slice(0, 20000)));
     let bar;
     const say = t => { if (!bar) { bar = document.createElement('div'); bar.style.cssText = 'position:fixed;left:8px;right:8px;top:8px;z-index:2147483647;background:#4a4541;color:#fff;border-left:5px solid #e8731a;border-radius:10px;padding:12px 14px;font:600 15px -apple-system,Segoe UI,sans-serif;box-shadow:0 4px 14px #0005'; document.body.appendChild(bar); } bar.textContent = 'WRE: ' + t; };
-    let finished = false;
+    let finished = false, waited = 0;
     const done = () => {
       if (finished) return; finished = true;
       GM_setValue('loginDone', { sup, at: Date.now() }); GM_setValue('loginReq', null);
@@ -67,7 +67,9 @@
     const go = () => {
       if (loggedIn()) return done();
       const pw = pwBox();
-      if (!pw) { location.href = LOGIN[sup]; return; }
+      const onLogin = /\/login\b|customer\/account\/login/.test(location.pathname);
+      if (!pw && !onLogin) { location.href = LOGIN[sup]; return; }
+      if (!pw) { waited += 1; if (waited < 15) return setTimeout(go, 700); say('Couldn\'t find the sign in boxes on this page. Sign in here yourself, this tab closes itself once you\'re in.'); return; }
       const cred = GM_getValue('cred_' + sup, null), tries = req.tries || 0;
       if (cred && cred.u && cred.p && !tries) {
         req.tries = 1; GM_setValue('loginReq', req);   // one go only, so a wrong password can't lock you out
@@ -82,7 +84,7 @@
       } else if (cred && tries) say('The saved login didn\'t get you in. Sign in here yourself and check it under Logins on the AroFlo window. This tab closes itself once you\'re in.');
       else say('Tap your saved password, then sign in. This tab closes itself once you\'re in.');
     };
-    const start = () => { go(); const iv = setInterval(() => { if (finished) return clearInterval(iv); if (loggedIn()) { clearInterval(iv); done(); } }, 1000); setTimeout(() => clearInterval(iv), 5 * 60e3); };
+    const start = () => { say('Getting ' + sup + ' signed in…'); go(); const iv = setInterval(() => { if (finished) return clearInterval(iv); if (loggedIn()) { clearInterval(iv); done(); } }, 1000); setTimeout(() => clearInterval(iv), 5 * 60e3); };
     if (document.readyState == 'complete') setTimeout(start, 500); else addEventListener('load', () => setTimeout(start, 500));
   }
 
