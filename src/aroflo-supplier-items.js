@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AroFlo supplier items
 // @namespace    wre
-// @version      0.21
+// @version      0.22
 // @description  Supplier button on AroFlo quotes: search CNW and Tradezone with your own sign ins, pick an item, set the qty and it adds the line (item, part no, qty, cost in Value). Markup left alone, you press Save Quote. Order puts the quote's parts in your CNW or Tradezone cart (never checks out). Reprice, price compare, favourites, recents, stock at nearby branches and price history, synced through Todoist.
 // @match        https://office.aroflo.com/ims/Site/Service/Quotes/*
 // @match        https://shop.cnw.com.au/*
@@ -722,14 +722,40 @@ ${sw ? `<label class="tk"><input type="checkbox" data-sw="${n}"> Swap to ${esc(p
     const k = vv.width / sw;
     Object.assign(box.style, { left: vv.offsetLeft + 'px', top: vv.offsetTop + 'px', width: sw + 'px', height: (vv.height / k) + 'px', transform: 'scale(' + k + ')' });
   }
-  let pageOverflow = null;
+  // iPhone Safari ignores overflow:hidden for finger scrolling, so the page gets pinned in place while the window's
+  // open (and put back where it was on close), and a drag that isn't on the list itself goes nowhere.
+  let locked = null;
+  function lockPage() {
+    if (locked) return;
+    const b = document.body, h = document.documentElement;
+    locked = { y: W.scrollY || h.scrollTop || 0, x: W.scrollX || 0, b: b.getAttribute('style'), h: h.getAttribute('style') };
+    h.style.overflow = 'hidden';
+    Object.assign(b.style, { position: 'fixed', top: -locked.y + 'px', left: -locked.x + 'px', width: '100%', overflow: 'hidden' });
+  }
+  function unlockPage() {
+    if (!locked) return;
+    const b = document.body, h = document.documentElement, l = locked; locked = null;
+    if (l.b == null) b.removeAttribute('style'); else b.setAttribute('style', l.b);
+    if (l.h == null) h.removeAttribute('style'); else h.setAttribute('style', l.h);
+    W.scrollTo(l.x, l.y);
+  }
+  let touchY = 0;
+  function guardTouch(bx) {
+    bx.addEventListener('touchstart', e => { touchY = e.touches[0].clientY; }, { passive: true });
+    bx.addEventListener('touchmove', e => {
+      const sc = [list, bx.querySelector('.sug')].find(el => el && el.contains(e.target) && el.scrollHeight > el.clientHeight + 1);
+      if (!sc) { e.preventDefault(); return; }                       // not on a scrolling part: stop the page moving
+      const dy = e.touches[0].clientY - touchY;
+      if ((dy > 0 && sc.scrollTop <= 0) || (dy < 0 && sc.scrollTop + sc.clientHeight >= sc.scrollHeight - 1)) e.preventDefault();   // at the end: don't hand the scroll on
+    }, { passive: false });
+  }
   function showBox() {
     box.style.display = 'flex';
-    if (MOBILE) { box.classList.add('mob'); if (pageOverflow == null) { pageOverflow = document.documentElement.style.overflow; document.documentElement.style.overflow = 'hidden'; } fit(); }
+    if (MOBILE) { box.classList.add('mob'); if (!box.dataset.guard) { box.dataset.guard = '1'; guardTouch(box); } lockPage(); fit(); }
   }
   function hideBox() {
     box.style.display = 'none';
-    if (pageOverflow != null) { document.documentElement.style.overflow = pageOverflow; pageOverflow = null; }
+    unlockPage();
   }
   if (MOBILE) { const vv = W.visualViewport; if (vv) { vv.addEventListener('resize', fit); vv.addEventListener('scroll', fit); } addEventListener('resize', fit); addEventListener('orientationchange', () => setTimeout(fit, 300)); }
   function css() {
