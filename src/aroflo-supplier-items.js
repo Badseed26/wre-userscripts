@@ -1,9 +1,11 @@
 // ==UserScript==
 // @name         AroFlo supplier items
 // @namespace    wre
-// @version      0.11
+// @version      0.12
 // @description  Supplier button on AroFlo quotes: search CNW and Tradezone with your own sign ins, pick an item, set the qty and it adds the line (item, part no, qty, cost in Value). Markup left alone, you press Save Quote. Order puts the quote's parts in your CNW or Tradezone cart (never checks out).
 // @match        https://office.aroflo.com/ims/Site/Service/Quotes/*
+// @match        https://shop.cnw.com.au/*
+// @match        https://www.tradezone.com.au/*
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -34,14 +36,55 @@
   const money = n => (n == null || isNaN(n)) ? '' : '$' + Number(n).toFixed(2);
   const esc = s => clean(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   const debug = {};   // last raw bits per supplier, for Copy debug
-  // where to sign back in. The window never sees or keeps a password: it opens the supplier's own sign in page
-  // in a new tab (your phone's saved passwords fill it), and searches again when you come back.
+  // where to sign back in. Sign in on the window opens the supplier's sign in page in a new tab. If you've saved
+  // that supplier's login under Logins (kept in this device's Tampermonkey only, never in the repo), it fills it and
+  // signs in, otherwise you tap your saved password. Once in, the tab closes itself and the window searches again.
   const LOGIN = { CNW: CNW + '/login', Tradezone: TZ + '/customer/account/login/' };
   const out_ = (sup) => { const e = new Error('Signed out of ' + sup); e.signedOut = sup; return e; };
   const signedIn = t => /logout|log out|sign out|signout/i.test(t || '');
   // CNW marks every page it sends with logged-in or logged-out on the body. Signed out, it shows the products but no prices
   // and no cart buttons (where the product number lives), which is why everything came back without a price.
   const cnwOut = t => /<body[^>]*class="[^"]*\blogged-out\b/i.test(t || '');
+
+  // ---------- on the supplier's own site: finish a sign in the window asked for ----------
+  if (/cnw\.com\.au|tradezone\.com\.au/.test(location.hostname)) { supplierLogin(); return; }
+  function supplierLogin() {
+    const sup = /cnw/.test(location.hostname) ? 'CNW' : 'Tradezone';
+    const req = GM_getValue('loginReq', null);
+    if (!req || req.sup != sup || Date.now() - req.at > 10 * 60e3) return;   // only when the window sent you here
+    const pwBox = () => [...document.querySelectorAll('input[type=password]')].find(x => x.offsetParent);
+    const loggedIn = () => !pwBox() && (sup == 'CNW' ? document.body && !document.body.classList.contains('logged-out') : /log ?out|sign ?out/i.test((document.body && document.body.innerText || '').slice(0, 20000)));
+    let bar;
+    const say = t => { if (!bar) { bar = document.createElement('div'); bar.style.cssText = 'position:fixed;left:8px;right:8px;top:8px;z-index:2147483647;background:#4a4541;color:#fff;border-left:5px solid #e8731a;border-radius:10px;padding:12px 14px;font:600 15px -apple-system,Segoe UI,sans-serif;box-shadow:0 4px 14px #0005'; document.body.appendChild(bar); } bar.textContent = 'WRE: ' + t; };
+    let finished = false;
+    const done = () => {
+      if (finished) return; finished = true;
+      GM_setValue('loginDone', { sup, at: Date.now() }); GM_setValue('loginReq', null);
+      say('Signed in to ' + sup + '. Closing this tab…');
+      setTimeout(() => { try { window.close(); } catch (e) {} setTimeout(() => say('Signed in to ' + sup + '. Go back to AroFlo, it searches again by itself.'), 900); }, 900);
+    };
+    const setv = (el, v) => { const d = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value'); d.set.call(el, v); ['input', 'change', 'keyup'].forEach(t => el.dispatchEvent(new Event(t, { bubbles: true }))); };
+    const go = () => {
+      if (loggedIn()) return done();
+      const pw = pwBox();
+      if (!pw) { location.href = LOGIN[sup]; return; }
+      const cred = GM_getValue('cred_' + sup, null), tries = req.tries || 0;
+      if (cred && cred.u && cred.p && !tries) {
+        req.tries = 1; GM_setValue('loginReq', req);   // one go only, so a wrong password can't lock you out
+        const f = pw.form || document;
+        const user = [...f.querySelectorAll('input')].find(i => i != pw && i.offsetParent && /^(email|text)$/i.test(i.type));
+        if (!user) { say('Couldn\'t find the email box. Sign in here yourself, this tab closes itself once you\'re in.'); return; }
+        setv(user, cred.u); setv(pw, cred.p);
+        const rem = [...f.querySelectorAll('input[type=checkbox]')].find(c => /remember|keep|stay/i.test((c.name || '') + (c.id || '') + ((c.closest('label') || {}).textContent || '')));
+        if (rem && !rem.checked) rem.click();
+        say('Signing in to ' + sup + '…');
+        setTimeout(() => { const b = f.querySelector('button[type=submit],input[type=submit],button:not([type])'); if (b) b.click(); else if (f.requestSubmit) f.requestSubmit(); else f.submit(); }, 400);
+      } else if (cred && tries) say('The saved login didn\'t get you in. Sign in here yourself and check it under Logins on the AroFlo window. This tab closes itself once you\'re in.');
+      else say('Tap your saved password, then sign in. This tab closes itself once you\'re in.');
+    };
+    const start = () => { go(); const iv = setInterval(() => { if (finished) return clearInterval(iv); if (loggedIn()) { clearInterval(iv); done(); } }, 1000); setTimeout(() => clearInterval(iv), 5 * 60e3); };
+    if (document.readyState == 'complete') setTimeout(start, 500); else addEventListener('load', () => setTimeout(start, 500));
+  }
 
   // ---------- requests with your sign in ----------
   function get(url, json) {
@@ -343,7 +386,7 @@
   }
   let orderParts = [];
   async function orderView() {
-    if (!box) build(); box.style.display = 'flex';
+    if (!box) build(); box.style.display = 'flex'; lastView = 'order';
     const parts = quoteParts();
     if (!parts.length) { msg.textContent = ''; list.innerHTML = '<div class="mt">No lines with a Part No on this quote. Lines added through the Supplier window carry one, the rest you\'d order by hand.</div>'; return; }
     msg.textContent = 'Working out ' + parts.length + ' parts…'; list.innerHTML = '';
@@ -374,7 +417,7 @@ ${p.res ? `<div class="mt ${p.res == 'in cart' ? '' : 'warn'}"><b>${esc(p.res)}<
     list.innerHTML = h;
     msg.textContent = 'Tick what you want, check the qty, then add to the cart. It never checks out, you order on their site.';
     list.querySelectorAll('input[data-q]').forEach(i => { i.onchange = () => { const pp = parts[+i.dataset.q]; const v = fitQty(Math.max(1, Number(i.value) || 1), pp); if (v != Number(i.value)) msg.textContent = pp.sup + ' ' + lotText(pp) + ', so that one goes to ' + v + '.'; i.value = v; pp.order = v; }; });
-    list.querySelectorAll('button[data-login]').forEach(b => { b.onclick = () => W.open(LOGIN[b.dataset.login], '_blank'); });
+    list.querySelectorAll('button[data-login]').forEach(b => { b.onclick = () => startLogin(b.dataset.login); });
     list.querySelectorAll('button[data-open]').forEach(b => { b.onclick = () => W.open(b.dataset.open == 'CNW' ? CNW + '/cart' : TZ + '/checkout/cart/', '_blank'); });
     list.querySelectorAll('button[data-cart]').forEach(b => { b.onclick = async () => {
       const sp = b.dataset.cart;
@@ -408,6 +451,11 @@ ${p.res ? `<div class="mt ${p.res == 'in cart' ? '' : 'warn'}"><b>${esc(p.res)}<
 #wre-sup .sug div{padding:9px 10px;border-bottom:1px solid #eee}
 #wre-sup .sug div span{color:#888;font-size:12px}
 #wre-sup .sug .none{color:#888;font-size:13px}
+#wre-sup .lg{margin:0 10px 8px;padding:10px;border:1px solid #e3e0dd;border-radius:8px;background:#faf9f8}
+#wre-sup .lgrow{display:flex;gap:6px;align-items:center;margin-bottom:6px}
+#wre-sup .lgrow b{width:78px;flex:none;font-size:13px}
+#wre-sup .lgrow input{flex:1;min-width:0;font-size:16px;padding:6px;border:1px solid #bbb;border-radius:6px}
+#wre-sup .opt .dbg{margin-left:10px}
 #wre-sup .msg{padding:0 10px 6px;font-size:13px;color:#555}
 #wre-sup .ls{overflow:auto;padding:0 10px 10px}
 #wre-sup .grp{display:flex;align-items:center;gap:8px;margin:12px 0 6px;padding:8px 10px;background:#f3f1ef;border-left:4px solid ${ORANGE};border-radius:6px;font:700 16px inherit;color:#222;cursor:pointer;user-select:none}
@@ -438,7 +486,11 @@ ${p.res ? `<div class="mt ${p.res == 'in cart' ? '' : 'warn'}"><b>${esc(p.res)}<
     box = document.createElement('div'); box.id = 'wre-sup';
     box.innerHTML = `<div class="hd"><b>Supplier items</b><button class="ord" title="Order this quote" style="font:600 13px inherit;border:1px solid #fff8;border-radius:14px;padding:4px 10px">Order</button><button class="x" title="Close">×</button></div>
 <div class="sr"><input type="search" placeholder="Search CNW and Tradezone" enterkeyhint="search"><button class="btn">Search</button></div>
-<div class="opt"><label><input type="checkbox" data-s="CNW" checked> CNW</label><label><input type="checkbox" data-s="Tradezone" checked> Tradezone</label><a href="#" class="dbg" style="margin-left:auto">Copy debug</a></div>
+<div class="opt"><label><input type="checkbox" data-s="CNW" checked> CNW</label><label><input type="checkbox" data-s="Tradezone" checked> Tradezone</label><a href="#" class="lgn" style="margin-left:auto">Logins</a><a href="#" class="dbg">Copy debug</a></div>
+<div class="lg" style="display:none"><div class="mt" style="margin-bottom:6px">Saved logins sign you in by themselves when a supplier signs you out. They stay in Tampermonkey on this device only, never in the repo, and Claude never sees them. Leave one blank to tap your saved password instead.</div>
+<div class="lgrow"><b>CNW</b><input data-c="CNW" data-k="u" type="email" placeholder="email" autocomplete="off"><input data-c="CNW" data-k="p" type="password" placeholder="password" autocomplete="new-password"></div>
+<div class="lgrow"><b>Tradezone</b><input data-c="Tradezone" data-k="u" type="email" placeholder="email" autocomplete="off"><input data-c="Tradezone" data-k="p" type="password" placeholder="password" autocomplete="new-password"></div>
+<div class="ad"><button class="btn lgsave" style="flex:1">Save logins</button><button class="btn grey lgclear">Clear both</button></div></div>
 <div class="opt br"><label>CNW <input data-b="cnwBranch" placeholder="branch" autocomplete="off"></label><label>TZ <input data-b="tzBranch" placeholder="branch" autocomplete="off"></label></div><div class="sug"></div>
 <div class="msg"></div><div class="ls"></div>`;
     document.body.appendChild(box);
@@ -475,14 +527,34 @@ ${p.res ? `<div class="mt ${p.res == 'in cart' ? '' : 'warn'}"><b>${esc(p.res)}<
     });
     box.querySelectorAll('.opt input[type=checkbox]').forEach(c => { c.checked = GM_getValue('use' + c.dataset.s, true); c.onchange = () => GM_setValue('use' + c.dataset.s, c.checked); });
     box.querySelector('.dbg').onclick = e => { e.preventDefault(); copyDebug(e.target); };
+    const lg = box.querySelector('.lg');
+    const fillLg = () => lg.querySelectorAll('input').forEach(i => { const c = GM_getValue('cred_' + i.dataset.c, null); i.value = c && c[i.dataset.k] || ''; });
+    box.querySelector('.lgn').onclick = e => { e.preventDefault(); const show = lg.style.display == 'none'; lg.style.display = show ? 'block' : 'none'; if (show) fillLg(); };
+    box.querySelector('.lgsave').onclick = () => {
+      ['CNW', 'Tradezone'].forEach(sp => { const u = clean(lg.querySelector(`input[data-c="${sp}"][data-k=u]`).value), pw = lg.querySelector(`input[data-c="${sp}"][data-k=p]`).value; GM_setValue('cred_' + sp, u && pw ? { u, p: pw } : null); });
+      lg.style.display = 'none'; msg.textContent = 'Logins saved on this device.';
+    };
+    box.querySelector('.lgclear').onclick = () => { GM_setValue('cred_CNW', null); GM_setValue('cred_Tradezone', null); fillLg(); msg.textContent = 'Saved logins cleared.'; };
   }
   function open() { if (!box) build(); box.style.display = 'flex'; termIn.focus(); }
 
-  let results = [], waitingLogin = false;
+  let results = [], waitingLogin = false, lastView = 'search', loginPoll = null;
+  function startLogin(sup) {
+    const at = Date.now();
+    GM_setValue('loginReq', { sup, at }); GM_setValue('loginDone', null);
+    waitingLogin = true; W.open(LOGIN[sup], '_blank');
+    msg.textContent = 'Signing in to ' + sup + ' in the other tab. This searches again once you\'re in.';
+    clearInterval(loginPoll);
+    loginPoll = setInterval(() => {
+      const d = GM_getValue('loginDone', null);
+      if (d && d.sup == sup && d.at >= at) { clearInterval(loginPoll); waitingLogin = false; msg.textContent = 'Signed in to ' + sup + ', searching again…'; lastView == 'order' ? orderView() : run(); }
+    }, 1500);
+    setTimeout(() => clearInterval(loginPoll), 10 * 60e3);
+  }
   // back from signing in: search again by itself
-  document.addEventListener('visibilitychange', () => { if (document.visibilityState == 'visible' && waitingLogin && box && box.style.display != 'none' && clean(termIn.value)) setTimeout(run, 600); });
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState == 'visible' && waitingLogin && !loginPoll && box && box.style.display != 'none' && clean(termIn.value)) setTimeout(run, 600); });
   async function run() {
-    const term = clean(termIn.value); if (!term) return;
+    const term = clean(termIn.value); if (!term) return; lastView = 'search';
     const use = s => box.querySelector('.opt input[data-s="' + s + '"]').checked;
     msg.textContent = 'Searching…'; list.innerHTML = '';
     const jobs = [];
@@ -511,7 +583,7 @@ ${it.note ? `<div class="mt warn">${esc(it.note)}</div>` : ''}</div></div></div>
     list.innerHTML = h;
     msg.textContent = results.length + ' found. Add drops a new line on the quote, then press Save Quote yourself.';
     list.querySelectorAll('button[data-n]').forEach(b => { b.onclick = () => add(b); });
-    list.querySelectorAll('button[data-login]').forEach(b => { b.onclick = () => { waitingLogin = true; W.open(LOGIN[b.dataset.login], '_blank'); }; });
+    list.querySelectorAll('button[data-login]').forEach(b => { b.onclick = () => startLogin(b.dataset.login); });
     list.querySelectorAll('button[data-retry]').forEach(b => { b.onclick = () => run(); });
     if (!out.some(o => o.e && o.e.signedOut)) waitingLogin = false;
     // tap a supplier's heading to fold it away (remembered for next time)
