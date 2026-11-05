@@ -39,27 +39,36 @@
     try { __wreRun(c.code, c.v); } catch (e) { if (e instanceof SyntaxError) { __wreSay(c.v + ' won\'t parse, running the built in ' + __wreVer); return false; } __wreSay(c.v + ' threw: ' + e.message); }
     __wreSay('running ' + c.v + ' (built in is ' + __wreVer + ')'); return true;
   }
+  // keep newer code once it's been fetched (sha = the commit, or raw:<version> when it came the fallback way)
+  function __wreTake(code, sha, tag) {
+    if (!/==\/UserScript==/.test(code)) return;
+    const m = __wreMeta(code); if (!m.v) return;
+    if (__wreCmp(m.v, __wreVer) > 0) {
+      let ok = true; try { new Function(code); } catch (e) { ok = !(e instanceof SyntaxError); }
+      if (!ok) { __wreSay(m.v + ' won\'t parse, not keeping it'); GM_setValue('wreLiveSha', sha); return; }
+      const old = GM_getValue('wreLiveCode', null); if (!old || old.v != m.v) __wreSay('got ' + m.v + ', it runs on the next page load');
+      GM_setValue('wreLiveCode', { v: m.v, code, sha, at: Date.now() });
+    } else GM_setValue('wreLiveCode', null); // Tampermonkey's copy has caught up
+    GM_setValue('wreLiveSha', sha); if (tag) GM_setValue('wreLiveEtag', tag);
+  }
+  // GitHub's commit check is limited per internet address, and on 4G/5G that address is shared with lots of other
+  // phones, so it can get turned away. Then the newest file is fetched straight off main instead (5/11).
+  function __wreRaw() {
+    GM_xmlhttpRequest({ method: 'GET', url: 'https://raw.githubusercontent.com/Badseed26/wre-userscripts/main/src/' + __wreName + '.js?t=' + Date.now(), timeout: 30000, headers: { 'Cache-Control': 'no-cache' }, onload: q => {
+      try { if (q.status != 200) return; const v = __wreMeta(q.responseText || '').v; if (v) __wreTake(q.responseText, 'raw:' + v); } catch (e) {} } });
+  }
   function __wreCheck() {
     try {
       if (Date.now() - GM_getValue('wreLiveAt', 0) < 2 * 60e3) return; GM_setValue('wreLiveAt', Date.now());
       const et = GM_getValue('wreLiveEtag', ''), hd = { Accept: 'application/vnd.github+json' }; if (et) hd['If-None-Match'] = et;
-      GM_xmlhttpRequest({ method: 'GET', url: 'https://api.github.com/repos/Badseed26/wre-userscripts/commits/main', headers: hd, timeout: 20000, onload: r => {
+      GM_xmlhttpRequest({ method: 'GET', url: 'https://api.github.com/repos/Badseed26/wre-userscripts/commits/main', headers: hd, timeout: 20000, onerror: __wreRaw, ontimeout: __wreRaw, onload: r => {
         try {
-          if (r.status != 200) return; // 304: nothing new, and it doesn't count against GitHub's limit
+          if (r.status == 304) return; // nothing new, and it doesn't count against GitHub's limit
+          if (r.status != 200) { __wreSay('GitHub said ' + r.status + ', checking the file directly'); return __wreRaw(); }
           const sha = (JSON.parse(r.responseText) || {}).sha, tag = (((r.responseHeaders || '').match(/^etag:\s*(.+)$/mi) || [])[1] || '').trim();
           if (!sha) return; if (sha == GM_getValue('wreLiveSha', '')) { if (tag) GM_setValue('wreLiveEtag', tag); return; }
           GM_xmlhttpRequest({ method: 'GET', url: 'https://raw.githubusercontent.com/Badseed26/wre-userscripts/' + sha + '/src/' + __wreName + '.js', timeout: 30000, onload: q => {
-            try {
-              const code = q.responseText || ''; if (q.status != 200 || !/==\/UserScript==/.test(code)) return;
-              const m = __wreMeta(code); if (!m.v) return;
-              if (__wreCmp(m.v, __wreVer) > 0) {
-                let ok = true; try { new Function(code); } catch (e) { ok = !(e instanceof SyntaxError); }
-                if (!ok) { __wreSay(m.v + ' won\'t parse, not keeping it'); GM_setValue('wreLiveSha', sha); return; }
-                const old = GM_getValue('wreLiveCode', null); if (!old || old.v != m.v) __wreSay('got ' + m.v + ', it runs on the next page load');
-                GM_setValue('wreLiveCode', { v: m.v, code, sha, at: Date.now() });
-              } else GM_setValue('wreLiveCode', null); // Tampermonkey's copy has caught up
-              GM_setValue('wreLiveSha', sha); if (tag) GM_setValue('wreLiveEtag', tag);
-            } catch (e) {} } });
+            try { if (q.status == 200) __wreTake(q.responseText || '', sha, tag); } catch (e) {} } });
         } catch (e) {} } });
     } catch (e) {}
   }
