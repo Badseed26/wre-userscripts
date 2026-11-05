@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AroFlo supplier items
 // @namespace    wre
-// @version      0.35
+// @version      0.36
 // @description  Supplier button on AroFlo quotes: search CNW and Tradezone with your own sign ins, pick an item, set the qty and it adds the line (item, part no, qty, cost in Value). Markup left alone, you press Save Quote. Order puts the quote's parts in your CNW or Tradezone cart (never checks out). Reprice, price compare, favourites, recents, stock at nearby branches and price history, synced through Todoist. Build from notes: AI reads the task and your notes into a priced, one-supplier material list for you to check.
 // @match        https://office.aroflo.com/ims/Site/Service/Quotes/*
 // @match        https://shop.cnw.com.au/*
@@ -26,7 +26,7 @@
   // Live updates (23/10): Tampermonkey only checks for a new version every few hours. This checks the repo's latest commit every
   // 2 min (free when nothing's changed) and keeps the newest code here, so a push runs on the next page load. If the new code needs
   // a permission this install hasn't got, or this browser won't run it, the built in copy below runs like before.
-  const __wreName = "aroflo-supplier-items", __wreVer = "0.35", __wreHave = new Set(["// @connect api.anthropic.com", "// @connect api.github.com", "// @connect api.todoist.com", "// @connect raw.githubusercontent.com", "// @connect shop.cnw.com.au", "// @connect www.tradezone.com.au", "// @grant GM_getValue", "// @grant GM_setValue", "// @grant GM_xmlhttpRequest", "// @grant unsafeWindow", "// @match https://office.aroflo.com/ims/Site/Service/Quotes/*", "// @match https://shop.cnw.com.au/*", "// @match https://www.tradezone.com.au/*", "// @run-at document-idle"]);
+  const __wreName = "aroflo-supplier-items", __wreVer = "0.36", __wreHave = new Set(["// @connect api.anthropic.com", "// @connect api.github.com", "// @connect api.todoist.com", "// @connect raw.githubusercontent.com", "// @connect shop.cnw.com.au", "// @connect www.tradezone.com.au", "// @grant GM_getValue", "// @grant GM_setValue", "// @grant GM_xmlhttpRequest", "// @grant unsafeWindow", "// @match https://office.aroflo.com/ims/Site/Service/Quotes/*", "// @match https://shop.cnw.com.au/*", "// @match https://www.tradezone.com.au/*", "// @run-at document-idle"]);
   const __wreInfo0 = typeof GM_info != 'undefined' ? GM_info : null;
   const __wreSay = m => { try { console.log('[WRE live update] ' + __wreName + ': ' + m); } catch (e) {} };
   const __wreCmp = (a, b) => { const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number); for (let i = 0; i < Math.max(x.length, y.length); i++) { const d = (x[i] || 0) - (y[i] || 0); if (d) return d; } return 0; };
@@ -77,7 +77,7 @@
   }
   if (window.top === window.self) { __wreCheck(); setInterval(__wreCheck, 2 * 60e3 + 5000); }
   if (__wreLive()) return;
-  // ---------- the built in copy (src/aroflo-supplier-items.js at 0.35) ----------
+  // ---------- the built in copy (src/aroflo-supplier-items.js at 0.36) ----------
 
 (function () {
   'use strict';
@@ -192,9 +192,22 @@
   // the qty you'd actually have to order: at least the minimum, rounded up to the step
   const fitQty = (q, it) => { q = Math.ceil(Number(q) - 1e-9) || 1; if (it.min && q < it.min) q = it.min; if (it.step && q % it.step) q = Math.ceil(q / it.step) * it.step; return q; };
   const lotText = it => it.step ? 'sold in ' + it.step + 's' : it.min ? 'min ' + it.min : '';
+  // How a product's sold vs how the quote line counts it. f = the supplier's units in one of the line's units, so the
+  // line's Value = price x f and the order = line qty x f. E.g. TPS counted in rolls, CNW selling it by the metre in
+  // 100s: f = 100, so $2.10/m goes in as $210 a roll and 0.5 of a roll orders 50m (100m with the lot size).
+  const perMetre = x => /\b(metre|meter|mtr|per ?m|lm|m)\b/i.test(x.uom || '') && !/\b(roll|coil|drum|reel)\b/i.test(x.uom || '');
+  const lenOf = x => { const m = String(x.name || '').match(/(\d{2,4})\s?(?:m|mtr|metres?|meters?)\b/i); return m ? Number(m[1]) : 0; };
+  function unitFactor(unit, x) {
+    if (!x) return 1; const u = String(unit || '').toLowerCase().trim();
+    const long = /roll|coil|drum|reel|length|lgth|box/.test(u), metres = /^(m|mtr|metres?|meters?|lm|lineal ?m)$/.test(u);
+    if (long && perMetre(x)) return x.step || lenOf(x) || (/length|lgth/.test(u) ? 4 : 100);
+    if (metres && !perMetre(x)) { const L = lenOf(x) || (/\b(roll|coil|drum|reel)\b/i.test(x.uom || '') ? 100 : 0); return L ? 1 / L : 1; }
+    return 1;
+  }
+  const fTxt = f => f > 1 ? 'x ' + Math.round(f) : f < 1 ? '÷ ' + Math.round(1 / f) : '';
   // parts added through the window, so Order knows which supplier and product each Part No is
   const partMap = () => GM_getValue('partMap', {});
-  const remember = it => { const m = partMap(); m[String(it.code).toUpperCase()] = { sup: it.sup, full: it.full || '', id: it.id || '', name: it.name, href: it.href || '', min: it.min || 0, step: it.step || 0, at: Date.now() }; const k = Object.keys(m); if (k.length > 600) k.sort((a, b) => m[a].at - m[b].at).slice(0, k.length - 600).forEach(x => delete m[x]); GM_setValue('partMap', m); };
+  const remember = it => { const m = partMap(); m[String(it.code).toUpperCase()] = { sup: it.sup, f: it.f || 1, unit: it.lineUnit || '', full: it.full || '', id: it.id || '', name: it.name, href: it.href || '', min: it.min || 0, step: it.step || 0, at: Date.now() }; const k = Object.keys(m); if (k.length > 600) k.sort((a, b) => m[a].at - m[b].at).slice(0, k.length - 600).forEach(x => delete m[x]); GM_setValue('partMap', m); };
   // a product photo's address (lazy loaded pages keep it in data-src)
   // prefers the real product photo, never the range or brand badges stuck on the corner
   const imgOf = (el, base, prefer) => { if (!el) return ''; const badge = x => x.closest('[class*=Icons],[class*=icon],[class*=badge],[class*=Badge],[class*=brand],[class*=logo],[class*=label]'); const i = (prefer && el.querySelector(prefer)) || [...el.querySelectorAll('img')].find(x => !badge(x)); if (!i) return ''; const cands = ['data-src', 'data-original', 'data-lazy', 'data-lazy-src', 'data-srcset', 'srcset', 'src'].map(a => (i.getAttribute(a) || '').split(',')[0].trim().split(' ')[0]); const u = cands.find(x => x && !/^data:|placeholder|loading|blank|spacer|\.gif$/i.test(x)) || ''; if (!u) return ''; try { return new URL(u, base).href; } catch (e) { return ''; } };
@@ -595,7 +608,7 @@
     msg.textContent = 'Working out ' + parts.length + ' parts…'; list.innerHTML = '';
     await pool(parts, 3, resolvePart);
     await stockCheck(parts.filter(p => p.sup && !p.signedOut));
-    parts.forEach(p => { p.order = fitQty(p.qty, p); });
+    parts.forEach(p => { const pm = partMap()[p.part]; p.f = (pm && pm.f) || 1; p.order = fitQty(p.qty * p.f, p); });
     orderParts = parts; drawOrder();
   }
   function drawOrder() {
@@ -610,7 +623,7 @@
         const n = parts.indexOf(p);
         const moved = p.price && p.value && Math.abs(p.price - p.value) >= 0.01 ? ` <span class="warn">(quoted ${money(p.value)})</span>` : '';
         h += `<div class="it"><label class="row" style="align-items:flex-start"><input type="checkbox" data-o="${n}" ${p.res == 'in cart' ? '' : 'checked'} style="margin-top:4px"><div class="bd"><div class="nm">${esc(p.name || p.item)}</div>
-<div class="mt">${esc(p.part)}${p.branch != null ? ' · ' + esc(br) + ' ' + p.branch : ''}${p.price ? ' · ' + money(p.price) + ' ex' + moved : ''}${p.qty != p.order ? ' · quote has ' + p.qty + ', rounded up' + (lotText(p) ? ' (' + lotText(p) + ')' : '') : lotText(p) ? ' · ' + lotText(p) : ''}</div>
+<div class="mt">${esc(p.part)}${p.branch != null ? ' · ' + esc(br) + ' ' + p.branch : ''}${p.price ? ' · ' + money(p.price) + ' ex' + moved : ''}${p.f != 1 ? ' · quote has ' + p.qty + ' ' + fTxt(p.f) : p.qty != p.order ? ' · quote has ' + p.qty + ', rounded up' + (lotText(p) ? ' (' + lotText(p) + ')' : '') : lotText(p) ? ' · ' + lotText(p) : ''}</div>
 ${nearLine(p, null)}${p.res ? `<div class="mt ${p.res == 'in cart' ? '' : 'warn'}"><b>${esc(p.res)}</b></div>` : ''}</div></label>
 <div class="ad"><span style="flex:1"></span>Order <input type="number" min="1" step="1" value="${p.order}" data-q="${n}" inputmode="numeric"></div></div>`;
       });
@@ -771,6 +784,7 @@ ${histLine(it)}${it.note ? `<div class="mt warn">${esc(it.note)}</div>` : ''}</d
     msg.textContent = 'Checking the other supplier and stock…';
     await pool(parts.filter(p => p.sup && !p.signedOut), 2, async p => { p.other = await findOther(p); });
     await stockCheck(parts.filter(p => p.sup && !p.signedOut));
+    parts.forEach(p => { const pm = partMap()[p.part] || {}; p.f = pm.f || 1; p.vp = (p.price || 0) * p.f; if (p.other) p.other.vp = (p.other.price || 0) * (pm.unit ? unitFactor(pm.unit, p.other) : p.f); });
     rp = parts; drawReprice();
   }
   function drawReprice() {
@@ -780,13 +794,13 @@ ${histLine(it)}${it.note ? `<div class="mt warn">${esc(it.note)}</div>` : ''}</d
     if (ok.length) {
       h += `<div class="grp"><span>Reprice</span><span class="ct">${ok.length} parts</span></div><div class="gb">`;
       ok.forEach(p => {
-        const n = parts.indexOf(p), moved = Math.abs(p.price - p.value) >= 0.005, pc = p.value ? Math.round((p.price - p.value) / p.value * 100) : 0;
-        const sw = p.other && p.other.price && p.other.price < p.price - 0.005;
+        const n = parts.indexOf(p), moved = Math.abs(p.vp - p.value) >= 0.005, pc = p.value ? Math.round((p.vp - p.value) / p.value * 100) : 0;
+        const sw = p.other && p.other.vp && p.other.vp < p.vp - 0.005;
         h += `<div class="it"><div class="nm"><span>${esc(p.item || p.name)}</span></div>
 <div class="mt">${esc(p.part)} · ${esc(p.sup)}${stockLine(p) ? ' · ' + stockLine(p) : ''}${p.rows.length > 1 ? ' · on ' + p.rows.length + ' lines' : ''}</div>${nearLine(p, null)}
-<div class="mt">Quoted ${p.value ? money(p.value) : 'no price'} · now <b>${money(p.price)}</b>${moved && p.value ? ` <span class="${p.price > p.value ? 'warn' : 'grn'}">${pc > 0 ? '+' : ''}${pc}%</span>` : moved ? '' : ' · no change'}</div>${histLine(p)}
-<label class="tk"><input type="checkbox" data-up="${n}" ${moved ? 'checked' : ''}> Update to ${money(p.price)}</label>
-${sw ? `<label class="tk"><input type="checkbox" data-sw="${n}"> Swap to ${esc(p.other.sup)} ${esc(p.other.code)} at ${money(p.other.price)} <span class="cheap">cheaper</span></label>` : ''}${cmpLine(p, n, 'data-rdrop')}</div>`;
+<div class="mt">Quoted ${p.value ? money(p.value) : 'no price'} · now <b>${money(p.vp)}</b>${p.f != 1 ? ' (' + money(p.price) + ' ' + fTxt(p.f) + ')' : ''}${moved && p.value ? ` <span class="${p.vp > p.value ? 'warn' : 'grn'}">${pc > 0 ? '+' : ''}${pc}%</span>` : moved ? '' : ' · no change'}</div>${histLine(p)}
+<label class="tk"><input type="checkbox" data-up="${n}" ${moved ? 'checked' : ''}> Update to ${money(maxRule() && p.other && p.other.vp > p.vp && p.other.vp <= 2 * p.vp ? p.other.vp : p.vp)}</label>
+${sw ? `<label class="tk"><input type="checkbox" data-sw="${n}"> Swap to ${esc(p.other.sup)} ${esc(p.other.code)} at ${money(p.other.vp)} <span class="cheap">cheaper</span></label>` : ''}${cmpLine(p, n, 'data-rdrop')}</div>`;
       });
       h += `<div class="ad"><button class="btn rpgo" style="flex:1">Update ticked</button></div></div>`;
     }
@@ -801,9 +815,9 @@ ${sw ? `<label class="tk"><input type="checkbox" data-sw="${n}"> Swap to ${esc(p
       parts.forEach((p, n) => {
         const up = list.querySelector('input[data-up="' + n + '"]'), sw = list.querySelector('input[data-sw="' + n + '"]');
         const doSw = sw && sw.checked, doUp = up && up.checked; if (!doSw && !doUp) return;
-        const price = doSw ? p.other.price : (maxRule() && p.other && p.other.price > p.price ? p.other.price : p.price);
+        const price = doSw ? p.other.vp : (maxRule() && p.other && p.other.vp > p.vp && p.other.vp <= 2 * p.vp ? p.other.vp : p.vp);
         p.rows.forEach(r => { if (!document.contains(r.row)) return; const val = colInput(r.row, 'value'); if (val) { setv(val, price.toFixed(2)); lines++; } if (doSw) { const pt = colInput(r.row, 'partNo'); if (pt) setv(pt, p.other.code); } });
-        if (doSw) { remember(p.other); recordPrice(p.other, p.other.price); } else recordPrice(p, p.price);
+        if (doSw) { const pm = partMap()[p.part] || {}; remember(Object.assign({}, p.other, { lineUnit: pm.unit || '', f: pm.unit ? unitFactor(pm.unit, p.other) : p.f })); recordPrice(p.other, p.other.price); } else recordPrice(p, p.price);
         parts_++;
       });
       msg.textContent = parts_ ? 'Updated ' + parts_ + ' parts on ' + lines + ' lines. Check them, then press Save Quote.' : 'Nothing ticked.';
@@ -921,7 +935,7 @@ ${sw ? `<label class="tk"><input type="checkbox" data-sw="${n}"> Swap to ${esc(p
   const READ_SYS = `You work out the materials for an Australian electrician's quote from the job notes (Wired Rite Electrical, Queensland).
 Read every source. Ethan's own notes win when sources clash. The lads' notes are what they found on site.
 List the main gear only, grouped into folders the way Ethan lays out a quote: one folder per customer facing group of work, e.g. "Shed Works - All", "Other Electrical Works", "Solar Replacement Materials". Don't add Labour or Misc. mat lines (the script adds those).
-Quantities in the units Ethan counts in (his rules below). Round up sensibly.
+Quantities in the units Ethan counts in (his rules below). Round up sensibly. "unit" is one of: each, m, roll, length, coil (a roll of TPS is 100m unless the notes say otherwise, a length of conduit is 4m).
 For each item give 1 to 3 short search terms a sparky would type into an electrical wholesaler's search box (CNW, Tradezone), most specific first. If the notes or rules give an exact product code, put it in "code".
 Mark "inferred": true for anything the notes don't name but the job plainly needs (cable for a new GPO, a breaker for a new circuit, conduit for an outdoor run), with the reason in "why". For named items, "why" quotes the note briefly.
 Never list things already on the quote (given below) unless the notes need more of them.
@@ -976,7 +990,8 @@ Answer with JSON only: {"picks":[{"i":0,"C":2,"T":null}]}`;
     const tz = items.map(it => it.pick.Tradezone).filter(x => x && !x.bname);
     await pool(tz, 4, x => tzDetail(x).catch(() => {}));
     await stockCheck(items.flatMap(it => [it.pick.CNW, it.pick.Tradezone].filter(Boolean)));
-    const score = sp => { let stock = 0, total = 0, have = 0; items.forEach(it => { const x = it.pick[sp]; if (!x) return; have++; if (x.branch > 0) stock++; total += (x.price || 0) * (Number(it.qty) || 1); }); return { stock, total, have }; };
+    const adjOf = (it, y) => y && y.price ? y.price * unitFactor(it.unit, y) : 0;   // price per the line's unit
+    const score = sp => { let stock = 0, total = 0, have = 0; items.forEach(it => { const x = it.pick[sp]; if (!x) return; have++; if (x.branch > 0) stock++; total += adjOf(it, x) * (Number(it.qty) || 1); }); return { stock, total, have }; };
     const sc = {}; sups.forEach(sp => sc[sp] = score(sp));
     // most in stock at your branch, then most found, then the cheaper total
     const better = (a, b) => a.stock != b.stock ? a.stock > b.stock : a.have != b.have ? a.have > b.have : a.total <= b.total;
@@ -990,10 +1005,11 @@ Answer with JSON only: {"picks":[{"i":0,"C":2,"T":null}]}`;
       else if (a && !(a.branch > 0) && b && b.branch > 0) { x = b; mixed = true; }
       it.use = x || null; it.mixed = mixed && !!x;
       // the dearer price only counts when the two look like the same thing (within double of each other)
-      let prices = [a, b].filter(y => y && y.price).map(y => y.price);
-      if (prices.length == 2 && Math.max(...prices) > 2 * Math.min(...prices)) prices = x && x.price ? [x.price] : [];
-      it.value = x ? (maxRule() && prices.length ? Math.max(...prices) : x.price || 0) : 0;
-      it.pricedAt = x && maxRule() && prices.length > 1 && it.value > (x.price || 0) + 0.005 ? (x === a ? other : job) : '';
+      it.f = unitFactor(it.unit, x); it.unitPrice = adjOf(it, x);
+      let prices = [a, b].filter(y => y && y.price).map(y => adjOf(it, y));
+      if (prices.length == 2 && Math.max(...prices) > 2 * Math.min(...prices)) prices = x && x.price ? [it.unitPrice] : [];
+      it.value = x ? (maxRule() && prices.length ? Math.max(...prices) : it.unitPrice) : 0;
+      it.pricedAt = x && maxRule() && prices.length > 1 && it.value > it.unitPrice + 0.005 ? (x === a ? other : job) : '';
       it.already = !!(x && existing.includes(normCode(x.code)));
       if (it.already) it.tick = false;
     });
@@ -1086,7 +1102,7 @@ Answer with JSON only: {"picks":[{"i":0,"C":2,"T":null}]}`;
           h += `<div class="it"><label class="tk" style="margin:0"><input type="checkbox" data-bt="${n}" ${it.tick ? 'checked' : ''}><b>${esc(x ? x.name : it.need)}</b></label>
 <div class="mt">${esc(it.need)}${it.why ? ' · ' + esc(it.why) : ''} ${tags}</div>
 ${x ? `<div class="mt">${esc(x.sup)} ${esc(x.code)}${x.uom ? ' · ' + esc(x.uom) : ''} · ${stockLine(x) || 'stock unknown'}${lotText(x) ? ' · <b class="warn">' + esc(lotText(x)) + '</b>' : ''}</div>${nearLine(x, null)}` : '<div class="mt warn">No product found. Pick one below or leave it unpriced.</div>'}
-${x ? `<div class="mt">Ordering ${esc(x.sup)} ${money(x.price)}${it.pricedAt ? `, <b>priced at ${esc(it.pricedAt)} ${money(it.value)}</b>` : ''}</div>` : ''}
+${x ? `<div class="mt">Ordering ${esc(x.sup)} ${money(x.price)}${x.uom ? '/' + esc(x.uom.toLowerCase()) : ''}${it.f != 1 ? ` (${fTxt(it.f)} = ${money(it.unitPrice)}/${esc(it.unit || 'line unit')})` : ''}, order ${fitQty((Number(it.qty) || 0) * it.f, x)}${x.uom ? ' ' + esc(x.uom.toLowerCase()) : ''}${it.pricedAt ? `<br><b>Value ${money(it.value)}, priced at ${esc(it.pricedAt)}</b>` : `<br>Value ${money(it.value)}`}</div>` : ''}
 <div class="ad"><select data-bs="${n}" style="flex:1;min-width:0;font-size:14px;padding:6px"><option value="">${x ? 'Swap product…' : 'Pick a product…'}</option>${opts.map((o, k) => `<option value="${k}">${esc(o.sp)} · ${esc(o.y.code)} · ${esc(o.y.name).slice(0, 40)} · ${o.y.price ? money(o.y.price) : 'no price'}</option>`).join('')}<option value="none">Leave unpriced</option></select>Qty <input type="number" min="0" step="any" value="${esc(it.qty)}" data-bq="${n}" inputmode="decimal"></div></div>`;
         });
         h += '</div>';
@@ -1126,7 +1142,7 @@ ${x ? `<div class="mt">Ordering ${esc(x.sup)} ${money(x.price)}${it.pricedAt ? `
     const pick = bld.items.filter(it => it.tick);
     if (!pick.length) { msg.textContent = 'Nothing ticked.'; return; }
     btn.disabled = true; btn.textContent = 'Adding…';
-    try { const r = await applyLines(pick.map(it => ({ folder: it.folder, name: it.use ? it.use.name : it.need, code: it.use ? it.use.code : '', qty: it.qty, value: it.value, it: it.use }))); msg.textContent = `Added ${r.lines} lines into ${r.folders} folder${r.folders == 1 ? '' : 's'}${r.made ? ' (' + r.made + ' new)' : ''}. Check it, then press Save Quote.`; btn.textContent = 'Added'; }
+    try { const r = await applyLines(pick.map(it => ({ folder: it.folder, name: it.use ? it.use.name : it.need, code: it.use ? it.use.code : '', qty: it.qty, value: it.value, it: it.use, unit: it.unit, f: it.f }))); msg.textContent = `Added ${r.lines} lines into ${r.folders} folder${r.folders == 1 ? '' : 's'}${r.made ? ' (' + r.made + ' new)' : ''}. Check it, then press Save Quote.`; btn.textContent = 'Added'; }
     catch (e) { msg.textContent = 'Didn\'t finish adding: ' + (e.message || e) + '. Check what went on before trying again.'; btn.textContent = 'Add ticked to quote'; btn.disabled = false; }
   }
   const addBtns = () => [...document.querySelectorAll('button')].filter(b => /^\s*Add Line Item\s*$/i.test(b.textContent) && b.offsetParent);
@@ -1156,7 +1172,7 @@ ${x ? `<div class="mt">Ordering ${esc(x.sup)} ${money(x.price)}${it.pricedAt ? `
       for (const l of byF[fn]) {
         target = folderBtn(fn) || b;
         await addLine({ name: l.name, code: l.code, price: l.value }, l.qty || 1);
-        if (l.it) { remember(l.it); recordPrice(l.it, l.it.price); }
+        if (l.it) { remember(Object.assign({}, l.it, { lineUnit: l.unit || '', f: l.f || 1 })); recordPrice(l.it, l.it.price); }
         n++;
       }
       const have = [];   // a new folder always gets its own Labour and Misc. mat
@@ -1577,7 +1593,7 @@ ${x ? `<div class="mt">Ordering ${esc(x.sup)} ${money(x.price)}${it.pricedAt ? `
     },
     apply: async skip => {
       if (!bridgePlan) throw new Error('run candidates first');
-      const lines = bridgePlan.items.filter((it, i) => !it.already && !(skip || []).includes(i)).map(it => ({ folder: it.folder, name: it.use ? it.use.name : it.need, code: it.use ? it.use.code : '', qty: it.qty, value: it.value, it: it.use }));
+      const lines = bridgePlan.items.filter((it, i) => !it.already && !(skip || []).includes(i)).map(it => ({ folder: it.folder, name: it.use ? it.use.name : it.need, code: it.use ? it.use.code : '', qty: it.qty, value: it.value, it: it.use, unit: it.unit, f: it.f }));
       return await applyLines(lines);
     },
     other: async (code, sup) => { const o = await findOther({ sup, code, part: code }); return o ? { sup: o.sup, code: o.code, name: o.name, price: o.price, branch: o.branch } : null; },
