@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AroFlo supplier items
 // @namespace    wre
-// @version      0.9
+// @version      0.10
 // @description  Supplier button on AroFlo quotes: search CNW and Tradezone with your own sign ins, pick an item, set the qty and it adds the line (item, part no, qty, cost in Value). Markup left alone, you press Save Quote. Order puts the quote's parts in your CNW or Tradezone cart (never checks out).
 // @match        https://office.aroflo.com/ims/Site/Service/Quotes/*
 // @grant        GM_xmlhttpRequest
@@ -65,9 +65,26 @@
     });
   }
   const form = o => Object.keys(o).map(k => encodeURIComponent(k) + '=' + encodeURIComponent(o[k])).join('&');
+  // minimum order and sold-in-lots-of. Tradezone puts the step on the cart box (data-step) and spells some out in words.
+  // CNW doesn't seem to use them, but the qty box and the words get checked the same way in case.
+  function minStep(el) {
+    if (!el) return {};
+    const num = v => { const n = Number(v); return n > 1 ? n : 0; };
+    let step = 0, min = 0;
+    el.querySelectorAll('[data-step],[data-qty-increment],[data-increment]').forEach(x => { step = step || num(x.getAttribute('data-step') || x.getAttribute('data-qty-increment') || x.getAttribute('data-increment')); });
+    el.querySelectorAll('[data-min],[data-min-qty],[data-minqty],[data-min-sale-qty]').forEach(x => { min = min || num(x.getAttribute('data-min') || x.getAttribute('data-min-qty') || x.getAttribute('data-minqty') || x.getAttribute('data-min-sale-qty')); });
+    el.querySelectorAll('input[type=number],input.qty,input[name=qty]').forEach(x => { min = min || num(x.getAttribute('min')); step = step || num(x.getAttribute('step')); });
+    const t = clean((el.querySelector('.purchase-increments,.increments_wrapper,.qtyBox,.min-qty,.minimum') || {}).textContent) + ' ' + clean(el.textContent).slice(0, 3000);
+    const mm = t.match(/min(?:imum)?\.?\s*(?:order|purchase)?\s*(?:qty|quantity)?\s*(?:of|is|:)?\s*(\d+)/i); if (mm) min = min || num(mm[1]);
+    const ss = t.match(/(?:sold|order(?:ed)?|purchase[ds]?|buy)\s+in\s+(?:multiples|lots|increments|packs)?\s*(?:of\s+)?(\d+)s?\b/i) || t.match(/(?:multiples|increments)\s+of\s+(\d+)/i); if (ss) step = step || num(ss[1]);
+    return { min: min || step || 0, step: step || 0 };
+  }
+  // the qty you'd actually have to order: at least the minimum, rounded up to the step
+  const fitQty = (q, it) => { q = Math.ceil(Number(q) - 1e-9) || 1; if (it.min && q < it.min) q = it.min; if (it.step && q % it.step) q = Math.ceil(q / it.step) * it.step; return q; };
+  const lotText = it => it.step ? 'sold in ' + it.step + 's' : it.min ? 'min ' + it.min : '';
   // parts added through the window, so Order knows which supplier and product each Part No is
   const partMap = () => GM_getValue('partMap', {});
-  const remember = it => { const m = partMap(); m[String(it.code).toUpperCase()] = { sup: it.sup, full: it.full || '', id: it.id || '', name: it.name, href: it.href || '', at: Date.now() }; const k = Object.keys(m); if (k.length > 600) k.sort((a, b) => m[a].at - m[b].at).slice(0, k.length - 600).forEach(x => delete m[x]); GM_setValue('partMap', m); };
+  const remember = it => { const m = partMap(); m[String(it.code).toUpperCase()] = { sup: it.sup, full: it.full || '', id: it.id || '', name: it.name, href: it.href || '', min: it.min || 0, step: it.step || 0, at: Date.now() }; const k = Object.keys(m); if (k.length > 600) k.sort((a, b) => m[a].at - m[b].at).slice(0, k.length - 600).forEach(x => delete m[x]); GM_setValue('partMap', m); };
   // a product photo's address (lazy loaded pages keep it in data-src)
   // prefers the real product photo, never the range or brand badges stuck on the corner
   const imgOf = (el, base, prefer) => { if (!el) return ''; const badge = x => x.closest('[class*=Icons],[class*=icon],[class*=badge],[class*=Badge],[class*=brand],[class*=logo],[class*=label]'); const i = (prefer && el.querySelector(prefer)) || [...el.querySelectorAll('img')].find(x => !badge(x)); if (!i) return ''; const cands = ['data-src', 'data-original', 'data-lazy', 'data-lazy-src', 'data-srcset', 'srcset', 'src'].map(a => (i.getAttribute(a) || '').split(',')[0].trim().split(' ')[0]); const u = cands.find(x => x && !/^data:|placeholder|loading|blank|spacer|\.gif$/i.test(x)) || ''; if (!u) return ''; try { return new URL(u, base).href; } catch (e) { return ''; } };
@@ -116,7 +133,7 @@
       const code = clean((c.querySelector('a.product-code') || {}).textContent).replace(/^Code:\s*/i, '') || full || c.getAttribute('productId') || '';
       const key = id || full || code; if (!key || seen.has(key)) return; seen.add(key);
       if (!debug.cnwCard) debug.cnwCard = (c.outerHTML || '').replace(/\s+/g, ' ').slice(0, 3500);
-      items.push({ sup: 'CNW', id, code, full, name: clean(a && (a.getAttribute('data-short-name') || a.getAttribute('title') || a.textContent)), uom: clean((c.querySelector('.priceUOM span') || {}).textContent), href: a ? CNW + a.getAttribute('href') : '', img: imgOf(c, CNW, 'img.product-thumb') });
+      items.push({ sup: 'CNW', id, code, full, name: clean(a && (a.getAttribute('data-short-name') || a.getAttribute('title') || a.textContent)), uom: clean((c.querySelector('.priceUOM span') || {}).textContent), href: a ? CNW + a.getAttribute('href') : '', img: imgOf(c, CNW, 'img.product-thumb'), ...minStep(c) });
     });
     return items;
   }
@@ -193,7 +210,7 @@
       const txt = clean(c.textContent);
       const m = txt.match(/\$\s*([\d,]+\.\d{2})\s*ex/i);
       const st = c.querySelector('.stock_wrapper');
-      items.push({ sup: 'Tradezone', id, code: clean((c.querySelector('h6.part') || {}).textContent), sku: (c.querySelector('h5.sku input') || {}).value || '', name: clean(a && (a.getAttribute('title') || a.textContent)), href: a ? new URL(a.getAttribute('href'), TZ).href : '', price: m ? Number(m[1].replace(/,/g, '')) : null, stock: st ? clean(st.textContent) || (/in_stock/.test(st.className) ? 'In stock' : '') : '', img: imgOf(c, TZ, 'a.product-image img') });
+      items.push({ sup: 'Tradezone', id, code: clean((c.querySelector('h6.part') || {}).textContent), sku: (c.querySelector('h5.sku input') || {}).value || '', name: clean(a && (a.getAttribute('title') || a.textContent)), href: a ? new URL(a.getAttribute('href'), TZ).href : '', price: m ? Number(m[1].replace(/,/g, '')) : null, stock: st ? clean(st.textContent) || (/in_stock/.test(st.className) ? 'In stock' : '') : '', img: imgOf(c, TZ, 'a.product-image img'), ...minStep(c) });
     });
     if (!items.length) debug.Tradezone.sample = t.replace(/<script[\s\S]*?<\/script>/gi, '').replace(/<style[\s\S]*?<\/style>/gi, '').replace(/\s+/g, ' ').slice(0, 8000);
     if (items.length && items.every(i => !i.price)) { if (!signedIn(t)) throw out_('Tradezone'); items.forEach(i => { i.note = 'no price from Tradezone for this one'; }); }
@@ -214,6 +231,7 @@
       }).filter(b => b.name);
       names.push(...it.branches.map(b => b.name));
       if (!it.img) { const og = d.querySelector('meta[property="og:image"]'); it.img = og ? og.getAttribute('content') : imgOf(d.querySelector('.product_media') || d.body, TZ); }
+      if (!it.min && !it.step) Object.assign(it, minStep(d.querySelector('.product_wrapper, .product_view') || d.body));
       if (!it.price) { const m = clean((d.querySelector('.price_and_points') || {}).textContent).match(/\$\s*([\d,]+\.\d{2})\s*ex/i); if (m) { it.price = Number(m[1].replace(/,/g, '')); delete it.note; } }
     });
     if (names.length) tzSeen(names);
@@ -281,11 +299,11 @@
   async function resolvePart(p) {
     const m = partMap()[p.part];
     const exact = (list, sup) => list.find(x => String(x.code).toUpperCase() == p.part || String(x.full || '').toUpperCase() == p.part);
-    const tryCnw = async () => { const l = await searchCnw(p.part); const x = exact(l, 'CNW'); return x ? Object.assign(p, { sup: 'CNW', full: x.full, id: x.id, name: x.name, price: x.price, branch: x.branch, href: x.href }) : null; };
-    const tryTz = async () => { const l = await searchTz(p.part); const x = exact(l, 'Tradezone'); return x ? Object.assign(p, { sup: 'Tradezone', id: x.id, name: x.name, price: x.price, branch: x.branch, href: x.href }) : null; };
+    const tryCnw = async () => { const l = await searchCnw(p.part); const x = exact(l, 'CNW'); return x ? Object.assign(p, { sup: 'CNW', min: x.min, step: x.step, full: x.full, id: x.id, name: x.name, price: x.price, branch: x.branch, href: x.href }) : null; };
+    const tryTz = async () => { const l = await searchTz(p.part); const x = exact(l, 'Tradezone'); return x ? Object.assign(p, { sup: 'Tradezone', min: x.min, step: x.step, id: x.id, name: x.name, price: x.price, branch: x.branch, href: x.href }) : null; };
     try {
-      if (m && m.sup == 'Tradezone') return (await tryTz()) || Object.assign(p, { sup: 'Tradezone', id: m.id, name: m.name, href: m.href });
-      if (m && m.sup == 'CNW') return (await tryCnw()) || Object.assign(p, { sup: 'CNW', full: m.full, id: m.id, name: m.name, href: m.href });
+      if (m && m.sup == 'Tradezone') return (await tryTz()) || Object.assign(p, { sup: 'Tradezone', id: m.id, name: m.name, href: m.href, min: m.min, step: m.step });
+      if (m && m.sup == 'CNW') return (await tryCnw()) || Object.assign(p, { sup: 'CNW', full: m.full, id: m.id, name: m.name, href: m.href, min: m.min, step: m.step });
       return (await tryCnw()) || (await tryTz()) || Object.assign(p, { sup: '' });
     } catch (e) { return Object.assign(p, { sup: e.signedOut || '', err: e.signedOut ? 'signed out' : String(e.message || e), signedOut: e.signedOut }); }
   }
@@ -327,6 +345,7 @@
     if (!parts.length) { msg.textContent = ''; list.innerHTML = '<div class="mt">No lines with a Part No on this quote. Lines added through the Supplier window carry one, the rest you\'d order by hand.</div>'; return; }
     msg.textContent = 'Working out ' + parts.length + ' parts…'; list.innerHTML = '';
     await pool(parts, 3, resolvePart);
+    parts.forEach(p => { p.order = fitQty(p.qty, p); });
     orderParts = parts; drawOrder();
   }
   function drawOrder() {
@@ -341,7 +360,7 @@
         const n = parts.indexOf(p);
         const moved = p.price && p.value && Math.abs(p.price - p.value) >= 0.01 ? ` <span class="warn">(quoted ${money(p.value)})</span>` : '';
         h += `<div class="it"><label class="row" style="align-items:flex-start"><input type="checkbox" data-o="${n}" ${p.res == 'in cart' ? '' : 'checked'} style="margin-top:4px"><div class="bd"><div class="nm">${esc(p.name || p.item)}</div>
-<div class="mt">${esc(p.part)}${p.branch != null ? ' · ' + esc(br) + ' ' + p.branch : ''}${p.price ? ' · ' + money(p.price) + ' ex' + moved : ''}${p.qty != p.order ? ' · quote has ' + p.qty + ', rounded up' : ''}</div>
+<div class="mt">${esc(p.part)}${p.branch != null ? ' · ' + esc(br) + ' ' + p.branch : ''}${p.price ? ' · ' + money(p.price) + ' ex' + moved : ''}${p.qty != p.order ? ' · quote has ' + p.qty + ', rounded up' + (lotText(p) ? ' (' + lotText(p) + ')' : '') : lotText(p) ? ' · ' + lotText(p) : ''}</div>
 ${p.res ? `<div class="mt ${p.res == 'in cart' ? '' : 'warn'}"><b>${esc(p.res)}</b></div>` : ''}</div></label>
 <div class="ad"><span style="flex:1"></span>Order <input type="number" min="1" step="1" value="${p.order}" data-q="${n}" inputmode="numeric"></div></div>`;
       });
@@ -351,7 +370,7 @@ ${p.res ? `<div class="mt ${p.res == 'in cart' ? '' : 'warn'}"><b>${esc(p.res)}<
     if (none.length) { h += `<div class="grp"><span>Not matched</span><span class="ct">${none.length}</span></div><div class="gb">` + none.map(p => `<div class="it"><div class="nm">${esc(p.item)}</div><div class="mt">${esc(p.part)} · qty ${p.order}${p.err ? ' · ' + esc(p.err) : ' · not found as an exact code on CNW or Tradezone'}</div></div>`).join('') + '</div>'; }
     list.innerHTML = h;
     msg.textContent = 'Tick what you want, check the qty, then add to the cart. It never checks out, you order on their site.';
-    list.querySelectorAll('input[data-q]').forEach(i => { i.onchange = () => { const v = Math.max(1, Math.ceil(Number(i.value) || 1)); i.value = v; parts[+i.dataset.q].order = v; }; });
+    list.querySelectorAll('input[data-q]').forEach(i => { i.onchange = () => { const pp = parts[+i.dataset.q]; const v = fitQty(Math.max(1, Number(i.value) || 1), pp); if (v != Number(i.value)) msg.textContent = pp.sup + ' ' + lotText(pp) + ', so that one goes to ' + v + '.'; i.value = v; pp.order = v; }; });
     list.querySelectorAll('button[data-login]').forEach(b => { b.onclick = () => W.open(LOGIN[b.dataset.login], '_blank'); });
     list.querySelectorAll('button[data-open]').forEach(b => { b.onclick = () => W.open(b.dataset.open == 'CNW' ? CNW + '/cart' : TZ + '/checkout/cart/', '_blank'); });
     list.querySelectorAll('button[data-cart]').forEach(b => { b.onclick = async () => {
@@ -480,7 +499,7 @@ ${p.res ? `<div class="mt ${p.res == 'in cart' ? '' : 'warn'}"><b>${esc(p.res)}<
         const n = results.push(it) - 1;
         const stock = it.sup == 'CNW' ? (it.branch != null ? `${cnwBranch()} ${it.branch}, national ${it.national}` : '') : (it.bname ? `${it.bname} ${it.branch || 'none'}` : it.stock);
         h += `<div class="it"><div class="row">${it.img ? `<img class="th" src="${esc(it.img)}" loading="lazy" referrerpolicy="no-referrer" onerror="this.style.visibility='hidden'">` : '<div class="th none">no pic</div>'}<div class="bd"><div class="nm">${esc(it.name)}</div>
-<div class="mt">${esc(it.code)}${it.uom ? ' · ' + esc(it.uom) : ''}${stock ? ' · ' + esc(stock) : ''}${it.href ? ` · <a href="${esc(it.href)}" target="_blank">view</a>` : ''}</div>
+<div class="mt">${esc(it.code)}${it.uom ? ' · ' + esc(it.uom) : ''}${lotText(it) ? ' · <b class="warn">' + esc(lotText(it)) + '</b>' : ''}${stock ? ' · ' + esc(stock) : ''}${it.href ? ` · <a href="${esc(it.href)}" target="_blank">view</a>` : ''}</div>
 <div class="ad"><span class="pr">${it.price ? money(it.price) + ' ex' : '<span class="warn">no price</span>'}</span><span style="flex:1"></span>Qty <input type="number" min="0" step="any" value="1" inputmode="decimal"><button class="btn" data-n="${n}">Add</button></div>
 ${it.note ? `<div class="mt warn">${esc(it.note)}</div>` : ''}</div></div></div>`;
       });
@@ -497,12 +516,13 @@ ${it.note ? `<div class="mt warn">${esc(it.note)}</div>` : ''}</div></div></div>
   }
   async function add(b) {
     const it = results[+b.dataset.n]; const qty = Number(b.parentElement.querySelector('input').value) || 1;
+    const lot = fitQty(qty, it) != Math.ceil(qty - 1e-9) ? ` Heads up, ${it.sup} ${lotText(it)}, so you'd have to order ${fitQty(qty, it)}.` : '';
     b.disabled = true; b.textContent = '…';
     try {
       const r = await addLine(it, qty);
       remember(it);
       b.textContent = r.ok ? 'Added' : 'Check it';
-      msg.textContent = r.ok ? `Added ${qty} x ${it.code}${r.miss.length ? ' (couldn\'t find ' + r.miss.join(', ') + ', fill that by hand)' : ''}. Save Quote when you're done.` : 'Added, but the line didn\'t read back right. Check it before saving.';
+      msg.textContent = r.ok ? `Added ${qty} x ${it.code}${r.miss.length ? ' (couldn\'t find ' + r.miss.join(', ') + ', fill that by hand)' : ''}. Save Quote when you're done.${lot}` : 'Added, but the line didn\'t read back right. Check it before saving.';
     } catch (e) { b.textContent = 'Add'; msg.textContent = 'Didn\'t add: ' + (e.message || e); }
     setTimeout(() => { b.disabled = false; if (b.textContent != 'Add') b.textContent = 'Add again'; }, 1500);
   }
@@ -541,7 +561,7 @@ ${it.note ? `<div class="mt warn">${esc(it.note)}</div>` : ''}</div></div></div>
       const use = sups && sups.length ? sups : ['CNW', 'Tradezone'];
       const out = [];
       for (const sp of use) {
-        try { (await (sp == 'CNW' ? searchCnw : searchTz)(term)).forEach(it => out.push({ sup: it.sup, code: it.code, name: it.name, uom: it.uom || '', price: it.price || 0, branch: it.branch, bname: it.sup == 'CNW' ? cnwBranch() : (it.bname || ''), national: it.national, stock: it.stock || '', note: it.note || '' })); }
+        try { (await (sp == 'CNW' ? searchCnw : searchTz)(term)).forEach(it => out.push({ sup: it.sup, code: it.code, name: it.name, uom: it.uom || '', price: it.price || 0, branch: it.branch, bname: it.sup == 'CNW' ? cnwBranch() : (it.bname || ''), national: it.national, stock: it.stock || '', min: it.min || 0, step: it.step || 0, note: it.note || '' })); }
         catch (e) { out.push(e.signedOut ? { sup: sp, signedOut: true } : { sup: sp, error: String(e.message || e) }); }
       }
       return out;
