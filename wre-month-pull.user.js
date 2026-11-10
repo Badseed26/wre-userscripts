@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE month pull
 // @namespace    wre
-// @version      0.7
+// @version      0.8
 // @description  One tap on the AroFlo home page pulls a month's job numbers for Claude's monthly report: invoices dated that month, each job's labour hours and materials at cost, and that month's Tradezone and CNW account history. Read only. Copy the bundle and paste it to Claude.
 // @match        https://office.aroflo.com/ims/Site/Home/*
 // @grant        GM_xmlhttpRequest
@@ -22,7 +22,7 @@
   // Live updates (23/10): Tampermonkey only checks for a new version every few hours. This checks the repo's latest commit every
   // 2 min (free when nothing's changed) and keeps the newest code here, so a push runs on the next page load. If the new code needs
   // a permission this install hasn't got, or this browser won't run it, the built in copy below runs like before.
-  const __wreName = "wre-month-pull", __wreVer = "0.7", __wreHave = new Set(["// @connect api.github.com", "// @connect raw.githubusercontent.com", "// @connect shop.cnw.com.au", "// @connect www.tradezone.com.au", "// @grant GM_getValue", "// @grant GM_setClipboard", "// @grant GM_setValue", "// @grant GM_xmlhttpRequest", "// @match https://office.aroflo.com/ims/Site/Home/*", "// @run-at document-idle"]);
+  const __wreName = "wre-month-pull", __wreVer = "0.8", __wreHave = new Set(["// @connect api.github.com", "// @connect raw.githubusercontent.com", "// @connect shop.cnw.com.au", "// @connect www.tradezone.com.au", "// @grant GM_getValue", "// @grant GM_setClipboard", "// @grant GM_setValue", "// @grant GM_xmlhttpRequest", "// @match https://office.aroflo.com/ims/Site/Home/*", "// @run-at document-idle"]);
   const __wreInfo0 = typeof GM_info != 'undefined' ? GM_info : null;
   const __wreSay = m => { try { console.log('[WRE live update] ' + __wreName + ': ' + m); } catch (e) {} };
   const __wreCmp = (a, b) => { const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number); for (let i = 0; i < Math.max(x.length, y.length); i++) { const d = (x[i] || 0) - (y[i] || 0); if (d) return d; } return 0; };
@@ -73,7 +73,7 @@
   }
   if (window.top === window.self) { __wreCheck(); setInterval(__wreCheck, 2 * 60e3 + 5000); }
   if (__wreLive()) return;
-  // ---------- the built in copy (src/wre-month-pull.js at 0.7) ----------
+  // ---------- the built in copy (src/wre-month-pull.js at 0.8) ----------
 
 (function () {
   'use strict';
@@ -101,7 +101,7 @@
     .replace(/(\+?61\s?|0)[2-478](\s?\d){8}\b/g, '[phone]')
     .replace(/\b[A-Za-z0-9_\-]{36,}\b/g, '[long]');
   const money = n => (Math.round((+n || 0) * 100) / 100).toFixed(2);
-  const debug = { v: '0.7', af: [], tz: [], cnw: [] };
+  const debug = { v: '0.8', af: [], tz: [], cnw: [] };
   const note = (k, m) => { debug[k].push(clean(m).slice(0, 300)); };
 
   function gm(method, url, data, json, blob) {
@@ -205,7 +205,7 @@
         if (!month.has(d)) return;
         any = true;
         const t = i.task || {};
-        out.invoices.push({ n: i.invoiceNumber, d, st: i.status || '', ty: i.type === 'PART_INVOICE' ? 'part' : 'full', ex: +(i.totalAmountEx || 0), tid: t.id || i.taskId || '', jn: t.jobNumber || '', tn: clean(t.name || ''), cl: clean((i.client && i.client.name) || i.clientName || ''), desc: clean(String(i.description || '').replace(/<[^>]+>/g, ' ')).slice(0, 90) });
+        out.invoices.push({ n: i.invoiceNumber, d, st: i.status || '', ty: i.type === 'PART_INVOICE' ? 'part' : 'full', ex: +(i.totalAmountEx || 0), tid: t.id || i.taskId || '', jn: t.jobNumber || '', tn: clean(t.name || ''), cl: clean((i.client && i.client.name) || i.clientName || ''), desc: clean(String(i.description || '').replace(/<[^>]+>/g, ' ').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&')).slice(0, 300), inc: +(i.totalAmountInc || 0), due: +(i.balanceDue || 0), paid: +(i.totalBalancePaid || i.balancePaid || 0), dd: String(i.dueDate || '').slice(0, 10) });
       });
       if (!any && newest && newest < start) { if (++older >= 2) break; } else older = 0;
       if (!items.length) break;
@@ -229,13 +229,13 @@
       job.ty = clean((j.taskType && (j.taskType.name || j.taskType)) || '');
       const iv = await af('/cf-api/internal/invoices?' + new URLSearchParams({ businessUnitId: buId, taskId: job.tid, zoneName: 'TASK', allStatus: '1', userBuAccessType: 'thisbu' }));
       // 0.6: the context behind the numbers: what the job was, every labour and material line, and the notes
-      job.desc = redact(txt(doc(String(j.description || '')).body)).slice(0, 1500);
+      job.desc = redact(txt(doc(String(j.description || '')).body)).slice(0, 20000);
       job.loc = clean(j.locationText || '').slice(0, 80);
       const cm = String((j._links && (j._links.office || j._links.field)) || '').match(/wrCoded=([^&"']+)/i);
       if (cm) {
         const E = encodeURIComponent(decodeURIComponent(cm[1]));
-        try { job.sheet = tables(doc(await afText('/ims/Site/Resource/Jobsheet/AJAX/view_jobsheet.cfm?wrCoded=' + E))).flatMap(t => t.rows.map(r => redact(r.c.filter(Boolean).join(' | ')))).filter(x => x && x.length < 320).slice(0, 90); } catch (e) { job.sheetErr = e.message; }
-        try { job.notes = redact(txt(doc(await afText('/ims/Site/Service/Notes/AJAX_HTML_get_notes.cfm?dateorder=0&last3notes=0&isLoaded=1&wrCoded=' + E)).body)).slice(0, 2200); } catch (e) { job.notesErr = e.message; }
+        try { job.sheet = tables(doc(await afText('/ims/Site/Resource/Jobsheet/AJAX/view_jobsheet.cfm?wrCoded=' + E))).flatMap(t => t.rows.map(r => redact(r.c.filter(Boolean).join(' | ')))).filter(x => x && x.length < 700).slice(0, 2000); } catch (e) { job.sheetErr = e.message; }
+        try { job.notes = redact(txt(doc(await afText('/ims/Site/Service/Notes/AJAX_HTML_get_notes.cfm?dateorder=0&last3notes=0&isLoaded=1&wrCoded=' + E)).body)).replace(/\s*Add Note \(Text\)[\s\S]*$/, '').replace(/^\s*Hide Previous Notes\s*(\.\.\.)?\s*/, '').replace(/\s*sticky_note_2\s*/g, ' || ').replace(/^ \|\| /, '').slice(0, 60000); } catch (e) { job.notesErr = e.message; }
       } else job.sheetErr = job.notesErr = 'no task link';
       job.all = 0; job.allN = 0; job.others = [];
       (iv.items || []).forEach(i => { if (voided(i.status)) return; job.all += +(i.totalAmountEx || 0); job.allN++; const d = bne(i.invoicedDateTime || ''); if (!month.has(d)) job.others.push(i.invoiceNumber + ' ' + d + ' ' + money(i.totalAmountEx)); });
@@ -243,13 +243,27 @@
     });
     // 0.5: looking for AroFlo's purchase order and timesheet feeds, so supplier orders can be tied to jobs by PO number
     // and the month's hours counted. Read only: each address is asked once and what comes back is noted for Claude.
-    const pj = out.jobs.find(j => j.tid && j.pos) || out.jobs.find(j => j.tid);
+    // 0.8: every purchase order from two months before the range to its end (number, date, supplier, job, amount), so a
+    // supplier order ties to its job by PO number even when the job hasn't been invoiced yet
+    out.pos = [];
+    try {
+      const lead = new Date(new Date(month.from + 'T00:00').getTime() - 62 * 864e5), from = lead.getFullYear() + '-' + p2(lead.getMonth() + 1) + '-' + p2(lead.getDate());
+      const poPage = n => af('/cf-api/purchaseorders?limit=100&page=' + n);
+      const p1 = await poPage(1), pc = Math.min((p1.page && p1.page.count) || 1, 80);
+      debug.af.push('PO feed: ' + (p1.count || '?') + ' orders, ' + pc + ' pages');
+      for (let n = 1; n <= pc; n++) {
+        say('AroFlo: purchase orders, page ' + n + ' of ' + pc + '…');
+        const j = n == 1 ? p1 : await poPage(n);
+        (j.items || []).forEach(o => { const d = String(o.purchaseDate || o.timestampCreated || '').slice(0, 10); if (d && (d < from || d > month.to)) return; out.pos.push({ no: String(o.referenceNumber || o.orderNumber || ''), d, sup: clean(o.supplierName || ''), jn: o.jobNumber || '', ex: +(o.totalAmountEx || 0), st: o.status || '', by: clean(o.purchasedByName || ''), sinv: clean(o.invoiceNumber || '') }); });
+        if (!(j.items || []).length) break;
+      }
+    } catch (e) { out.posErr = e.message; note('af', 'PO feed: ' + e.message); }
+    // a look for other feeds that would help (open tasks, quotes, timesheets). Read only: each address is asked once.
+    const pj = out.jobs.find(j => j.tid);
     if (pj) {
-      say('AroFlo: checking for the PO and timesheet feeds…');
-      const q = o => new URLSearchParams(Object.assign({ businessUnitId: buId, allStatus: '1', userBuAccessType: 'thisbu' }, o)).toString();
-      const tries = ['/cf-api/purchaseorders?limit=2', '/cf-api/internal/purchaseorders?' + q({ zoneName: 'BU', limit: '2', page: '1' }), '/cf-api/internal/purchaseorders?' + q({ zoneName: 'TASK', taskId: pj.tid }),
-        '/cf-api/tasks/' + pj.tid + '/purchaseorders', '/cf-api/tasks/' + pj.tid + '/materials', '/cf-api/tasks/' + pj.tid + '/labour', '/cf-api/tasks/' + pj.tid + '/timesheets',
-        '/cf-api/timesheets?limit=2', '/cf-api/internal/timesheets?' + q({ zoneName: 'BU', limit: '2', page: '1' }), '/cf-api/internal/timesheets?' + q({ zoneName: 'TASK', taskId: pj.tid })];
+      say('AroFlo: checking what else can be read…');
+      const tries = ['/cf-api/tasks?limit=2', '/cf-api/tasks?limit=2&status=IN_PROGRESS', '/cf-api/quotes?limit=2', '/cf-api/invoices?limit=2', '/cf-api/users?limit=2', '/cf-api/timesheets?limit=2&businessUnitId=' + buId,
+        '/cf-api/tasks/' + pj.tid + '/materials?businessUnitId=' + buId, '/cf-api/tasks/' + pj.tid + '/notes', '/cf-api/payments?limit=2', '/cf-api/suppliers?limit=2'];
       debug.afProbe = [];
       for (const path of tries) {
         const rec = { p: path.replace(buId, 'BU').replace(pj.tid, 'TASK').slice(0, 90) };
@@ -382,6 +396,7 @@
       const d = doc(r.responseText), text = mainText(d);
       x.title = clean((d.querySelector('h1, .page-title') || {}).textContent || '').slice(0, 70);
       x.refs = refs(text); x.totals = totals(text);
+      if (S.key == 'cnw') { const k = text.search(/Order Information|Order Details/); x.text = redact(k >= 0 ? text.slice(k) : text).slice(0, 3000); }
       x.tables = tables(d).filter(t => !/credit card|card number/i.test(t.heads.join(' '))).map(t => ({ heads: t.heads, rows: t.rows.slice(0, 80).map(rw => rw.c.filter(Boolean).join(' | ')).filter(x => x && !/^Qty (Picking|Backordered)\b/.test(x)) }));
       if (!x.tables.length || !debug[S.key + 'Detail']) { const s = redact(text).slice(0, 900); if (!debug[S.key + 'Detail']) debug[S.key + 'Detail'] = s; if (!x.tables.length) x.sample = s.slice(0, 400); }
       say(S.name + ': order ' + (++done) + ' of ' + list.length + '…');
@@ -404,12 +419,17 @@
     if (A) {
       const live = A.invoices.filter(i => !voided(i.st));
       L.push('', '== AROFLO INVOICES dated ' + month.label + ' (' + live.length + ', total ' + money(live.reduce((s, i) => s + i.ex, 0)) + ' ex) ==');
-      L.push('inv | date | status | type | ex GST | JN | task | client | description');
-      A.invoices.sort((a, b) => a.d < b.d ? -1 : 1).forEach(i => L.push([i.n, i.d, i.st, i.ty, money(i.ex), i.jn, i.tn.slice(0, 50), i.cl.slice(0, 30), i.desc].join(' | ')));
+      L.push('inv | date | status | type | ex GST | inc GST | balance due | paid | due date | JN | task | client | description');
+      A.invoices.sort((a, b) => a.d < b.d ? -1 : 1).forEach(i => L.push([i.n, i.d, i.st, i.ty, money(i.ex), money(i.inc), money(i.due), money(i.paid), i.dd, i.jn, i.tn.slice(0, 50), i.cl.slice(0, 30), i.desc].join(' | ')));
       L.push('', '== JOBS behind those invoices (' + A.jobs.length + ') ==');
       L.push('JN | task | client | cust order no | status | type | labour hrs (all time) | total cost ex (AroFlo) | materials | expenses | sell ex | POs | invoiced in range | invoiced all time (count) | other invoices');
       A.jobs.sort((a, b) => String(a.jn).localeCompare(String(b.jn))).forEach(j => L.push(j.err && j.hrs == null ? ['JN ' + j.jn, j.tn.slice(0, 50), j.cl, 'COULDN\'T READ: ' + j.err, 'invoiced in range ' + money(j.month)].join(' | ')
         : ['JN ' + j.jn, j.tn.slice(0, 50), j.cl.slice(0, 30), j.on, j.st, j.ty, j.hrs == null ? '?' : j.hrs, money(j.mat), money(j.mats), j.exp, money(j.sell), j.pos, money(j.month), money(j.all) + ' (' + j.allN + ')', (j.others || []).join(', ')].join(' | ')));
+    }
+    if (A && (A.pos.length || A.posErr)) {
+      L.push('', '== AROFLO PURCHASE ORDERS, from two months before the range (' + A.pos.length + ', total ' + money(A.pos.reduce((t, o) => t + o.ex, 0)) + ' ex) ==' + (A.posErr ? ' COULDN\'T READ ALL: ' + A.posErr : ''));
+      L.push('PO | date | supplier | JN | ex GST | status | bought by | supplier invoice');
+      A.pos.sort((a, b) => a.d < b.d ? -1 : 1).forEach(o => L.push([o.no, o.d, o.sup, o.jn, money(o.ex), o.st, o.by, o.sinv].join(' | ')));
     }
     if (A) {
       L.push('', '== JOB DETAIL: description, costing lines (labour and materials) and notes for each job ==');
@@ -439,6 +459,7 @@
         if (x.refs && x.refs.length) L.push('   refs: ' + x.refs.join(' ; '));
         if (x.totals && x.totals.length) L.push('   totals: ' + x.totals.join(' ; '));
         (x.tables || []).forEach(t => { if (t.heads.length) L.push('   cols: ' + t.heads.join(' | ')); t.rows.forEach(r => L.push('   ' + r)); });
+        if (x.text) L.push('   page text: ' + x.text);
         if (x.sample) L.push('   no tables. Page says: ' + x.sample);
       });
     });
