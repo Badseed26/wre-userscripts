@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE month pull
 // @namespace    wre
-// @version      0.2
+// @version      0.3
 // @description  One tap on the AroFlo home page pulls a month's job numbers for Claude's monthly report: invoices dated that month, each job's labour hours and materials at cost, and that month's Tradezone and CNW account history. Read only. Copy the bundle and paste it to Claude.
 // @match        https://office.aroflo.com/ims/Site/Home/*
 // @grant        GM_xmlhttpRequest
@@ -40,7 +40,7 @@
     .replace(/(\+?61\s?|0)[2-478](\s?\d){8}\b/g, '[phone]')
     .replace(/\b[A-Za-z0-9_\-]{36,}\b/g, '[long]');
   const money = n => (Math.round((+n || 0) * 100) / 100).toFixed(2);
-  const debug = { v: '0.2', af: [], tz: [], cnw: [] };
+  const debug = { v: '0.3', af: [], tz: [], cnw: [] };
   const note = (k, m) => { debug[k].push(clean(m).slice(0, 300)); };
 
   function gm(method, url, data, json) {
@@ -321,15 +321,17 @@
 #wre-mp .row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px}
 #wre-mp input[type=month]{flex:1;min-width:0;font-size:16px;padding:6px;border:1px solid #bbb;border-radius:6px}
 #wre-mp label{display:flex;gap:5px;align-items:center;font-size:13px}
-#wre-mp .btn{background:#e8730c;color:#fff;border:0;border-radius:6px;padding:9px 12px;font:600 14px system-ui,sans-serif;cursor:pointer}
+#wre-mp .btn{background:#e8730c;color:#fff;border:0;border-radius:6px;padding:9px 10px;white-space:nowrap;font:600 14px system-ui,sans-serif;cursor:pointer}
 #wre-mp .btn.grey{background:#6f6a65}
 #wre-mp .btn:disabled{opacity:.5}
 #wre-mp .msg{font-size:13px;color:#444;min-height:18px;margin-bottom:10px;word-break:break-word}
 #wre-mp textarea{width:100%;height:120px;font:11px ui-monospace,monospace;box-sizing:border-box;display:none;margin-top:8px}`;
   let box, last = GM_getValue('mpLast', '');
   async function copy(text) {
-    try { if (typeof GM_setClipboard == 'function') { GM_setClipboard(text, 'text'); return true; } } catch (e) {}
-    try { await navigator.clipboard.writeText(text); return true; } catch (e) { return false; }
+    // the browser's own copy first: on the iPhone Tampermonkey's one says it worked when nothing was copied (10/11)
+    try { await navigator.clipboard.writeText(text); return true; } catch (e) {}
+    try { if (typeof GM_setClipboard == 'function') { GM_setClipboard(text, 'text'); return 'maybe'; } } catch (e) {}
+    return false;
   }
   function build() {
     const st = document.createElement('style'); st.textContent = css; document.head.appendChild(st);
@@ -340,7 +342,7 @@
 <div class="row"><input type="month" value="${prev.getFullYear()}-${p2(prev.getMonth() + 1)}"></div>
 <div class="row"><label><input type="checkbox" class="af" checked> AroFlo</label><label><input type="checkbox" class="tz" checked> Tradezone</label><label><input type="checkbox" class="cnw" checked> CNW</label></div>
 <div class="msg">Read only. Pulls the month, then you copy it and paste it to Claude.</div>
-<div class="row"><button class="btn go" style="flex:1">Pull</button><button class="btn grey cp">Copy</button></div>
+<div class="row"><button class="btn go" style="flex:1">Pull</button><button class="btn grey cp">Copy</button><button class="btn grey sh">Send file</button></div>
 <textarea readonly></textarea></div>`;
     document.body.appendChild(box);
     const msg = box.querySelector('.msg'), go = box.querySelector('.go'), cp = box.querySelector('.cp'), ta = box.querySelector('textarea');
@@ -349,8 +351,23 @@
     box.querySelector('.hd button').onclick = () => { box.style.display = 'none'; };
     cp.onclick = async () => {
       if (!last) return say('Nothing pulled yet.');
-      if (await copy(last)) say('Copied (' + (last.length / 1024).toFixed(1) + ' KB). Paste it to Claude.');
-      else { ta.style.display = 'block'; ta.value = last; ta.focus(); ta.select(); say('Copy was blocked. Select all in the box below and copy it.'); }
+      const ok = await copy(last);
+      ta.style.display = 'block'; ta.value = last;
+      if (ok === true) say('Copied (' + (last.length / 1024).toFixed(1) + ' KB). Paste it to Claude. If it won\'t paste, tap Send file.');
+      else { ta.focus(); ta.select(); say('Copy might not have worked on this device. Tap Send file, or select all in the box below and copy it.'); }
+    };
+    // the bundle as a text file: the share sheet on a phone (send it to Claude or Save to Files), a download on the PC
+    box.querySelector('.sh').onclick = async () => {
+      if (!last) return say('Nothing pulled yet.');
+      const name = 'wre-month-pull-' + ((last.match(/^WRE month pull (\d{4}-\d{2})/) || [])[1] || 'bundle') + '.txt';
+      try {
+        const f = new File([last], name, { type: 'text/plain' });
+        if (navigator.canShare && navigator.canShare({ files: [f] })) { await navigator.share({ files: [f] }); return say('Sent. Attach or share that file to Claude.'); }
+      } catch (e) { if (e && e.name == 'AbortError') return; }
+      try {
+        const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([last], { type: 'text/plain' })); a.download = name;
+        document.body.appendChild(a); a.click(); a.remove(); say('Saved ' + name + ' to your downloads. Attach it to Claude.');
+      } catch (e) { ta.style.display = 'block'; ta.value = last; ta.focus(); ta.select(); say('Couldn\'t make a file. Select all in the box below and copy it.'); }
     };
     go.onclick = async () => {
       const month = box.querySelector('input[type=month]').value;
