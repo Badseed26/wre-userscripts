@@ -132,13 +132,13 @@ for j in J.values():
 allm = pm + ([ref] if ref else [])
 matp, supp = sum(mt[m] for m in pm), sum(sup[m] for m in pm)
 
-# solar jobs that look like they are missing their gear, for Claude to read and estimate
+# solar jobs that look like they are missing their gear (none entered, or entered at no cost), for Claude to read and estimate
 GEAR = re.compile(r'inverter|solar panel|jinko|trina|longi|sungrow|goodwe|fronius|solax|\bJKM|bifacial', re.I)
 cand = []
 for j in jobs:
     full = J[j['jn']]
     if j['rev'] > 2500 and re.search(r'solar|inverter|panels?\b', full['name'] + ' ' + full['desc'] + ' ' + full['notes'], re.I) \
-       and not any(GEAR.search(x['desc']) for x in full['mat']) and not any(re.search('stc', e['desc'], re.I) for e in full['expl']):
+       and not any(GEAR.search(x['desc']) and x['cost'] > 0 for x in full['mat']) and not any(re.search('stc', e['desc'], re.I) for e in full['expl']):
         cand.append(dict(jn=j['jn'], name=j['name'], invoiced=round(j['rev']), materials=round(j['mat']), in_config=j['jn'] in missing, desc=full['desc'][:700], notes=full['notes'][:1500]))
 json.dump(cand, open(os.path.join(outdir, 'missing-gear-candidates.json'), 'w'), indent=1)
 
