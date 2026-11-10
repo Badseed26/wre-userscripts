@@ -17,6 +17,7 @@ L = open(bundle, encoding='utf-8').read().split('\n')
 num = lambda s: float(re.sub(r'[^0-9.\-]', '', s) or 0)
 MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December']
 mname = lambda ym: MONTHS[int(ym[5:7]) - 1]
+short = lambda ym: MONTHS[int(ym[5:7]) - 1][:3] + ('\n' + ym[:4] if ym[5:7] in ('01', '07') else '')
 
 # ---------- read the bundle ----------
 sec = {}
@@ -98,7 +99,7 @@ while (y, m) <= (cut.year, cut.month): pm.append('%d-%02d' % (y, m)); y, m = (y 
 ref = C.get('ref_month', '%d-%02d' % (y, m)); ref = ref if any(i['d'][:7] == ref for i in inv) else None
 A, B = mname(pm[0]), mname(pm[-1])
 period = f"{A} to {B} {cut.year}" if start.year == cut.year else f"{A} {start.year} to {B} {cut.year}"
-span = f"{A} to {B}"
+span = f"{A} to {B}" if start.year == cut.year else period
 
 # ---------- the numbers: every job invoiced in the period, counted whole, up to the cut ----------
 ib = collections.defaultdict(list)
@@ -116,6 +117,7 @@ for j in J.values():
 S_ = lambda k, js=jobs: sum(j[k] for j in js)
 missing = {str(k): float(v) for k, v in C.get('missing', {}).items() if any(j['jn'] == str(k) for j in jobs)}
 MG = sum(missing.values())
+for j in jobs: j['allow'] = missing.get(j['jn'], 0); j['m'] -= j['allow']      # job margin after any missing gear allowance
 rev, hrs, net, mat, lab = S_('rev'), S_('hrs'), S_('net'), S_('mat'), S_('hrs') * R
 left = rev - net - lab - MG; pct = 100 * left / rev
 inr = sum(i['ex'] for i in inv if START <= i['d'] <= CUT)
@@ -140,6 +142,19 @@ for j in jobs:
         cand.append(dict(jn=j['jn'], name=j['name'], invoiced=round(j['rev']), materials=round(j['mat']), in_config=j['jn'] in missing, desc=full['desc'][:700], notes=full['notes'][:1500]))
 json.dump(cand, open(os.path.join(outdir, 'missing-gear-candidates.json'), 'w'), indent=1)
 
+# jobs with big margins, for Claude to check against the notes for gear or materials that never got entered
+HI = C.get('high', {}); HP, HD, HR = HI.get('pct', 60), HI.get('dollars', 6000), HI.get('min_rev', 1500)
+pc_ = lambda j: 100 * j['m'] / j['rev'] if j['rev'] else 0
+high = [j for j in jobs if j['rev'] >= HR and (j['m'] >= HD or pc_(j) >= HP)]
+checks = {str(k_): v for k_, v in C.get('checks', {}).items()}
+clean = lambda t: re.sub(r'This purchased item is unbilled or recorded on a bill which has not been approved', '', t).strip()
+json.dump([dict(jn=j['jn'], name=j['name'], invoiced=round(j['rev']), materials_net=round(j['net']), allowance=j['allow'], hours=round(j['hrs'], 1), margin=round(j['m']), pct=round(pc_(j)), checked=checks.get(j['jn'], ''),
+                materials=[(round(x['cost']), x['d'], clean(x['desc'])[-90:]) for x in sorted(J[j['jn']]['mat'], key=lambda x: -x['cost'])[:8]],
+                expenses=[(round(e['cost']), e['desc'][:70]) for e in J[j['jn']]['expl']], desc=J[j['jn']]['desc'][:900], notes=J[j['jn']]['notes'][:2500])
+           for j in sorted(high, key=lambda j: -j['m'])], open(os.path.join(outdir, 'high-margin-candidates.json'), 'w'), indent=1)
+listed = sorted({j['jn']: j for j in high + [j for j in jobs if j['allow']]}.values(), key=lambda j: -j['m'])
+unchecked = [j['jn'] for j in listed if j['jn'] not in checks]
+
 # ---------- charts (exact figures on the marks) ----------
 OR, BL, TE, PU = '#D9650A', '#2563C9', '#149A7A', '#8A4FD0'      # validated set, fixed order
 INK, MUT, GRID, SURF = '#2B2826', '#6F6A65', '#E6E2DE', '#FFFFFF'
@@ -156,8 +171,10 @@ title = dict(loc='left', fontsize=11, fontweight='bold')
 fig, ax = plt.subplots(figsize=(6.6, 3.0)); base(ax); vals = [rv[m] for m in allm]
 ax.bar(range(len(allm)), vals, width=0.42, color=[OR] * len(pm) + ['#F0B98A'] * (len(allm) - len(pm)), edgecolor=SURF, linewidth=2)
 t, tl = ticks(max(vals)); ax.set_ylim(0, t[-1] * 1.04); ax.set_yticks(t); ax.set_yticklabels(tl)
-for x, v in enumerate(vals): ax.text(x, v + t[-1] * 0.017, f'${v:,.0f}', ha='center', va='bottom', fontsize=10, fontweight='bold')
-ax.set_xticks(range(len(allm))); ax.set_xticklabels([mname(m) for m in pm] + ([mname(ref) + '\n(not yet fully due)'] if ref else []))
+MANY = len(allm) > 6
+if MANY: ax.set_ylim(0, t[-1] * 1.22)
+for x, v in enumerate(vals): ax.text(x, v + t[-1] * 0.017, f'${v:,.0f}', ha='center', va='bottom', fontsize=7.5 if MANY else 10, fontweight='bold', rotation=90 if MANY else 0)
+ax.set_xticks(range(len(allm))); ax.set_xticklabels([(short if MANY else mname)(m) for m in pm] + ([mname(ref) + '\n(not yet fully due)'] if ref else []), fontsize=8.5 if MANY else 10)
 ax.set_title('Revenue invoiced by month (ex GST)', pad=10, **title); save(fig, 'c1.png')
 # 2 where each $100 goes
 parts = [('Materials recorded in AroFlo, net of STCs', net, BL)] + ([('Materials not recorded (estimate)', MG, PU)] if MG else []) + [(f'Labour at ${R} per hour', lab, TE), ('Margin', left, OR)]
@@ -177,12 +194,14 @@ ax.set_xticks(range(4)); ax.set_xticklabels([f"{b['name']}\n{b['n']} jobs\n{100*
 yt = list(range(0, top, 10)); ax.set_yticks(yt); ax.set_yticklabels(['0'] + [f'{v}%' for v in yt[1:]])
 ax.set_title(f'Margin by job size (labour at ${R} per hour)', pad=10, **title); save(fig, 'c3.png')
 # 4 materials: AroFlo against the supplier accounts
-fig, ax = plt.subplots(figsize=(6.6, 3.0)); base(ax); w = 0.3
+fig, ax = plt.subplots(figsize=(6.6, 2.8 if MANY else 3.0)); base(ax); w = 0.3
 t, tl = ticks(max([mt[m] for m in pm] + [sup[m] for m in pm])); ax.set_ylim(0, t[-1] * 1.04); ax.set_yticks(t); ax.set_yticklabels(tl)
 for i, m in enumerate(pm):
     ax.bar(i - w / 2 - 0.02, mt[m], width=w, color=BL); ax.bar(i + w / 2 + 0.02, sup[m], width=w, color=TE)
-    ax.text(i - w / 2 - 0.02, mt[m] + t[-1] * 0.015, f'${mt[m]:,.0f}', ha='center', va='bottom', fontsize=9); ax.text(i + w / 2 + 0.02, sup[m] + t[-1] * 0.015, f'${sup[m]:,.0f}', ha='center', va='bottom', fontsize=9)
-ax.set_xticks(range(len(pm))); ax.set_xticklabels([mname(m) for m in pm])
+    kw4 = dict(ha='center', va='bottom', fontsize=6.5, rotation=90) if MANY else dict(ha='center', va='bottom', fontsize=9)
+    ax.text(i - w / 2 - 0.02, mt[m] + t[-1] * 0.015, f'${mt[m]:,.0f}', **kw4); ax.text(i + w / 2 + 0.02, sup[m] + t[-1] * 0.015, f'${sup[m]:,.0f}', **kw4)
+if MANY: ax.set_ylim(0, t[-1] * 1.25)
+ax.set_xticks(range(len(pm))); ax.set_xticklabels([(short if MANY else mname)(m) for m in pm], fontsize=8.5 if MANY else 10)
 ax.legend(handles=[plt.Rectangle((0, 0), 1, 1, color=BL), plt.Rectangle((0, 0), 1, 1, color=TE)], labels=['Recorded in AroFlo', 'Billed by Tradezone and CNW'], frameon=False, loc='upper right', fontsize=8.5, ncol=2, bbox_to_anchor=(1, 1.02))
 ax.set_title('Materials recorded in AroFlo compared with supplier billing (ex GST)', pad=16, **title); save(fig, 'c4.png')
 # 5 hours by person and month. A person keeps their colour from run to run (set 'people' in the config).
@@ -192,17 +211,23 @@ for m in allm:
 order = C.get('people') or sorted(p for p, v in tot.items() if v >= 20)      # config 'people' fixes who gets which colour
 FIXED = dict(zip(order[:4], [OR, BL, TE, PU]))
 people = [p for p in FIXED if tot[p] >= 1]
-fig, ax = plt.subplots(figsize=(6.6, 3.0)); base(ax); bot = [0] * len(allm)
+if C.get('others'):
+    for m in allm:
+        o = sum(v for k, v in hp[m].items() if k not in FIXED)
+        hp[m] = collections.Counter({k: v for k, v in hp[m].items() if k in FIXED}); hp[m]['Other staff'] = o
+    FIXED['Other staff'] = PU; people.append('Other staff')
+fig, ax = plt.subplots(figsize=(6.6, 2.8 if MANY else 3.0)); base(ax); bot = [0] * len(allm)
 for p in people:
-    v = [hp[m].get(p, 0) for m in allm]; nm = p.split(' ')[0] + '. ' + ' '.join(p.split(' ')[1:])
-    ax.bar(range(len(allm)), v, bottom=bot, width=0.42, color=FIXED.get(p, PU), edgecolor=SURF, linewidth=2, label=nm)
+    v = [hp[m].get(p, 0) for m in allm]; nm = p if p == 'Other staff' else p.split(' ')[0] + '. ' + ' '.join(p.split(' ')[1:])
+    ax.bar(range(len(allm)), v, bottom=bot, width=0.6 if MANY else 0.42, color=FIXED.get(p, PU), edgecolor=SURF, linewidth=2, label=nm)
     for x, (b0, h) in enumerate(zip(bot, v)):
-        if h >= 18: ax.text(x, b0 + h / 2, f'{h:.0f}', ha='center', va='center', color='white', fontsize=9, fontweight='bold')
+        if h >= (40 if MANY else 18): ax.text(x, b0 + h / 2, f'{h:.0f}', ha='center', va='center', color='white', fontsize=6.5 if MANY else 9, fontweight='bold')
     bot = [b0 + h for b0, h in zip(bot, v)]
 t, tl = ticks(max(bot), False); ax.set_ylim(0, t[-1] * 1.10); ax.set_yticks(t); ax.set_yticklabels(tl)
-for x, tt in enumerate(bot): ax.text(x, tt + t[-1] * 0.014, f'{tt:.0f}', ha='center', va='bottom', fontweight='bold')
-ax.set_xticks(range(len(allm))); ax.set_xticklabels([mname(m) for m in allm])
-ax.legend(frameon=False, loc='upper right', fontsize=8.5, ncol=len(people), bbox_to_anchor=(1, 1.02)); ax.set_title('Hours logged to jobs by month', pad=16, **title); save(fig, 'c5.png')
+for x, tt in enumerate(bot): ax.text(x, tt + t[-1] * 0.014, f'{tt:.0f}', ha='center', va='bottom', fontweight='bold', fontsize=8 if MANY else 10)
+if MANY: ax.set_ylim(0, t[-1] * 1.18)
+ax.set_xticks(range(len(allm))); ax.set_xticklabels([(short if MANY else mname)(m) for m in allm], fontsize=8.5 if MANY else 10)
+ax.legend(frameon=False, loc='upper right', fontsize=8.5, ncol=len(people), bbox_to_anchor=(1, 1.08 if MANY else 1.02)); ax.set_title('Hours logged to jobs by month', pad=22 if MANY else 16, **title); save(fig, 'c5.png')
 
 # ---------- the wording (rounded in the writing) ----------
 k = lambda v: f'${round(v, -3):,.0f}'
@@ -283,8 +308,23 @@ S += [Paragraph('Hours on the tools', H2), img('c5.png', 132 * mm), Paragraph(ho
 S += bullets(['These figures show what was invoiced, not what has been received.',
               f"The ${R} per hour has not been checked against this year's actual costs. If the true figure were $130 per hour, the margin would still be about {p130:.0f}%.",
               f'If every material cost were 20% higher than recorded, the margin would still be about {worst:.0f}%.', 'Work done but not yet invoiced is not included.'])
+def short(n):   # address without the builder's PO numbers in front
+    n = re.sub(r'^(P\.?O\.? No:?\s*)?[A-Z]{0,3}[\d-]*\d[\w-]*\s*-?\s*', '', n.strip()); n = re.sub(r'\s+(QLD|NSW)\s*\d{0,4}$', '', n, flags=re.I)
+    return n[:44]
+if listed:
+    JC = st('jc', fontSize=7.6, leading=9.6); JCB = st('jcb', font='Helvetica-Bold', fontSize=7.6, leading=9.6); JR = st('jr', fontSize=7.6, leading=9.6, alignment=2); JRB = st('jrb', font='Helvetica-Bold', fontSize=7.6, leading=9.6, alignment=2)
+    rows = [[Paragraph(x, JCB if i in (0, 7) else JRB) for i, x in enumerate(['Job', 'Invoiced', 'Materials', 'Allowance', 'Labour', 'Margin', '%', 'Checked'])]]
+    for j in listed:
+        rows.append([Paragraph(f"<b>{j['jn']}</b> {short(j['name'])}", JC), Paragraph(d(j['rev']), JR), Paragraph(d(j['net']), JR), Paragraph(d(j['allow']) if j['allow'] else '', JR),
+                     Paragraph(d(j['hrs'] * R), JR), Paragraph(d(j['m']), JR), Paragraph(f"{pc_(j):.0f}%", JR), Paragraph(checks.get(j['jn'], 'Not checked'), JC)])
+    jt = Table(rows, colWidths=[40 * mm, 17 * mm, 17 * mm, 16 * mm, 16 * mm, 16 * mm, 9 * mm, 43 * mm], repeatRows=1)
+    jt.setStyle(TableStyle([('VALIGN', (0, 0), (-1, -1), 'TOP'), ('LINEBELOW', (0, 0), (-1, -1), 0.5, LINE), ('BACKGROUND', (0, 0), (-1, 0), GREY), ('LINEBELOW', (0, 0), (-1, 0), 0.8, MUTc),
+                            ('TOPPADDING', (0, 0), (-1, -1), 3), ('BOTTOMPADDING', (0, 0), (-1, -1), 3), ('LEFTPADDING', (0, 0), (-1, -1), 3), ('RIGHTPADDING', (0, 0), (-1, -1), 3)]))
+    S += [PageBreak(), Paragraph('Job list: high margin jobs and allowances', H2),
+          Paragraph(T.get('job_list') or f"Every job that returned {HP}% or more, or {d(HD)} or more, after materials and labour, plus every job with a materials allowance. Each one was checked against its job notes for gear or materials supplied but not entered in AroFlo. "
+                    f"Materials are net of STCs, labour is logged hours at ${R}, and the margin is after any allowance.", P), Spacer(1, 2), jt]
 doc.build(S)
 print(json.dumps(dict(pdf=pdf, pulled=pulled, start=START, cut=CUT, ref_month=ref, rate=R, jobs=len(jobs), invoiced_in_period=round(inr, 2), invoiced_on_jobs=round(rev, 2), hours=round(hrs, 2),
       materials=round(mat, 2), materials_net=round(net, 2), missing_gear=MG, labour=round(lab, 2), margin=round(left, 2), margin_pct=round(pct, 1),
-      aroflo_materials_in_period=round(matp), supplier_billing_in_period=round(supp), monthly={m: dict(invoiced=round(rv[m]), hours=round(sum(hp[m].values()))) for m in allm},
+      aroflo_materials_in_period=round(matp), high_margin_jobs=len(high), job_list=len(listed), unchecked=unchecked, supplier_billing_in_period=round(supp), monthly={m: dict(invoiced=round(rv[m]), hours=round(sum(hp[m].values()))) for m in allm},
       missing_gear_candidates=[(c['jn'], c['name'][:40], c['invoiced'], c['materials'], 'in config' if c['in_config'] else 'NOT in config') for c in cand]), indent=1))
