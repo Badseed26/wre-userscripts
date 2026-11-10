@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE month pull
 // @namespace    wre
-// @version      0.8
+// @version      0.9
 // @description  One tap on the AroFlo home page pulls a month's job numbers for Claude's monthly report: invoices dated that month, each job's labour hours and materials at cost, and that month's Tradezone and CNW account history. Read only. Copy the bundle and paste it to Claude.
 // @match        https://office.aroflo.com/ims/Site/Home/*
 // @grant        GM_xmlhttpRequest
@@ -32,6 +32,8 @@
       out: r => /customer\/account\/login/.test((r && r.finalUrl) || '') },
     { name: 'CNW', key: 'cnw', base: 'https://shop.cnw.com.au', home: '/my-account', defaults: [['/my-account/orders', 'Order history (tried by default)'], ['/my-account/invoices', 'Invoices (tried by default)']],
       mdy: true, // CNW writes dates month first (11/09/26 is 9 Nov)
+      par: 10, // CNW's order pages are slow, so more are opened at once (0.9)
+      skipHome: true, // its My Account page repeats the newest orders under other numbers, which doubled them up
       out: r => /\/login\b/.test((r && r.finalUrl) || '') || /<body[^>]*class="[^"]*\blogged-out\b/i.test((r && r.responseText) || '') },
   ];
   const clean = s => String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
@@ -41,7 +43,7 @@
     .replace(/(\+?61\s?|0)[2-478](\s?\d){8}\b/g, '[phone]')
     .replace(/\b[A-Za-z0-9_\-]{36,}\b/g, '[long]');
   const money = n => (Math.round((+n || 0) * 100) / 100).toFixed(2);
-  const debug = { v: '0.8', af: [], tz: [], cnw: [] };
+  const debug = { v: '0.9', af: [], tz: [], cnw: [] };
   const note = (k, m) => { debug[k].push(clean(m).slice(0, 300)); };
 
   function gm(method, url, data, json, blob) {
@@ -269,7 +271,7 @@
     const hd = doc(home.responseText);
     // pages off My Account that look like orders, invoices or statements
     const want = /order|invoice|statement|histor|transaction/i, skip = /logout|login|cart|checkout|wishlist|address|edit|newsletter|review|create|password|compare|contact|privacy|terms|favourite|profile|sub-users|recently|quote|backorder|catalog|payment|accountpage|print|download|order\/view|order_id|\/order\/\d|reorder/i;
-    const cand = new Map([[S.home, 'My Account'], ...S.defaults]);
+    const cand = new Map(S.skipHome ? S.defaults : [[S.home, 'My Account'], ...S.defaults]);
     hd.querySelectorAll('a[href]').forEach(a => {
       let u; try { u = new URL(a.getAttribute('href'), S.base); } catch (e) { return; }
       if (u.host != new URL(S.base).host) return;
@@ -328,7 +330,7 @@
     // open each row from the month for its lines
     const list = [...detailLinks.values()];
     let done = 0;
-    await pool(list, 3, async x => {
+    await pool(list, S.par || 4, async x => {
       const r = await gm('GET', x.url);
       if (S.out(r)) { x.err = 'went to the sign in page'; return; }
       if (r.status >= 400) { x.err = 'came back ' + r.status; return; }
