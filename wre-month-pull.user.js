@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE month pull
 // @namespace    wre
-// @version      0.5
+// @version      0.6
 // @description  One tap on the AroFlo home page pulls a month's job numbers for Claude's monthly report: invoices dated that month, each job's labour hours and materials at cost, and that month's Tradezone and CNW account history. Read only. Copy the bundle and paste it to Claude.
 // @match        https://office.aroflo.com/ims/Site/Home/*
 // @grant        GM_xmlhttpRequest
@@ -22,7 +22,7 @@
   // Live updates (23/10): Tampermonkey only checks for a new version every few hours. This checks the repo's latest commit every
   // 2 min (free when nothing's changed) and keeps the newest code here, so a push runs on the next page load. If the new code needs
   // a permission this install hasn't got, or this browser won't run it, the built in copy below runs like before.
-  const __wreName = "wre-month-pull", __wreVer = "0.5", __wreHave = new Set(["// @connect api.github.com", "// @connect raw.githubusercontent.com", "// @connect shop.cnw.com.au", "// @connect www.tradezone.com.au", "// @grant GM_getValue", "// @grant GM_setClipboard", "// @grant GM_setValue", "// @grant GM_xmlhttpRequest", "// @match https://office.aroflo.com/ims/Site/Home/*", "// @run-at document-idle"]);
+  const __wreName = "wre-month-pull", __wreVer = "0.6", __wreHave = new Set(["// @connect api.github.com", "// @connect raw.githubusercontent.com", "// @connect shop.cnw.com.au", "// @connect www.tradezone.com.au", "// @grant GM_getValue", "// @grant GM_setClipboard", "// @grant GM_setValue", "// @grant GM_xmlhttpRequest", "// @match https://office.aroflo.com/ims/Site/Home/*", "// @run-at document-idle"]);
   const __wreInfo0 = typeof GM_info != 'undefined' ? GM_info : null;
   const __wreSay = m => { try { console.log('[WRE live update] ' + __wreName + ': ' + m); } catch (e) {} };
   const __wreCmp = (a, b) => { const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number); for (let i = 0; i < Math.max(x.length, y.length); i++) { const d = (x[i] || 0) - (y[i] || 0); if (d) return d; } return 0; };
@@ -73,7 +73,7 @@
   }
   if (window.top === window.self) { __wreCheck(); setInterval(__wreCheck, 2 * 60e3 + 5000); }
   if (__wreLive()) return;
-  // ---------- the built in copy (src/wre-month-pull.js at 0.5) ----------
+  // ---------- the built in copy (src/wre-month-pull.js at 0.6) ----------
 
 (function () {
   'use strict';
@@ -101,7 +101,7 @@
     .replace(/(\+?61\s?|0)[2-478](\s?\d){8}\b/g, '[phone]')
     .replace(/\b[A-Za-z0-9_\-]{36,}\b/g, '[long]');
   const money = n => (Math.round((+n || 0) * 100) / 100).toFixed(2);
-  const debug = { v: '0.5', af: [], tz: [], cnw: [] };
+  const debug = { v: '0.6', af: [], tz: [], cnw: [] };
   const note = (k, m) => { debug[k].push(clean(m).slice(0, 300)); };
 
   function gm(method, url, data, json, blob) {
@@ -156,6 +156,12 @@
       try { return JSON.parse(r.responseText); } catch (e) { last += ' / backup ' + r.status + ' ' + clean(r.responseText).slice(0, 60); }
     } catch (e) { last += ' / backup failed: ' + e.message; }
     throw new Error('AroFlo wouldn\'t answer ' + path.split('?')[0] + ' (' + last + ')');
+  }
+  // an AroFlo page as text, off the page's own sign in
+  async function afText(path) {
+    const r = await fetch(path, { credentials: 'include' });
+    if (r.status != 200) throw new Error('came back ' + r.status);
+    return r.text();
   }
   // cut down copy of the first invoice and task, so Claude can see what AroFlo sends
   function sample(v, d) {
@@ -222,6 +228,15 @@
       job.st = clean((j.status && (j.status.name || j.status)) || '');
       job.ty = clean((j.taskType && (j.taskType.name || j.taskType)) || '');
       const iv = await af('/cf-api/internal/invoices?' + new URLSearchParams({ businessUnitId: buId, taskId: job.tid, zoneName: 'TASK', allStatus: '1', userBuAccessType: 'thisbu' }));
+      // 0.6: the context behind the numbers: what the job was, every labour and material line, and the notes
+      job.desc = redact(txt(doc(String(j.description || '')).body)).slice(0, 1500);
+      job.loc = clean(j.locationText || '').slice(0, 80);
+      const cm = String((j._links && (j._links.office || j._links.field)) || '').match(/wrCoded=([^&"']+)/i);
+      if (cm) {
+        const E = encodeURIComponent(decodeURIComponent(cm[1]));
+        try { job.sheet = tables(doc(await afText('/ims/Site/Resource/Jobsheet/AJAX/view_jobsheet.cfm?wrCoded=' + E))).flatMap(t => t.rows.map(r => redact(r.c.filter(Boolean).join(' | ')))).filter(x => x && x.length < 320).slice(0, 90); } catch (e) { job.sheetErr = e.message; }
+        try { job.notes = redact(txt(doc(await afText('/ims/Site/Service/Notes/AJAX_HTML_get_notes.cfm?dateorder=0&last3notes=0&isLoaded=1&wrCoded=' + E)).body)).slice(0, 2200); } catch (e) { job.notesErr = e.message; }
+      } else job.sheetErr = job.notesErr = 'no task link';
       job.all = 0; job.allN = 0; job.others = [];
       (iv.items || []).forEach(i => { if (voided(i.status)) return; job.all += +(i.totalAmountEx || 0); job.allN++; const d = bne(i.invoicedDateTime || ''); if (d.slice(0, 7) != month) job.others.push(i.invoiceNumber + ' ' + d + ' ' + money(i.totalAmountEx)); });
       say('AroFlo: jobs ' + (++done) + ' of ' + out.jobs.length + '…');
@@ -247,7 +262,7 @@
   }
 
   // ---------- suppliers (Tradezone, CNW) ----------
-  const doc = t => new DOMParser().parseFromString(t || '', 'text/html');
+  function doc(t) { return new DOMParser().parseFromString(t || '', 'text/html'); }
   const pathOf = (u, base) => { try { const x = new URL(u, base); return x.pathname + x.search; } catch (e) { return ''; } };
   // every table on a page as plain rows, with the links on each row
   function tables(d) {
@@ -395,6 +410,15 @@
       L.push('JN | task | client | cust order no | status | type | labour hrs (all time) | total cost ex (AroFlo) | materials | expenses | sell ex | POs | invoiced this month | invoiced all time (count) | other invoices');
       A.jobs.sort((a, b) => String(a.jn).localeCompare(String(b.jn))).forEach(j => L.push(j.err && j.hrs == null ? ['JN ' + j.jn, j.tn.slice(0, 50), j.cl, 'COULDN\'T READ: ' + j.err, 'invoiced this month ' + money(j.month)].join(' | ')
         : ['JN ' + j.jn, j.tn.slice(0, 50), j.cl.slice(0, 30), j.on, j.st, j.ty, j.hrs == null ? '?' : j.hrs, money(j.mat), money(j.mats), j.exp, money(j.sell), j.pos, money(j.month), money(j.all) + ' (' + j.allN + ')', (j.others || []).join(', ')].join(' | ')));
+    }
+    if (A) {
+      L.push('', '== JOB DETAIL: description, costing lines (labour and materials) and notes for each job ==');
+      A.jobs.forEach(j => {
+        L.push('-- JN ' + j.jn + ' | ' + j.tn.slice(0, 60) + (j.loc ? ' | ' + j.loc : ''));
+        if (j.desc) L.push('   desc: ' + j.desc);
+        if (j.sheet && j.sheet.length) { L.push('   costing:'); j.sheet.forEach(r => L.push('     ' + r)); } else L.push('   costing: ' + (j.sheetErr ? 'couldn\'t read (' + j.sheetErr + ')' : 'nothing on it'));
+        L.push('   notes: ' + (j.notes || (j.notesErr ? 'couldn\'t read (' + j.notesErr + ')' : 'none')));
+      });
     }
     sup.forEach(({ S, T }) => {
       const NM = S.name.toUpperCase();
