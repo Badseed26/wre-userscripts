@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE month pull
 // @namespace    wre
-// @version      0.3
+// @version      0.4
 // @description  One tap on the AroFlo home page pulls a month's job numbers for Claude's monthly report: invoices dated that month, each job's labour hours and materials at cost, and that month's Tradezone and CNW account history. Read only. Copy the bundle and paste it to Claude.
 // @match        https://office.aroflo.com/ims/Site/Home/*
 // @grant        GM_xmlhttpRequest
@@ -22,7 +22,7 @@
   // Live updates (23/10): Tampermonkey only checks for a new version every few hours. This checks the repo's latest commit every
   // 2 min (free when nothing's changed) and keeps the newest code here, so a push runs on the next page load. If the new code needs
   // a permission this install hasn't got, or this browser won't run it, the built in copy below runs like before.
-  const __wreName = "wre-month-pull", __wreVer = "0.3", __wreHave = new Set(["// @connect api.github.com", "// @connect raw.githubusercontent.com", "// @connect shop.cnw.com.au", "// @connect www.tradezone.com.au", "// @grant GM_getValue", "// @grant GM_setClipboard", "// @grant GM_setValue", "// @grant GM_xmlhttpRequest", "// @match https://office.aroflo.com/ims/Site/Home/*", "// @run-at document-idle"]);
+  const __wreName = "wre-month-pull", __wreVer = "0.4", __wreHave = new Set(["// @connect api.github.com", "// @connect raw.githubusercontent.com", "// @connect shop.cnw.com.au", "// @connect www.tradezone.com.au", "// @grant GM_getValue", "// @grant GM_setClipboard", "// @grant GM_setValue", "// @grant GM_xmlhttpRequest", "// @match https://office.aroflo.com/ims/Site/Home/*", "// @run-at document-idle"]);
   const __wreInfo0 = typeof GM_info != 'undefined' ? GM_info : null;
   const __wreSay = m => { try { console.log('[WRE live update] ' + __wreName + ': ' + m); } catch (e) {} };
   const __wreCmp = (a, b) => { const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number); for (let i = 0; i < Math.max(x.length, y.length); i++) { const d = (x[i] || 0) - (y[i] || 0); if (d) return d; } return 0; };
@@ -73,7 +73,7 @@
   }
   if (window.top === window.self) { __wreCheck(); setInterval(__wreCheck, 2 * 60e3 + 5000); }
   if (__wreLive()) return;
-  // ---------- the built in copy (src/wre-month-pull.js at 0.3) ----------
+  // ---------- the built in copy (src/wre-month-pull.js at 0.4) ----------
 
 (function () {
   'use strict';
@@ -91,6 +91,7 @@
     { name: 'Tradezone', key: 'tz', base: 'https://www.tradezone.com.au', home: '/customer/account/', defaults: [['/sales/order/history/', 'Order history (tried by default)']],
       out: r => /customer\/account\/login/.test((r && r.finalUrl) || '') },
     { name: 'CNW', key: 'cnw', base: 'https://shop.cnw.com.au', home: '/my-account', defaults: [['/my-account/orders', 'Order history (tried by default)'], ['/my-account/invoices', 'Invoices (tried by default)']],
+      mdy: true, // CNW writes dates month first (11/09/26 is 9 Nov)
       out: r => /\/login\b/.test((r && r.finalUrl) || '') || /<body[^>]*class="[^"]*\blogged-out\b/i.test((r && r.responseText) || '') },
   ];
   const clean = s => String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
@@ -100,13 +101,13 @@
     .replace(/(\+?61\s?|0)[2-478](\s?\d){8}\b/g, '[phone]')
     .replace(/\b[A-Za-z0-9_\-]{36,}\b/g, '[long]');
   const money = n => (Math.round((+n || 0) * 100) / 100).toFixed(2);
-  const debug = { v: '0.3', af: [], tz: [], cnw: [] };
+  const debug = { v: '0.4', af: [], tz: [], cnw: [] };
   const note = (k, m) => { debug[k].push(clean(m).slice(0, 300)); };
 
-  function gm(method, url, data, json) {
+  function gm(method, url, data, json, blob) {
     return new Promise((resolve, reject) => {
       GM_xmlhttpRequest({
-        method, url, data, timeout: 30000,
+        method, url, data, timeout: 30000, responseType: blob ? 'blob' : undefined,
         headers: Object.assign(json ? { Accept: 'application/json' } : { Accept: 'text/html' }, data ? { 'Content-Type': 'application/x-www-form-urlencoded' } : {}),
         onload: r => resolve(r),
         onerror: () => reject(new Error('couldn\'t reach ' + new URL(url).host)),
@@ -124,14 +125,16 @@
   const MON = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
   const p2 = n => String(n).padStart(2, '0');
   // first date in a bit of text, as YYYY-MM-DD (day first, the Aussie way)
-  function parseDate(t) {
+  function parseDate(t, mdy) {
     t = String(t || '');
     let m = t.match(/\b(20\d{2})-(\d{2})-(\d{2})\b/); if (m) return m[1] + '-' + m[2] + '-' + m[3];
-    m = t.match(/\b(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{4}|\d{2})\b/); if (m && +m[2] <= 12 && +m[1] <= 31) return (m[3].length == 2 ? '20' + m[3] : m[3]) + '-' + p2(m[2]) + '-' + p2(m[1]);
+    m = t.match(/\b(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{4}|\d{2})\b/); if (m) { const dd = mdy ? m[2] : m[1], mm = mdy ? m[1] : m[2]; if (+mm <= 12 && +dd <= 31) return (m[3].length == 2 ? '20' + m[3] : m[3]) + '-' + p2(mm) + '-' + p2(dd); }
     m = t.match(/\b(\d{1,2})(?:st|nd|rd|th)?\s+([A-Za-z]{3})[a-z]*\.?,?\s+(\d{4})\b/); if (m && MON.includes(m[2].toLowerCase())) return m[3] + '-' + p2(MON.indexOf(m[2].toLowerCase()) + 1) + '-' + p2(m[1]);
     m = t.match(/\b([A-Za-z]{3})[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})\b/); if (m && MON.includes(m[1].toLowerCase())) return m[3] + '-' + p2(MON.indexOf(m[1].toLowerCase()) + 1) + '-' + p2(m[2]);
     return '';
   }
+  // "Oct 2026" on a statement row, as YYYY-MM
+  const monthOf = t => { const m = String(t || '').match(/\b([A-Za-z]{3})[a-z]*\.?\s+(20\d{2})\b/); return m && MON.includes(m[1].toLowerCase()) ? m[2] + '-' + p2(MON.indexOf(m[1].toLowerCase()) + 1) : ''; };
   // an AroFlo timestamp as the Brisbane day
   function bne(s) {
     if (!s) return '';
@@ -212,7 +215,7 @@
       if (!debug.afTask) debug.afTask = sample(j, 0);
       const c = j.counts || {};
       job.hrs = typeof c.labour == 'number' ? c.labour : null;
-      job.mat = +(c.totalCostEx || 0); job.exp = +(c.expenses || 0);
+      job.mat = +(c.totalCostEx || 0); job.exp = +(c.expenses || 0); job.mats = +(c.materials || 0); job.sell = +(c.totalSellEx || 0); job.pos = +(c.purchaseOrders || 0);
       job.jn = job.jn || j.jobNumber || ''; job.tn = job.tn || clean(j.name || '');
       job.cl = job.cl || clean((j.client && j.client.name) || '');
       job.on = clean(j.customerOrderNumber || '');
@@ -240,6 +243,20 @@
       return { heads, rows };
     }).filter(t => t.rows.length);
   }
+  // order and invoice links that sit in a list, not a table: each one's row as text
+  function linkRows(d) {
+    const seen = new Set(), rows = [];
+    d.querySelectorAll('a[href]').forEach(a => {
+      const h = a.getAttribute('href') || '';
+      if (!/order\/view|order_id|printinvoice|invoice_id|\/invoice|\/order\/\d/i.test(h) || a.closest('table')) return;
+      let box = a.closest('li, .row, .item, .order, .invoice') || a.parentElement;
+      for (let k = 0; k < 3 && box && box.parentElement && txt(box).length < 25; k++) box = box.parentElement;
+      if (!box || seen.has(box)) return; seen.add(box);
+      const t = txt(box); if (t.length > 400) return;
+      rows.push({ c: [t.slice(0, 220)], a: [...box.querySelectorAll('a[href]')].map(x => x.getAttribute('href')).filter(x => x && !/^(#|javascript|mailto|tel)/i.test(x)) });
+    });
+    return rows.length ? [{ heads: ['(list, not a table)'], rows }] : [];
+  }
   // an element's text with a space between each bit, so cells and lines don't run together
   function txt(el) {
     if (!el) return '';
@@ -257,7 +274,7 @@
   const totals = text => (text.match(/(?:sub\s?total|grand total|total(?: ex(?:cl)?\.?(?: gst)?| inc(?:l)?\.?(?: gst)?)?|gst|freight|shipping)[^$\d]{0,12}\$\s?[\d,]+\.\d{2}/gi) || []).slice(0, 6).map(clean);
 
   async function pullSupplier(S, month, say) {
-    const out = { pages: [], details: [], err: '' };
+    const out = { pages: [], details: [], statements: [], err: '' };
     const start = month + '-01';
     say(S.name + ': opening My Account…');
     const home = await gm('GET', S.base + S.home);
@@ -265,13 +282,13 @@
     if (home.status >= 400) note(S.key, 'My Account page came back ' + home.status);
     const hd = doc(home.responseText);
     // pages off My Account that look like orders, invoices or statements
-    const want = /order|invoice|statement|histor|transaction|purchase|account/i, skip = /logout|login|cart|checkout|wishlist|address|edit|newsletter|review|create|password|compare|contact|privacy|terms/i;
-    const cand = new Map(S.defaults);
+    const want = /order|invoice|statement|histor|transaction/i, skip = /logout|login|cart|checkout|wishlist|address|edit|newsletter|review|create|password|compare|contact|privacy|terms|favourite|profile|sub-users|recently|quote|backorder|catalog|payment|accountpage|print|download|order\/view|order_id|\/order\/\d|reorder/i;
+    const cand = new Map([[S.home, 'My Account'], ...S.defaults]);
     hd.querySelectorAll('a[href]').forEach(a => {
       let u; try { u = new URL(a.getAttribute('href'), S.base); } catch (e) { return; }
       if (u.host != new URL(S.base).host) return;
       const label = clean(a.textContent), key = u.pathname + u.search;
-      if (!(want.test(label) || want.test(u.pathname)) || skip.test(label) || skip.test(u.pathname) || u.pathname.replace(/\/$/, '') == S.home.replace(/\/$/, '')) return;
+      if (!(want.test(label) || want.test(u.pathname)) || skip.test(label) || skip.test(u.pathname) || u.pathname.replace(/\/$/, '') == S.home.replace(/\/$/, '') || /^[\d.…\s<>«»]*$/.test(label)) return;
       if (!cand.has(key) && cand.size < 12) cand.set(key, label.slice(0, 40) || key.slice(0, 40));
     });
     note(S.key, 'My Account links: ' + [...cand].map(([k, v]) => v + ' -> ' + k.slice(0, 70)).join(' ; '));
@@ -281,35 +298,45 @@
       if (/sales\/order\/history/.test(path) && !/limit=/.test(path)) url += (path.includes('?') ? '&' : '?') + 'limit=50';
       const rec = { path, label, status: 0, tables: [], pagesRead: 0 };
       out.pages.push(rec);
-      while (url && pgN < 9) {
+      while (url && pgN < 15) {
         pgN++;
         say(S.name + ': ' + label + (pgN > 1 ? ', page ' + pgN : '') + '…');
-        let r; try { r = await gm('GET', url); } catch (e) { rec.err = e.message; break; }
+        let r; try { r = pgN == 1 && path == S.home ? home : await gm('GET', url); } catch (e) { rec.err = e.message; break; }
         rec.status = r.status; rec.pagesRead = pgN;
         if (S.out(r)) { rec.err = 'went to the sign in page'; break; }
         if (r.status >= 400) { rec.err = 'came back ' + r.status; break; }
-        const d = doc(r.responseText), tb = tables(d);
+        if (/^%PDF/.test(r.responseText || '')) { rec.err = 'is a PDF'; break; }
+        const d = doc(r.responseText), tb = tables(d).concat(linkRows(d));
         if (pgN == 1) { rec.title = clean((d.querySelector('h1, .page-title') || {}).textContent || d.title).slice(0, 60); if (!tb.length) rec.sample = redact(mainText(d)).slice(0, 700); }
         let oldest = '';
         tb.forEach((t, k) => {
           const T = rec.tables[k] = rec.tables[k] || { heads: t.heads, n: 0, from: '', to: '', rows: [], firstRows: [] };
           t.rows.forEach(row => {
             T.n++;
-            const dt = parseDate(row.c.join(' | '));
+            const line = row.c.join(' | '), dt = parseDate(line, S.mdy);
+            // a statement for the month, as a PDF to send with the bundle
+            if (/download|statement|\.pdf/i.test(line + ' ' + row.a.join(' ')) && monthOf(line) == month && row.a[0]) { const u = new URL(row.a[0], S.base).href; if (!out.statements.some(x => x.url == u)) out.statements.push({ url: u, name: S.name + '-statement-' + month + (out.statements.length ? '-' + (out.statements.length + 1) : '') + '.pdf' }); }
             if (T.firstRows.length < 2) T.firstRows.push(redact(row.c.join(' | ')).slice(0, 220) + (row.a[0] ? '  -> ' + pathOf(row.a[0], S.base).slice(0, 70) : ''));
             if (!dt) return;
             if (!T.from || dt < T.from) T.from = dt; if (!T.to || dt > T.to) T.to = dt;
             if (!oldest || dt < oldest) oldest = dt;
             if (dt.slice(0, 7) != month) return;
-            const link = row.a.find(h => /view|detail|order_id|\/order\/|invoice|print|show/i.test(h)) || row.a[0] || '';
+            const link = row.a.find(h => /view|detail|order_id|\/order\/|invoice|show/i.test(h) && !/print|download|pdf/i.test(h)) || row.a.find(h => !/print|download|pdf/i.test(h)) || '';
             if (T.rows.length < 250) T.rows.push(row.c.filter(Boolean).join(' | '));
             if (link && detailLinks.size < 80) { const u = new URL(link, S.base).href; if (!detailLinks.has(u)) detailLinks.set(u, { url: u, row: row.c.filter(Boolean).join(' | ').slice(0, 120), from: label }); }
           });
         });
         // next page only while the rows haven't gone past the start of the month
         const nx = d.querySelector('a.next, li.pages-item-next a, .pagination-next a, li.next a, a[title="Next"], a[rel="next"]') || [...d.querySelectorAll('a[href]')].find(a => /^next\b/i.test(clean(a.textContent)));
-        const nh = nx && nx.getAttribute('href');
-        url = nh && !/^(#|javascript)/i.test(nh) && oldest && oldest >= start ? new URL(nh, url).href : '';
+        let nh = nx && nx.getAttribute('href');
+        if (!nh || /^(#|javascript)/i.test(nh)) {
+          // no Next link: look for this page's own address with the next page number on it (Tradezone counts p from 1, CNW page from 0)
+          nh = '';
+          const cur = new URL(url), pagers = [];
+          d.querySelectorAll('a[href]').forEach(a => { let u; try { u = new URL(a.getAttribute('href'), url); } catch (e) { return; } if (u.host != cur.host || u.pathname != cur.pathname) return; ['p', 'page'].forEach(k => { if (!u.searchParams.has(k)) return; pagers.push(u.search); const now = cur.searchParams.has(k) ? +cur.searchParams.get(k) : (k == 'p' ? 1 : 0); if (!nh && +u.searchParams.get(k) == now + 1) nh = u.href; }); });
+          if (pgN == 1 && pagers.length) note(S.key, label + ' page links: ' + [...new Set(pagers)].slice(0, 4).join(' '));
+        }
+        url = nh && oldest && oldest >= start ? new URL(nh, url).href : '';
       }
     }
     // open each row from the month for its lines
@@ -319,14 +346,20 @@
       const r = await gm('GET', x.url);
       if (S.out(r)) { x.err = 'went to the sign in page'; return; }
       if (r.status >= 400) { x.err = 'came back ' + r.status; return; }
+      if (/^%PDF/.test(r.responseText || '')) { x.err = 'is a PDF'; return; }
       const d = doc(r.responseText), text = mainText(d);
       x.title = clean((d.querySelector('h1, .page-title') || {}).textContent || '').slice(0, 70);
       x.refs = refs(text); x.totals = totals(text);
-      x.tables = tables(d).map(t => ({ heads: t.heads, rows: t.rows.slice(0, 80).map(rw => rw.c.filter(Boolean).join(' | ')) }));
+      x.tables = tables(d).filter(t => !/credit card|card number/i.test(t.heads.join(' '))).map(t => ({ heads: t.heads, rows: t.rows.slice(0, 80).map(rw => rw.c.filter(Boolean).join(' | ')).filter(Boolean) }));
       if (!x.tables.length || !debug[S.key + 'Detail']) { const s = redact(text).slice(0, 900); if (!debug[S.key + 'Detail']) debug[S.key + 'Detail'] = s; if (!x.tables.length) x.sample = s.slice(0, 400); }
       say(S.name + ': order ' + (++done) + ' of ' + list.length + '…');
     });
     out.details = list;
+    // the month's statement PDFs, kept for Send file
+    for (const st of out.statements) {
+      say(S.name + ': statement…');
+      try { const r = await gm('GET', st.url, null, false, true); if (r.status == 200 && r.response && r.response.size > 500) st.blob = r.response; else st.err = 'came back ' + r.status; } catch (e) { st.err = e.message; }
+    }
     return out;
   }
 
@@ -342,9 +375,9 @@
       L.push('inv | date | status | type | ex GST | JN | task | client | description');
       A.invoices.sort((a, b) => a.d < b.d ? -1 : 1).forEach(i => L.push([i.n, i.d, i.st, i.ty, money(i.ex), i.jn, i.tn.slice(0, 50), i.cl.slice(0, 30), i.desc].join(' | ')));
       L.push('', '== JOBS behind those invoices (' + A.jobs.length + ') ==');
-      L.push('JN | task | client | cust order no | status | type | labour hrs (all time) | materials cost (AroFlo) | expenses | invoiced this month | invoiced all time (count) | other invoices');
+      L.push('JN | task | client | cust order no | status | type | labour hrs (all time) | total cost ex (AroFlo) | materials | expenses | sell ex | POs | invoiced this month | invoiced all time (count) | other invoices');
       A.jobs.sort((a, b) => String(a.jn).localeCompare(String(b.jn))).forEach(j => L.push(j.err && j.hrs == null ? ['JN ' + j.jn, j.tn.slice(0, 50), j.cl, 'COULDN\'T READ: ' + j.err, 'invoiced this month ' + money(j.month)].join(' | ')
-        : ['JN ' + j.jn, j.tn.slice(0, 50), j.cl.slice(0, 30), j.on, j.st, j.ty, j.hrs == null ? '?' : j.hrs, money(j.mat), j.exp, money(j.month), money(j.all) + ' (' + j.allN + ')', (j.others || []).join(', ')].join(' | ')));
+        : ['JN ' + j.jn, j.tn.slice(0, 50), j.cl.slice(0, 30), j.on, j.st, j.ty, j.hrs == null ? '?' : j.hrs, money(j.mat), money(j.mats), j.exp, money(j.sell), j.pos, money(j.month), money(j.all) + ' (' + j.allN + ')', (j.others || []).join(', ')].join(' | ')));
     }
     sup.forEach(({ S, T }) => {
       const NM = S.name.toUpperCase();
@@ -354,10 +387,11 @@
         if (!pg.tables.length && pg.sample) L.push('   no tables. Page says: ' + pg.sample);
         pg.tables.forEach((t, k) => {
           L.push('   table ' + (k + 1) + ': ' + t.n + ' rows, dated ' + (t.from || '?') + ' to ' + (t.to || '?') + ', ' + t.rows.length + ' in ' + month + '. Columns: ' + t.heads.join(' | '));
-          if (!t.rows.length) t.firstRows.forEach(r => L.push('   e.g. ' + r));
+          t.firstRows.forEach(r => L.push('   e.g. ' + r));
           t.rows.forEach(r => L.push('   ' + r));
         });
       });
+      T.statements.forEach(st => L.push('-- statement for ' + month + ': ' + (st.blob ? 'PDF kept, goes with Send file as ' + st.name : 'couldn\'t fetch it (' + st.err + ')')));
       L.push('', '== ' + NM + ' orders opened (' + T.details.length + ') ==');
       T.details.forEach(x => {
         L.push('-- ' + x.row + (x.title ? ' ["' + x.title + '"]' : '') + (x.err ? ' COULDN\'T READ: ' + x.err : ''));
@@ -386,7 +420,7 @@
 #wre-mp .btn:disabled{opacity:.5}
 #wre-mp .msg{font-size:13px;color:#444;min-height:18px;margin-bottom:10px;word-break:break-word}
 #wre-mp textarea{width:100%;height:120px;font:11px ui-monospace,monospace;box-sizing:border-box;display:none;margin-top:8px}`;
-  let box, last = GM_getValue('mpLast', '');
+  let box, last = GM_getValue('mpLast', ''), pdfs = [];
   async function copy(text) {
     // the browser's own copy first: on the iPhone Tampermonkey's one says it worked when nothing was copied (10/11)
     try { await navigator.clipboard.writeText(text); return true; } catch (e) {}
@@ -422,6 +456,8 @@
       const name = 'wre-month-pull-' + ((last.match(/^WRE month pull (\d{4}-\d{2})/) || [])[1] || 'bundle') + '.txt';
       try {
         const f = new File([last], name, { type: 'text/plain' });
+        const all = [f].concat(pdfs.map(x => new File([x.blob], x.name, { type: 'application/pdf' })));
+        if (all.length > 1 && navigator.canShare && navigator.canShare({ files: all })) { await navigator.share({ files: all }); return say('Sent, with ' + pdfs.length + ' statement PDF' + (pdfs.length > 1 ? 's' : '') + '. Attach or share them to Claude.'); }
         if (navigator.canShare && navigator.canShare({ files: [f] })) { await navigator.share({ files: [f] }); return say('Sent. Attach or share that file to Claude.'); }
       } catch (e) { if (e && e.name == 'AbortError') return; }
       try {
@@ -437,8 +473,9 @@
       if (box.querySelector('.af').checked) { try { A = await pullAroflo(month, say); } catch (e) { errs.push('AroFlo: ' + e.message); note('af', e.message); } }
       for (const S of SUPS) { if (!box.querySelector('.' + S.key).checked) continue; try { sup.push({ S, T: await pullSupplier(S, month, say) }); } catch (e) { errs.push(S.name + ': ' + e.message); note(S.key, e.message); } }
       last = bundle(month, A, sup, errs); GM_setValue('mpLast', last);
+      pdfs = sup.flatMap(x => x.T.statements.filter(st => st.blob));
       go.disabled = false;
-      say((errs.length ? errs.join('. ') + '. ' : '') + 'Done in ' + Math.round((Date.now() - t0) / 1000) + ' sec' + (A ? ', ' + A.invoices.length + ' invoices, ' + A.jobs.length + ' jobs' : '') + sup.map(x => ', ' + x.T.details.length + ' ' + x.S.name + ' orders').join('') + '. Tap Copy and paste it to Claude.');
+      say((errs.length ? errs.join('. ') + '. ' : '') + 'Done in ' + Math.round((Date.now() - t0) / 1000) + ' sec' + (A ? ', ' + A.invoices.length + ' invoices, ' + A.jobs.length + ' jobs' : '') + sup.map(x => ', ' + x.T.details.length + ' ' + x.S.name + ' orders').join('') + (pdfs.length ? ', ' + pdfs.length + ' statement PDF' + (pdfs.length > 1 ? 's' : '') : '') + '. Tap Send file' + (pdfs.length ? ' (the statements only go that way)' : ' or Copy') + '.');
     };
   }
   const ready = () => { if (document.body && !document.getElementById('wre-mp-btn')) build(); };
