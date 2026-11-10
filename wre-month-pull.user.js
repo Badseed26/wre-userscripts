@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         WRE month pull
 // @namespace    wre
-// @version      0.9
+// @version      0.10
 // @description  One tap on the AroFlo home page pulls a month's job numbers for Claude's monthly report: invoices dated that month, each job's labour hours and materials at cost, and that month's Tradezone and CNW account history. Read only. Copy the bundle and paste it to Claude.
 // @match        https://office.aroflo.com/ims/Site/Home/*
 // @grant        GM_xmlhttpRequest
@@ -22,7 +22,7 @@
   // Live updates (23/10): Tampermonkey only checks for a new version every few hours. This checks the repo's latest commit every
   // 2 min (free when nothing's changed) and keeps the newest code here, so a push runs on the next page load. If the new code needs
   // a permission this install hasn't got, or this browser won't run it, the built in copy below runs like before.
-  const __wreName = "wre-month-pull", __wreVer = "0.9", __wreHave = new Set(["// @connect api.github.com", "// @connect raw.githubusercontent.com", "// @connect shop.cnw.com.au", "// @connect www.tradezone.com.au", "// @grant GM_getValue", "// @grant GM_setClipboard", "// @grant GM_setValue", "// @grant GM_xmlhttpRequest", "// @match https://office.aroflo.com/ims/Site/Home/*", "// @run-at document-idle"]);
+  const __wreName = "wre-month-pull", __wreVer = "0.10", __wreHave = new Set(["// @connect api.github.com", "// @connect raw.githubusercontent.com", "// @connect shop.cnw.com.au", "// @connect www.tradezone.com.au", "// @grant GM_getValue", "// @grant GM_setClipboard", "// @grant GM_setValue", "// @grant GM_xmlhttpRequest", "// @match https://office.aroflo.com/ims/Site/Home/*", "// @run-at document-idle"]);
   const __wreInfo0 = typeof GM_info != 'undefined' ? GM_info : null;
   const __wreSay = m => { try { console.log('[WRE live update] ' + __wreName + ': ' + m); } catch (e) {} };
   const __wreCmp = (a, b) => { const x = String(a).split('.').map(Number), y = String(b).split('.').map(Number); for (let i = 0; i < Math.max(x.length, y.length); i++) { const d = (x[i] || 0) - (y[i] || 0); if (d) return d; } return 0; };
@@ -73,7 +73,7 @@
   }
   if (window.top === window.self) { __wreCheck(); setInterval(__wreCheck, 2 * 60e3 + 5000); }
   if (__wreLive()) return;
-  // ---------- the built in copy (src/wre-month-pull.js at 0.9) ----------
+  // ---------- the built in copy (src/wre-month-pull.js at 0.10) ----------
 
 (function () {
   'use strict';
@@ -92,7 +92,7 @@
       out: r => /customer\/account\/login/.test((r && r.finalUrl) || '') },
     { name: 'CNW', key: 'cnw', base: 'https://shop.cnw.com.au', home: '/my-account', defaults: [['/my-account/orders', 'Order history (tried by default)'], ['/my-account/invoices', 'Invoices (tried by default)']],
       mdy: true, // CNW writes dates month first (11/09/26 is 9 Nov)
-      par: 10, // CNW's order pages are slow, so more are opened at once (0.9)
+      par: 4, poCol: 1, lite: true, // CNW's order pages are slow and come back one at a time, so only the ones without a PO number are opened (0.10)
       skipHome: true, // its My Account page repeats the newest orders under other numbers, which doubled them up
       out: r => /\/login\b/.test((r && r.finalUrl) || '') || /<body[^>]*class="[^"]*\blogged-out\b/i.test((r && r.responseText) || '') },
   ];
@@ -103,7 +103,7 @@
     .replace(/(\+?61\s?|0)[2-478](\s?\d){8}\b/g, '[phone]')
     .replace(/\b[A-Za-z0-9_\-]{36,}\b/g, '[long]');
   const money = n => (Math.round((+n || 0) * 100) / 100).toFixed(2);
-  const debug = { v: '0.9', af: [], tz: [], cnw: [] };
+  const debug = { v: '0.10', af: [], tz: [], cnw: [] };
   const note = (k, m) => { debug[k].push(clean(m).slice(0, 300)); };
 
   function gm(method, url, data, json, blob) {
@@ -321,7 +321,7 @@
   }
   const totals = text => (text.match(/(?:sub\s?total|grand total|total(?: ex(?:cl)?\.?(?: gst)?| inc(?:l)?\.?(?: gst)?)?|gst|freight|shipping)[^$\d]{0,12}\$\s?[\d,]+\.\d{2}/gi) || []).slice(0, 6).map(clean);
 
-  async function pullSupplier(S, month, say) {
+  async function pullSupplier(S, month, say, allLines) {
     const out = { pages: [], details: [], statements: [], err: '' };
     const start = month.from;
     say(S.name + ': opening My Account…');
@@ -371,7 +371,7 @@
             if (!month.has(dt)) return;
             const link = row.a.find(h => /view|detail|order_id|\/order\/|invoice|show/i.test(h) && !/print|download|pdf/i.test(h)) || row.a.find(h => !/print|download|pdf/i.test(h)) || '';
             if (T.rows.length < 3000) T.rows.push(row.c.filter(Boolean).join(' | '));
-            if (link && detailLinks.size < 600) { const u = new URL(link, S.base).href; if (!detailLinks.has(u)) detailLinks.set(u, { url: u, row: row.c.filter(Boolean).join(' | ').slice(0, 120), from: label }); }
+            if (link && detailLinks.size < 600) { const u = new URL(link, S.base).href; if (!detailLinks.has(u)) detailLinks.set(u, { url: u, row: row.c.filter(Boolean).join(' | ').slice(0, 120), from: label, po: S.poCol != null ? clean(row.c[S.poCol] || '') : '' }); }
           });
         });
         // next page only while the rows haven't gone past the start of the month
@@ -390,7 +390,12 @@
     // open each row from the month for its lines
     const list = [...detailLinks.values()];
     let done = 0;
-    await pool(list, S.par || 4, async x => {
+    // 0.10: CNW answers one order page at a time however many are asked for, so its pages are only opened where they add something:
+    // an order with a PO number already ties to its job through AroFlo's PO list. Orders with no PO, STOCK or a name still get opened.
+    const open = S.lite && !allLines ? list.filter(x => !/^0*\d{3,6}$/.test(x.po)) : list;
+    list.forEach(x => { if (!open.includes(x)) x.skipped = true; });
+    if (open.length < list.length) note(S.key, 'opened ' + open.length + ' of ' + list.length + ' orders (the rest have a PO number)');
+    await pool(open, S.par || 4, async x => {
       const r = await gm('GET', x.url);
       if (S.out(r)) { x.err = 'went to the sign in page'; return; }
       if (r.status >= 400) { x.err = 'came back ' + r.status; return; }
@@ -401,7 +406,7 @@
       if (S.key == 'cnw') { const k = text.search(/Order Information|Order Details/); x.text = redact(k >= 0 ? text.slice(k) : text).slice(0, 3000); }
       x.tables = tables(d).filter(t => !/credit card|card number/i.test(t.heads.join(' '))).map(t => ({ heads: t.heads, rows: t.rows.slice(0, 80).map(rw => rw.c.filter(Boolean).join(' | ')).filter(x => x && !/^Qty (Picking|Backordered)\b/.test(x)) }));
       if (!x.tables.length || !debug[S.key + 'Detail']) { const s = redact(text).slice(0, 900); if (!debug[S.key + 'Detail']) debug[S.key + 'Detail'] = s; if (!x.tables.length) x.sample = s.slice(0, 400); }
-      say(S.name + ': order ' + (++done) + ' of ' + list.length + '…');
+      say(S.name + ': order ' + (++done) + ' of ' + open.length + '…');
     });
     out.details = list;
     // the month's statement PDFs, kept for Send file
@@ -457,7 +462,7 @@
       T.statements.forEach(st => L.push('-- statement for ' + st.ym + ': ' + (st.blob ? 'PDF kept, goes with Send file as ' + st.name : 'couldn\'t fetch it (' + st.err + ')')));
       L.push('', '== ' + NM + ' orders opened (' + T.details.length + ') ==');
       T.details.forEach(x => {
-        L.push('-- ' + x.row + (x.title ? ' ["' + x.title + '"]' : '') + (x.err ? ' COULDN\'T READ: ' + x.err : ''));
+        L.push('-- ' + x.row + (x.title ? ' ["' + x.title + '"]' : '') + (x.skipped ? ' | [not opened, has a PO number]' : '') + (x.err ? ' COULDN\'T READ: ' + x.err : ''));
         if (x.refs && x.refs.length) L.push('   refs: ' + x.refs.join(' ; '));
         if (x.totals && x.totals.length) L.push('   totals: ' + x.totals.join(' ; '));
         (x.tables || []).forEach(t => { if (t.heads.length) L.push('   cols: ' + t.heads.join(' | ')); t.rows.forEach(r => L.push('   ' + r)); });
@@ -511,6 +516,7 @@
 <div class="row"><select class="rg">${Object.keys(RANGES).map(k => `<option value="${k}">${RANGES[k][0]}</option>`).join('')}</select></div>
 <div class="row"><input type="date" class="d1" value="${iso(RANGES.last[1])}"><input type="date" class="d2" value="${iso(RANGES.last[2])}"></div>
 <div class="row"><label><input type="checkbox" class="af" checked> AroFlo</label><label><input type="checkbox" class="tz" checked> Tradezone</label><label><input type="checkbox" class="cnw" checked> CNW</label></div>
+<div class="row"><label><input type="checkbox" class="cnwall"> Item lines on every CNW order (slow)</label></div>
 <div class="msg">Read only. Pulls the range, then you send the file to Claude. A long range takes a few minutes: keep this page open and the screen on.</div>
 <div class="row"><button class="btn go" style="flex:1">Pull</button><button class="btn grey cp">Copy</button><button class="btn grey sh">Send file</button></div>
 <textarea readonly></textarea></div>`;
@@ -551,7 +557,7 @@
       go.disabled = true; debug.af = []; debug.tz = []; debug.cnw = []; delete debug.afInvoice; delete debug.afTask; delete debug.afProbe; delete debug.tzDetail; delete debug.cnwDetail;
       const errs = [], sup = []; let A = null; const t0 = Date.now();
       if (box.querySelector('.af').checked) { try { A = await pullAroflo(month, say); } catch (e) { errs.push('AroFlo: ' + e.message); note('af', e.message); } }
-      for (const S of SUPS) { if (!box.querySelector('.' + S.key).checked) continue; try { sup.push({ S, T: await pullSupplier(S, month, say) }); } catch (e) { errs.push(S.name + ': ' + e.message); note(S.key, e.message); } }
+      for (const S of SUPS) { if (!box.querySelector('.' + S.key).checked) continue; try { sup.push({ S, T: await pullSupplier(S, month, say, box.querySelector('.cnwall').checked) }); } catch (e) { errs.push(S.name + ': ' + e.message); note(S.key, e.message); } }
       last = bundle(month, A, sup, errs); try { GM_setValue('mpLast', last.length < 900000 ? last : ''); } catch (e) {}
       pdfs = sup.flatMap(x => x.T.statements.filter(st => st.blob));
       go.disabled = false;
